@@ -1,6 +1,5 @@
 #include "cluster/namespace.h"
 #include "cluster/partition.h"
-#include "coproc/reference_window_consumer.hpp"
 #include "coproc/script_manager.h"
 #include "coproc/tests/coprocessor.h"
 #include "coproc/tests/supervisor_test_fixture.h"
@@ -26,14 +25,8 @@ class redpanda_plus_supervisor_fixture
   , public supervisor_test_fixture {
 public:
     redpanda_plus_supervisor_fixture()
-      : redpanda_thread_fixture(enable_coproc_opts())
+      : redpanda_thread_fixture()
       , supervisor_test_fixture() {}
-
-    redpanda_thread_fixture_opts enable_coproc_opts() {
-        redpanda_thread_fixture_opts opts;
-        opts.enable_coproc = true;
-        return opts;
-    }
 
     template<typename CoprocessorType>
     bool add_and_register_coprocessor(uint32_t sid, simple_input_set&& sis) {
@@ -46,7 +39,7 @@ public:
           rpc::transport_configuration{
             .server_addr = ss::socket_address(
               ss::net::inet_address("127.0.0.1"), 43118),
-            .credentials = std::nullopt});
+            .credentials = nullptr});
         client.connect().get();
         const auto resp = client
                             .enable_copros(
@@ -82,7 +75,11 @@ public:
                       .consume(
                         kafka::kafka_batch_serializer{}, model::no_timeout)
                       .then([](kafka::kafka_batch_serializer::result res) {
-                          /// TODO: Check crc
+                          // TODO(Rob) crc checks
+                          // auto& [res, kafka_crc_check] = result;
+                          // if (!kafka_crc_check) {
+                          //     return std::optional<iobuf>(std::nullopt);
+                          // }
                           return std::optional<iobuf>(std::move(res.data));
                       });
                 });
@@ -105,7 +102,7 @@ FIXTURE_TEST(
         using namespace storage;
         storage::disk_log_builder builder(log_config);
         storage::ntp_config ntp_cfg(
-          ntp, log_config.base_dir, nullptr, storage::ntp_config::ntp_id(2));
+          ntp, log_config.base_dir, nullptr, model::revision_id(2));
         builder | start(std::move(ntp_cfg)) | add_segment(model::offset(0))
           | add_random_batch(
             model::offset(0),
@@ -145,7 +142,7 @@ FIXTURE_TEST(
     // Connect a kafka client to the expected output topic
     kafka::fetch_request req;
     req.max_bytes = std::numeric_limits<int32_t>::max();
-    req.min_bytes = min_expected_bytes; // At LEAST 'bytes_written' in src topic
+    req.min_bytes = 1; // At LEAST 'bytes_written' in src topic
     req.max_wait_time = 2s;
     req.topics = {
       {.name = materialized_topic,

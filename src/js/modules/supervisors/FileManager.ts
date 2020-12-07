@@ -8,7 +8,7 @@
  * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
  */
 
-import * as Inotify from "inotifywait";
+import { FSWatcher, watch } from "chokidar";
 import { rename, readdir } from "fs";
 import { promisify } from "util";
 import Repository from "./Repository";
@@ -18,14 +18,22 @@ import { Coprocessor, PolicyInjection } from "../public/Coprocessor";
 import { Script_ManagerClient as ManagementClient } from "../rpc/serverAndClients/server";
 import * as path from "path";
 import { hash64 } from "xxhash";
+import {
+  EnableResponseCode as EnableCode,
+  validateDisableResponseCode,
+  validateEnableResponseCode,
+} from "./HandleError";
 
 /**
  * FileManager class is an inotify implementation, it receives a
  * Repository and updates this object when to  add a new file in
- * submit directory and read previous files from the active directory when
+ * submit folder and read previous files from the active folder when
  * this class is instanced
  */
 class FileManager {
+  private submitDirWatcher: FSWatcher;
+  private activeDirWatcher: FSWatcher;
+
   constructor(
     private repository: Repository,
     private submitDir: string,
@@ -34,9 +42,9 @@ class FileManager {
     public managementClient: ManagementClient
   ) {
     try {
-      this.watcher = new Inotify(this.submitDir);
-      this.readActiveCoprocessor(repository);
-      this.updateRepositoryOnNewFile(repository);
+      this.readCoprocessorFolder(repository, this.activeDir, false)
+        .then(() => this.readCoprocessorFolder(repository, this.submitDir))
+        .then(() => this.startWatchers(repository));
     } catch (e) {
       console.error(e);
       //TODO: implement winston for loggin information and error handler
@@ -49,10 +57,7 @@ class FileManager {
    * @param filePath, path of a coprocessor that we want to load and add to
    *        Repository
    * @param repository, coprocessor container
-   * @param validatePrevCoprocessor, this flag is used for validation or not, if
-   *              there is a coprocessor in Repository with the same
-   *              global Id and different checksum, it will decide if id should
-   *              update coprocessor or move the file to the inactive folder.
+   * @param validatePrevCoprocessor
    */
   addCoprocessor(
     filePath: string,
@@ -60,74 +65,119 @@ class FileManager {
     validatePrevCoprocessor = true
   ): Promise<Handle> {
     return this.getHandle(filePath).then((handle) => {
-      const preCoprocessor = repository.findByGlobalId(handle);
-      if (preCoprocessor && validatePrevCoprocessor) {
-        if (preCoprocessor.checksum === handle.checksum) {
+      const prevHandle = repository.findByGlobalId(handle);
+      if (prevHandle) {
+        if (prevHandle.checksum === handle.checksum) {
           return this.moveCoprocessorFile(handle, this.inactiveDir);
         } else {
-          return this.moveCoprocessorFile(preCoprocessor, this.inactiveDir)
-            .then(() => repository.remove(preCoprocessor))
+          return this.moveCoprocessorFile(prevHandle, this.inactiveDir)
+            .then(() =>
+              this.deregisterCoprocessor(prevHandle.coprocessor).catch((e) => {
+                console.error(e.message);
+                return Promise.resolve();
+              })
+            )
             .then(() => this.moveCoprocessorFile(handle, this.activeDir))
-            .then((newCoprocessor) => repository.add(newCoprocessor));
+            .then((newHandle) => repository.add(newHandle))
+            .then((newHandle) =>
+              this.enableCoprocessor(
+                [newHandle.coprocessor],
+                validatePrevCoprocessor
+              )
+                .then(() => newHandle)
+                .catch((error) =>
+                  this.moveCoprocessorFile(newHandle, this.inactiveDir)
+                    .then(() => this.repository.remove(newHandle))
+                    .then(() => Promise.reject(error))
+                )
+            );
         }
       } else {
         return this.moveCoprocessorFile(handle, this.activeDir)
           .then((newHandle) => repository.add(newHandle))
           .then((newHandle) =>
-            this.enableCoprocessor([newHandle.coprocessor]).then(
-              () => newHandle
+            this.enableCoprocessor(
+              [newHandle.coprocessor],
+              validatePrevCoprocessor
             )
+              .then(() => newHandle)
+              .catch((errors) =>
+                this.moveCoprocessorFile(newHandle, this.inactiveDir)
+                  .then(() => this.repository.remove(newHandle))
+                  .then(() => Promise.reject(errors))
+              )
           );
       }
     });
   }
 
   /**
-   * reads the files in the "active" folder, loads them as Handles
+   * reads the files in the given folder, loads them as Handles
    * and adds them to the given Repository
    * @param repository
+   * @param folder
+   * @param validatePrevExist
    */
-  readActiveCoprocessor(repository: Repository): void {
+  readCoprocessorFolder(
+    repository: Repository,
+    folder: string,
+    validatePrevExist = true
+  ): Promise<void> {
     const readdirPromise = promisify(readdir);
-    readdirPromise(this.activeDir)
-      .then((files) => {
-        files.forEach((file) =>
-          this.addCoprocessor(`${this.activeDir}/${file}`, repository, false)
-        );
-      })
-      .catch(console.error);
+    return readdirPromise(folder).then((files) => {
+      files.forEach((file) =>
+        this.addCoprocessor(
+          path.join(folder, file),
+          repository,
+          validatePrevExist
+        ).catch((e) => console.error(e.message))
+      );
+    });
     //TODO: implement winston for loggin information and error handler
   }
 
   /**
-   * Updates the given Repository instance when a new coprocessor
-   * file is added.
+   * Updates the given Repository instance when a coprocessor is removed
+   * from folder.
+   * @param filePath, removed handle path
    * @param repository, is a coprocessor container
    */
-  updateRepositoryOnNewFile(repository: Repository): void {
-    return this.watcher.on("add", (filePath) => {
-      this.addCoprocessor(filePath, repository).catch(console.error);
-      //TODO: implement winston for logging information and error handler
-    });
+  removeHandleFromFilePath(
+    filePath: string,
+    repository: Repository
+  ): Promise<void> {
+    const name = path.basename(filePath, ".js");
+    const id = hash64(Buffer.from(name), 0).readBigUInt64LE();
+    const [handle] = repository.getHandlesByCoprocessorIds([id]);
+    if (!handle) {
+      console.error(
+        "error: trying to disable a removed coprocessor from " +
+          "'active' folder but it wasn't loaded in memory, file name " +
+          `${name}.js`
+      );
+      return Promise.resolve();
+    } else {
+      return this.disableCoprocessors([handle.coprocessor])
+        .then(() => this.repository.remove(handle))
+        .then(() =>
+          console.log(
+            `disabled coprocessor: ID ${handle.coprocessor.globalId} ` +
+              `filename: '${name}.js'`
+          )
+        )
+        .catch((error) => console.log(error.message));
+    }
   }
 
   /**
    * allow closing the inotify process
    */
-  close = (): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      try {
-        this.watcher.close();
-        return resolve();
-      } catch (e) {
-        reject(e);
-      }
-    });
-  };
+  close = (): Promise<void> =>
+    this.submitDirWatcher.close().then(this.activeDirWatcher.close);
 
   /**
    * Deregister the given Coprocessor and move the file where it's defined to
-   * the 'inactive' directory.
+   * the 'inactive' folder.
    * @param coprocessor is a Coprocessor implementation.
    */
   deregisterCoprocessor(coprocessor: Coprocessor): Promise<Handle> {
@@ -149,39 +199,34 @@ class FileManager {
   }
 
   /**
+   * receive an Error array, and return one error with all error messages.
+   * @param errors
+   */
+  compactErrors(errors: Error[][]): Error {
+    const message = errors
+      .flatMap((error) => error.map(({ message }) => message))
+      .join(", ");
+    return new Error(message);
+  }
+
+  /**
    * Receives a coprocessor list, and sends a request to Redpanda for disabling
    * them. The response has the following structure:
    * [<topic status>]
    *
    * Possible coprocessor statuses:
    *   0 = success
-   *   1 = topic never enabled
-   *   2 = invalid coprocessor
-   *   3 = materialized coprocessor
-   *   4 = internal error
-   * @param coprocessor
-   * @param validateNeverEnabled
+   *   1 = internal error
+   *   2 = script doesn't exist
+   * @param coprocessors
    */
-  disableCoprocessors(
-    coprocessor: Coprocessor[],
-    validateNeverEnabled = true
-  ): Promise<void> {
+  disableCoprocessors(coprocessors: Coprocessor[]): Promise<void> {
     return this.managementClient
-      .disable_copros({ inputs: coprocessor.map((coproc) => coproc.globalId) })
-      .then((disableResponse) => {
-        const isValid = (condition: (n: number) => boolean) =>
-          disableResponse.inputs.find(condition);
-        const condition = validateNeverEnabled
-          ? (coproc) => coproc > 0
-          : (coproc) => coproc > 1;
-        const invalidCoprocessor = isValid(condition);
-        if (invalidCoprocessor > 0) {
-          return Promise.reject(
-            new Error(
-              "Is not possible to disable coprocessors with ids: " +
-                invalidCoprocessor
-            )
-          );
+      .disable_copros({ inputs: coprocessors.map((coproc) => coproc.globalId) })
+      .then((response) => {
+        const errors = validateDisableResponseCode(response, coprocessors);
+        if (errors.length > 0) {
+          return Promise.reject(this.compactErrors([errors]));
         } else {
           return Promise.resolve();
         }
@@ -195,17 +240,18 @@ class FileManager {
    *
    * Possible topic statuses:
    *   0 = success
-   *   1 = topic already enabled
-   *   2 = topic does not exist
-   *   3 = invalid coprocessor
-   *   4 = materialized coprocessor
-   *   5 = internal error
+   *   1 = internal error
+   *   2 = invalid ingestion policy
+   *   3 = script id already exist
+   *   4 = topic doesn't exist
+   *   5 = invalid topic
+   *   6 = materialized topic
    * @param coprocessors
-   * @param validateAlreadyEnabled
+   * @param validatePrevCoprocessor
    */
   enableCoprocessor(
     coprocessors: Coprocessor[],
-    validateAlreadyEnabled = false
+    validatePrevCoprocessor = true
   ): Promise<void> {
     if (coprocessors.length == 0) {
       return Promise.resolve();
@@ -221,21 +267,22 @@ class FileManager {
           })),
         })
         .then((enableResponse) => {
-          const isValid = (condition: (n: number) => boolean) =>
-            enableResponse.inputs.filter((coprocessorStatus) =>
-              coprocessorStatus.response.find(condition)
+          if (!validatePrevCoprocessor) {
+            enableResponse.inputs = enableResponse.inputs.map(
+              ({ response, id }) => ({
+                id,
+                response: response.filter(
+                  (code) => code !== EnableCode.scriptIdAlreadyExist
+                ),
+              })
             );
-          const condition = validateAlreadyEnabled
-            ? (coproc) => coproc > 0
-            : (coproc) => coproc > 2;
-          const invalidCoprocessor = isValid(condition);
-          if (invalidCoprocessor.length > 0) {
-            return Promise.reject(
-              new Error(
-                `Is not possible to enable coprocessors with ids:` +
-                  invalidCoprocessor.join(", ")
-              )
-            );
+          }
+          const errors = validateEnableResponseCode(
+            enableResponse,
+            coprocessors
+          );
+          if (errors.find((errors) => errors.length > 0)) {
+            return Promise.reject(this.compactErrors(errors));
           } else {
             return Promise.resolve();
           }
@@ -305,7 +352,25 @@ class FileManager {
     }));
   }
 
-  private watcher: Inotify;
+  /**
+   * add event listeners for:
+   * update file: updates the given Repository instance when a new coprocessor
+   * file is added.
+   * remove file: removes from given Repository instance the deleted coprocessor
+   * definition
+   *
+   * @param repository
+   */
+  private startWatchers(repository: Repository): void {
+    this.submitDirWatcher = watch(this.submitDir).on("add", (filePath) => {
+      this.addCoprocessor(filePath, repository).catch((e) =>
+        console.error(e.message)
+      );
+    });
+    this.activeDirWatcher = watch(this.activeDir).on("unlink", (filePath) =>
+      this.removeHandleFromFilePath(filePath, repository)
+    );
+  }
 }
 
 export default FileManager;

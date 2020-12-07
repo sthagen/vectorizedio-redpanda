@@ -7,7 +7,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-
 #include "cluster/commands.h"
 #include "cluster/partition_allocator.h"
 #include "cluster/simple_batch_builder.h"
@@ -18,6 +17,7 @@
 #include "model/metadata.h"
 #include "raft/types.h"
 #include "test_utils/fixture.h"
+#include "topic_table_fixture.h"
 #include "units.h"
 
 #include <seastar/core/abort_source.hh>
@@ -31,12 +31,6 @@
 #include <boost/test/tools/old/interface.hpp>
 
 using namespace std::chrono_literals;
-
-static std::unique_ptr<cluster::allocation_node>
-create_allocation_node(model::node_id nid, uint32_t cores) {
-    return std::make_unique<cluster::allocation_node>(
-      nid, cores, std::unordered_map<ss::sstring, ss::sstring>{});
-}
 
 struct cmd_test_fixture {
     cluster::topic_configuration_assignment make_tp_configuration(

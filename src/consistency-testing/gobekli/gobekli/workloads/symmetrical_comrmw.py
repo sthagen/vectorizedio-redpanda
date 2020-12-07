@@ -11,10 +11,12 @@ import asyncio
 import uuid
 import random
 import sys
+import json
 import logging
 import traceback
+from collections import defaultdict
 
-from gobekli.kvapi import RequestCanceled, RequestTimedout
+from gobekli.kvapi import RequestCanceled, RequestTimedout, RequestViolated
 from gobekli.consensus import Violation
 from gobekli.workloads.common import (AvailabilityStatLogger, Stat,
                                       LinearizabilityHashmapChecker)
@@ -64,7 +66,7 @@ class MWClient:
             data = response.record
             op_ended = loop.time()
             log_latency("ok", op_ended - self.started_at,
-                        op_ended - op_started, response.metrics)
+                        op_ended - op_started, self.node.idx, response.metrics)
             cmdlog.info(
                 m(type="write_ended",
                   node=self.node.name,
@@ -79,11 +81,10 @@ class MWClient:
                                     data.value)
 
             read_version = int(data.value.split(":")[1])
-            read_write_id = data.write_id
+            self.last_write_id = data.write_id
 
             if self.last_version < read_version:
                 self.last_version = read_version
-                self.last_write_id = read_write_id
 
             self.stat.inc(self.node.name + ":ok")
             self.stat.inc("all:ok")
@@ -92,7 +93,7 @@ class MWClient:
                 self.stat.inc(self.node.name + ":out")
                 op_ended = loop.time()
                 log_latency("out", op_ended - self.started_at,
-                            op_ended - op_started)
+                            op_ended - op_started, self.node.idx)
                 cmdlog.info(
                     m(type="write_timedout",
                       node=self.node.name,
@@ -113,7 +114,7 @@ class MWClient:
                 self.stat.inc(self.node.name + ":err")
                 op_ended = loop.time()
                 log_latency("err", op_ended - self.started_at,
-                            op_ended - op_started)
+                            op_ended - op_started, self.node.idx)
                 cmdlog.info(
                     m(type="write_canceled",
                       node=self.node.name,
@@ -135,6 +136,15 @@ class MWClient:
                       error_value=str(v),
                       stacktrace=traceback.format_exc()).with_time())
                 self.checker.abort()
+        except RequestViolated as e:
+            try:
+                self.checker.report_violation("internal violation: " +
+                                              json.dumps(e.info))
+            except Violation as e:
+                cmdlog.info(
+                    m(e.message,
+                      type="linearizability_violation",
+                      write_id=curr_write_id).with_time())
         except Violation as e:
             cmdlog.info(
                 m(e.message,
@@ -175,7 +185,7 @@ class MRClient:
             read = response.record
             op_ended = loop.time()
             log_latency("ok", op_ended - self.started_at,
-                        op_ended - op_started, response.metrics)
+                        op_ended - op_started, self.node.idx, response.metrics)
             if read == None:
                 cmdlog.info(
                     m(type="read_404",
@@ -199,7 +209,7 @@ class MRClient:
             try:
                 op_ended = loop.time()
                 log_latency("out", op_ended - self.started_at,
-                            op_ended - op_started)
+                            op_ended - op_started, self.node.idx)
                 self.stat.inc(self.node.name + ":out")
                 cmdlog.info(
                     m(type="read_timedout",
@@ -219,7 +229,7 @@ class MRClient:
             try:
                 op_ended = loop.time()
                 log_latency("err", op_ended - self.started_at,
-                            op_ended - op_started)
+                            op_ended - op_started, self.node.idx)
                 self.stat.inc(self.node.name + ".err")
                 cmdlog.info(
                     m(type="read_canceled",
@@ -235,6 +245,15 @@ class MRClient:
                       error_value=str(v),
                       stacktrace=traceback.format_exc()).with_time())
                 self.checker.abort()
+        except RequestViolated as e:
+            try:
+                self.checker.report_violation("internal violation: " +
+                                              json.dumps(e.info))
+            except Violation as e:
+                cmdlog.info(
+                    m(e.message,
+                      type="linearizability_violation",
+                      read_id=read_id).with_time())
         except Violation as e:
             cmdlog.info(
                 m(e.message, type="linearizability_violation",
@@ -310,14 +329,22 @@ class COMRMWWorkload:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
 
+        clients_by_endpoint = defaultdict(lambda: [])
+
         for key in keys:
             for kv in self.kv_nodes:
-                clients.append(MWClient(started_at, stat, checker, kv, key))
+                mwclient = MWClient(started_at, stat, checker, kv, key)
+                clients_by_endpoint[kv.address].append(mwclient)
                 for _ in range(0, self.numOfReaders):
-                    clients.append(MRClient(started_at, stat, checker, kv,
-                                            key))
+                    mrclient = MRClient(started_at, stat, checker, kv, key)
+                    clients_by_endpoint[kv.address].append(mrclient)
 
+        clients_groups = list(clients_by_endpoint.values())
+        group_idx = 0
         while checker.is_valid and (not checker.is_aborted) and self.is_active:
+            clients = clients_groups[group_idx]
+            group_idx = (group_idx + 1) % len(clients_groups)
+
             i = random.randint(0, len(clients) - 1)
             client = clients[i]
             # TODO: keep track of tasks and wait them in the end

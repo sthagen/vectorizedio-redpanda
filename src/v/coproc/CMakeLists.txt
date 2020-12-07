@@ -21,6 +21,7 @@ v_cc_library(
     logger.cc
     service.cc
     router.cc
+    router_source_manager.cc
   DEPS
     v::rpc
     v::model
@@ -37,10 +38,11 @@ rp_test(
     tests/script_manager_service_test.cc
     tests/supervisor.cc
     tests/coproc_test_fixture.cc
+    tests/router_test_fixture.cc
     tests/router_test.cc
     tests/utils.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
-  LIBRARIES v::seastar_testing_main v::coproc v::storage_test_utils
+  LIBRARIES v::seastar_testing_main v::coproc v::storage_test_utils v::application
   )
 
 rp_test(

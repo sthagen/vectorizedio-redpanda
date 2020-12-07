@@ -28,16 +28,23 @@ class RequestCanceled(Exception):
     pass
 
 
+class RequestViolated(Exception):
+    def __init__(self, info):
+        self.info = info
+        super().__init__()
+
+
 Record = namedtuple('Record', ['write_id', 'value'])
 Response = namedtuple('Response', ['record', 'metrics'])
 
 
 class KVNode:
-    def __init__(self, name, address):
+    def __init__(self, idx, name, address):
         timeout = aiohttp.ClientTimeout(total=10)
         self.session = aiohttp.ClientSession(timeout=timeout)
         self.address = address
         self.name = name
+        self.idx = idx
 
     async def get_aio(self, key, read_id):
         data = None
@@ -78,6 +85,8 @@ class KVNode:
             raise RequestTimedout()
         elif data["status"] == "fail":
             raise RequestCanceled()
+        elif data["status"] == "violation":
+            raise RequestViolated(data["info"])
         else:
             raise Exception(f"Unknown status: {data['status']}")
         return Response(record, data["metrics"])
@@ -125,6 +134,8 @@ class KVNode:
             raise RequestTimedout()
         elif data["status"] == "fail":
             raise RequestCanceled()
+        elif data["status"] == "violation":
+            raise RequestViolated(data["info"])
         else:
             raise Exception(f"Unknown status: {data['status']}")
         return Response(record, data["metrics"])
@@ -173,6 +184,8 @@ class KVNode:
             raise RequestTimedout()
         elif data["status"] == "fail":
             raise RequestCanceled()
+        elif data["status"] == "violation":
+            raise RequestViolated(data["info"])
         else:
             raise Exception(f"Unknown status: {data['status']}")
         return Response(record, data["metrics"])

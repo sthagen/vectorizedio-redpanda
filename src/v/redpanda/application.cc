@@ -43,6 +43,7 @@
 #include <sys/utsname.h>
 
 #include <chrono>
+#include <exception>
 #include <vector>
 
 int application::run(int ac, char** av) {
@@ -182,17 +183,25 @@ void application::configure_admin_server() {
     // configure admin API TLS
     if (conf.admin_api_tls().is_enabled()) {
         _admin
-          .invoke_on_all([](ss::http_server& server) {
+          .invoke_on_all([this](ss::http_server& server) {
               return config::shard_local_cfg()
                 .admin_api_tls()
                 .get_credentials_builder()
-                .then([&server](
+                .then([this, &server](
                         std::optional<ss::tls::credentials_builder> builder) {
                     if (!builder) {
                         return;
                     }
                     server.set_tls_credentials(
-                      builder->build_server_credentials());
+                      builder
+                        ->build_reloadable_server_credentials(
+                          [this](
+                            const std::unordered_set<ss::sstring>& updated,
+                            const std::exception_ptr& eptr) {
+                              cluster::log_certificate_reload_event(
+                                _log, "API TLS", updated, eptr);
+                          })
+                        .get0());
                 });
           })
           .get0();
@@ -208,10 +217,16 @@ void application::configure_admin_server() {
           conf.admin_api_doc_dir(), "/v1");
         _admin
           .invoke_on_all([this, rb](ss::http_server& server) {
+              auto insert_comma = [](ss::output_stream<char>& os) {
+                  return os.write(",\n");
+              };
               rb->set_api_doc(server._routes);
               rb->register_api_file(server._routes, "header");
               rb->register_api_file(server._routes, "config");
+              rb->register_function(server._routes, insert_comma);
               rb->register_api_file(server._routes, "raft");
+              rb->register_function(server._routes, insert_comma);
+              rb->register_api_file(server._routes, "kafka");
               ss::httpd::config_json::get_config.set(
                 server._routes, []([[maybe_unused]] ss::const_req req) {
                     rapidjson::StringBuffer buf;
@@ -393,23 +408,35 @@ void application::wire_up_services() {
     auto rpc_server_addr
       = config::shard_local_cfg().rpc_server().resolve().get0();
     rpc_cfg.addrs.push_back(rpc_server_addr);
-    rpc_cfg.credentials = config::shard_local_cfg()
-                            .rpc_server_tls()
-                            .get_credentials_builder()
-                            .get0();
+    auto rpc_builder = config::shard_local_cfg()
+                         .rpc_server_tls()
+                         .get_credentials_builder()
+                         .get0();
+    rpc_cfg.credentials
+      = rpc_builder ? rpc_builder
+                        ->build_reloadable_server_credentials(
+                          [this](
+                            const std::unordered_set<ss::sstring>& updated,
+                            const std::exception_ptr& eptr) {
+                              cluster::log_certificate_reload_event(
+                                _log, "Internal RPC TLS", updated, eptr);
+                          })
+                        .get0()
+                    : nullptr;
     syschecks::systemd_message("Starting internal RPC {}", rpc_cfg);
     construct_service(_rpc, rpc_cfg).get();
 
     // coproc rpc
     if (coproc_enabled()) {
-        auto coproc_management_server_addr = config::shard_local_cfg()
-                                               .coproc_management_server()
-                                               .resolve()
-                                               .get0();
+        auto coproc_script_manager_server_addr
+          = config::shard_local_cfg()
+              .coproc_script_manager_server()
+              .resolve()
+              .get0();
         rpc::server_configuration cp_rpc_cfg("coproc_rpc");
         cp_rpc_cfg.max_service_memory_per_core
           = memory_groups::rpc_total_memory();
-        cp_rpc_cfg.addrs.push_back(coproc_management_server_addr);
+        cp_rpc_cfg.addrs.push_back(coproc_script_manager_server_addr);
         syschecks::systemd_message(
           "Starting coprocessor internal RPC {}", cp_rpc_cfg);
         construct_service(_coproc_rpc, cp_rpc_cfg).get();
@@ -420,12 +447,27 @@ void application::wire_up_services() {
     auto kafka_addr = config::shard_local_cfg().kafka_api().resolve().get0();
     kafka_cfg.addrs.push_back(kafka_addr);
     syschecks::systemd_message("Building TLS credentials for kafka");
-    kafka_cfg.credentials = config::shard_local_cfg()
-                              .kafka_api_tls()
-                              .get_credentials_builder()
-                              .get0();
+    auto kafka_builder = config::shard_local_cfg()
+                           .kafka_api_tls()
+                           .get_credentials_builder()
+                           .get0();
+    kafka_cfg.credentials
+      = kafka_builder ? kafka_builder
+                          ->build_reloadable_server_credentials(
+                            [this](
+                              const std::unordered_set<ss::sstring>& updated,
+                              const std::exception_ptr& eptr) {
+                                cluster::log_certificate_reload_event(
+                                  _log, "Kafka RPC TLS", updated, eptr);
+                            })
+                          .get0()
+                      : nullptr;
     syschecks::systemd_message("Starting kafka RPC {}", kafka_cfg);
     construct_service(_kafka_server, kafka_cfg).get();
+    construct_service(
+      fetch_session_cache,
+      config::shard_local_cfg().fetch_session_eviction_timeout_ms())
+      .get();
 }
 
 void application::start() {
@@ -492,7 +534,9 @@ void application::start() {
           .get();
         _coproc_rpc.invoke_on_all(&rpc::server::start).get();
         vlog(
-          _log.info, "Started coproc RPC server listening at 127.0.0.1:43188");
+          _log.info,
+          "Started coproc RPC server listening at {}",
+          conf.coproc_script_manager_server());
     }
 
     _quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();
@@ -508,7 +552,8 @@ void application::start() {
             group_router,
             shard_table,
             partition_manager,
-            coordinator_ntp_mapper);
+            coordinator_ntp_mapper,
+            fetch_session_cache);
           s.set_protocol(std::move(proto));
       })
       .get();
@@ -521,7 +566,7 @@ void application::start() {
 }
 
 void application::admin_register_raft_routes(ss::http_server& server) {
-    ss::httpd::raft_json::transfer_leadership.set(
+    ss::httpd::raft_json::raft_transfer_leadership.set(
       server._routes, [this](std::unique_ptr<ss::httpd::request> req) {
           raft::group_id group_id;
           try {
@@ -583,7 +628,7 @@ void application::admin_register_raft_routes(ss::http_server& server) {
 }
 
 void application::admin_register_kafka_routes(ss::http_server& server) {
-    ss::httpd::kafka_json::transfer_leadership.set(
+    ss::httpd::kafka_json::kafka_transfer_leadership.set(
       server._routes, [this](std::unique_ptr<ss::httpd::request> req) {
           auto topic = model::topic(req->param["topic"]);
 

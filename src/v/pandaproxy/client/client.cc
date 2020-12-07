@@ -9,6 +9,9 @@
 
 #include "pandaproxy/client/client.h"
 
+#include "kafka/errors.h"
+#include "kafka/requests/fetch_request.h"
+#include "model/fundamental.h"
 #include "pandaproxy/client/broker.h"
 #include "pandaproxy/client/configuration.h"
 #include "pandaproxy/client/error.h"
@@ -19,6 +22,8 @@
 #include "utils/unresolved_address.h"
 
 #include <seastar/core/gate.hh>
+
+#include <exception>
 
 namespace pandaproxy::client {
 
@@ -67,22 +72,24 @@ ss::future<> client::stop() {
 }
 
 ss::future<> client::update_metadata(wait_or_start::tag) {
-    vlog(ppclog.debug, "updating metadata");
-    return _brokers.any().then([this](shared_broker_t broker) {
-        return broker
-          ->dispatch(kafka::metadata_request{.list_all_topics = true})
-          .then([this](kafka::metadata_response res) {
-              // Create new seeds from the returned set of brokers
-              std::vector<unresolved_address> seeds;
-              seeds.reserve(res.brokers.size());
-              for (const auto& b : res.brokers) {
-                  seeds.emplace_back(b.host, b.port);
-              }
-              std::swap(_seeds, seeds);
+    return ss::with_gate(_gate, [this]() {
+        vlog(ppclog.debug, "updating metadata");
+        return _brokers.any().then([this](shared_broker_t broker) {
+            return broker
+              ->dispatch(kafka::metadata_request{.list_all_topics = true})
+              .then([this](kafka::metadata_response res) {
+                  // Create new seeds from the returned set of brokers
+                  std::vector<unresolved_address> seeds;
+                  seeds.reserve(res.brokers.size());
+                  for (const auto& b : res.brokers) {
+                      seeds.emplace_back(b.host, b.port);
+                  }
+                  std::swap(_seeds, seeds);
 
-              return _brokers.apply(std::move(res));
-          })
-          .finally([]() { vlog(ppclog.trace, "updated metadata"); });
+                  return _brokers.apply(std::move(res));
+              })
+              .finally([]() { vlog(ppclog.trace, "updated metadata"); });
+        });
     });
 }
 
@@ -92,10 +99,10 @@ ss::future<> client::mitigate_error(std::exception_ptr ex) {
     } catch (const broker_error& ex) {
         // If there are no brokers, reconnect
         if (ex.node_id == unknown_node_id) {
-            vlog(ppclog.warn, "broker_error: {}", ex.what());
+            vlog(ppclog.warn, "broker_error: {}", ex);
             return connect();
         } else {
-            vlog(ppclog.debug, "broker_error: {}", ex.what());
+            vlog(ppclog.debug, "broker_error: {}", ex);
             return _brokers.erase(ex.node_id).then([this]() {
                 return _wait_or_start_update_metadata();
             });
@@ -103,14 +110,14 @@ ss::future<> client::mitigate_error(std::exception_ptr ex) {
     } catch (const partition_error& ex) {
         switch (ex.error) {
         case kafka::error_code::unknown_topic_or_partition:
-            [[fallthrough]];
+        case kafka::error_code::not_leader_for_partition:
         case kafka::error_code::leader_not_available: {
-            vlog(ppclog.debug, "partition_error: {}", ex.what());
+            vlog(ppclog.debug, "partition_error: {}", ex);
             return _wait_or_start_update_metadata();
         }
         default:
             // TODO(Ben): Maybe vassert
-            vlog(ppclog.warn, "partition_error: ", ex.what());
+            vlog(ppclog.warn, "partition_error: ", ex);
             return ss::make_exception_future(ex);
         }
     } catch (const ss::gate_closed_exception&) {
@@ -119,17 +126,50 @@ ss::future<> client::mitigate_error(std::exception_ptr ex) {
         // TODO(Ben): Probably vassert
         vlog(ppclog.error, "unknown exception");
     }
-    return ss::make_exception_future(std::move(ex));
+    return ss::make_exception_future(ex);
 }
 
 ss::future<kafka::produce_response::partition> client::produce_record_batch(
   model::topic_partition tp, model::record_batch&& batch) {
-    vlog(
-      ppclog.debug,
-      "produce record_batch: {}, {{record_count: {}}}",
-      tp,
-      batch.record_count());
-    return _producer.produce(std::move(tp), std::move(batch));
+    return ss::with_gate(
+      _gate, [this, tp{std::move(tp)}, batch{std::move(batch)}]() mutable {
+          vlog(
+            ppclog.debug,
+            "produce record_batch: {}, {{record_count: {}}}",
+            tp,
+            batch.record_count());
+          return _producer.produce(std::move(tp), std::move(batch));
+      });
+}
+
+ss::future<kafka::fetch_response::partition> client::fetch_partition(
+  model::topic_partition tp,
+  model::offset offset,
+  int32_t max_bytes,
+  std::chrono::milliseconds timeout) {
+    auto build_request =
+      [offset, max_bytes, timeout](model::topic_partition& tp) {
+          return make_fetch_request(tp, offset, max_bytes, timeout);
+      };
+
+    return ss::do_with(
+      std::move(build_request),
+      std::move(tp),
+      [this](auto& build_request, model::topic_partition& tp) {
+          vlog(ppclog.debug, "fetching: {}", tp);
+          return gated_retry_with_mitigation([this, &tp, &build_request]() {
+                     return _brokers.find(tp)
+                       .then([&tp, &build_request](shared_broker_t&& b) {
+                           return b->dispatch(build_request(tp));
+                       })
+                       .then([](kafka::fetch_response res) {
+                           return std::move(res.partitions[0]);
+                       });
+                 })
+            .handle_exception([&tp](std::exception_ptr ex) {
+                return make_fetch_response(tp, ex);
+            });
+      });
 }
 
 } // namespace pandaproxy::client

@@ -30,22 +30,12 @@
 
 #include <filesystem>
 
-struct redpanda_thread_fixture_opts {
-    bool enable_pid_file{false};
-    bool developer_mode{true};
-    bool enable_admin_api{false};
-    bool enable_coproc{false};
-    bool disable_metrics{true};
-    int node_id{1};
-};
-
 class redpanda_thread_fixture {
 public:
     static constexpr const char* rack_name = "i-am-rack";
 
-    redpanda_thread_fixture(
-      redpanda_thread_fixture_opts opts = redpanda_thread_fixture_opts()) {
-        configure(opts);
+    redpanda_thread_fixture() {
+        configure();
         app.initialize();
         app.check_environment();
         app.configure_admin_server();
@@ -60,21 +50,21 @@ public:
 
     config::configuration& lconf() { return config::shard_local_cfg(); }
 
-    void configure(redpanda_thread_fixture_opts opts) {
+    void configure() {
         data_dir = fmt::format("test.dir_{}", time(0));
-        ss::smp::invoke_on_all([this, opts] {
+        ss::smp::invoke_on_all([this] {
             auto& config = config::shard_local_cfg();
-            config.get("enable_pid_file").set_value(opts.enable_pid_file);
-            config.get("developer_mode").set_value(opts.developer_mode);
-            config.get("enable_admin_api").set_value(opts.enable_admin_api);
-            config.get("enable_coproc").set_value(opts.enable_coproc);
+            config.get("enable_pid_file").set_value(false);
+            config.get("developer_mode").set_value(true);
+            config.get("enable_admin_api").set_value(false);
+            config.get("enable_coproc").set_value(true);
             config.get("rack").set_value(std::optional<ss::sstring>(rack_name));
-            config.get("disable_metrics").set_value(opts.disable_metrics);
+            config.get("disable_metrics").set_value(true);
 
             config.get("data_directory")
               .set_value(config::data_directory_path{.path = data_dir});
 
-            config.get("node_id").set_value(opts.node_id);
+            config.get("node_id").set_value(1);
         }).get0();
     }
 
@@ -111,9 +101,10 @@ public:
           storage::debug_sanitize_files::yes);
     }
 
-    ss::future<> add_topic(model::topic_namespace_view tp_ns) {
+    ss::future<>
+    add_topic(model::topic_namespace_view tp_ns, int partitions = 1) {
         std::vector<cluster::topic_configuration> cfgs{
-          cluster::topic_configuration(tp_ns.ns, tp_ns.tp, 1, 1)};
+          cluster::topic_configuration(tp_ns.ns, tp_ns.tp, partitions, 1)};
         return app.controller->get_topics_frontend()
           .local()
           .create_topics(std::move(cfgs), model::no_timeout)
@@ -141,7 +132,25 @@ public:
           });
     }
 
-    model::ntp make_data(storage::ntp_config::ntp_id version) {
+    ss::future<> wait_for_partition_offset(
+      model::ntp ntp,
+      model::offset o,
+      model::timeout_clock::duration tout = 3s) {
+        return tests::cooperative_spin_wait_with_timeout(
+          tout, [this, ntp = std::move(ntp), o]() mutable {
+              auto shard = app.shard_table.local().shard_for(ntp);
+              if (!shard) {
+                  return ss::make_ready_future<bool>(false);
+              }
+              return app.partition_manager.invoke_on(
+                *shard, [ntp, o](cluster::partition_manager& mgr) {
+                    auto partition = mgr.get(ntp);
+                    return partition && partition->committed_offset() >= o;
+                });
+          });
+    }
+
+    model::ntp make_data(model::revision_id rev) {
         auto topic_name = fmt::format("my_topic_{}", 0);
         model::ntp ntp(
           cluster::kafka_namespace,
@@ -149,7 +158,7 @@ public:
           model::partition_id(0));
 
         storage::ntp_config ntp_cfg(
-          ntp, lconf().data_directory().as_sstring(), nullptr, version);
+          ntp, lconf().data_directory().as_sstring(), nullptr, rev);
 
         storage::disk_log_builder builder(make_default_config());
         using namespace storage; // NOLINT
@@ -161,6 +170,40 @@ public:
         add_topic(model::topic_namespace_view(ntp)).get();
 
         return ntp;
+    }
+
+    kafka::request_context make_request_context() {
+        kafka::request_header header;
+        auto encoder_context = kafka::request_context(
+          app.metadata_cache,
+          app.controller->get_topics_frontend().local(),
+          std::move(header),
+          iobuf(),
+          std::chrono::milliseconds(0),
+          app.group_router.local(),
+          app.shard_table.local(),
+          app.partition_manager,
+          app.coordinator_ntp_mapper,
+          app.fetch_session_cache);
+
+        iobuf buf;
+        kafka::fetch_request request;
+        // do not use incremental fetch requests
+        request.max_wait_time = std::chrono::milliseconds::zero();
+        kafka::response_writer writer(buf);
+        request.encode(writer, encoder_context.header().version);
+
+        return kafka::request_context(
+          app.metadata_cache,
+          app.controller->get_topics_frontend().local(),
+          std::move(header),
+          std::move(buf),
+          std::chrono::milliseconds(0),
+          app.group_router.local(),
+          app.shard_table.local(),
+          app.partition_manager,
+          app.coordinator_ntp_mapper,
+          app.fetch_session_cache);
     }
 
     application app;

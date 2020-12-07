@@ -11,10 +11,11 @@ import asyncio
 import uuid
 import random
 import sys
+import json
 import logging
 import traceback
 
-from gobekli.kvapi import RequestCanceled, RequestTimedout
+from gobekli.kvapi import RequestCanceled, RequestTimedout, RequestViolated
 from gobekli.consensus import Violation
 from gobekli.workloads.common import (ReaderClient, AvailabilityStatLogger,
                                       Stat, LinearizabilityHashmapChecker)
@@ -67,7 +68,8 @@ class WriterClient:
                 data = response.record
                 op_ended = loop.time()
                 log_latency("ok", op_ended - self.started_at,
-                            op_ended - op_started, response.metrics)
+                            op_ended - op_started, self.node.idx,
+                            response.metrics)
                 cmdlog.info(
                     m(type="write_ended",
                       node=self.node.name,
@@ -93,7 +95,7 @@ class WriterClient:
                     self.stat.inc(self.node.name + ":out")
                     op_ended = loop.time()
                     log_latency("out", op_ended - self.started_at,
-                                op_ended - op_started)
+                                op_ended - op_started, self.node.idx)
                     cmdlog.info(
                         m(type="write_timedout",
                           node=self.node.name,
@@ -118,7 +120,7 @@ class WriterClient:
                     self.stat.inc(self.node.name + ":err")
                     op_ended = loop.time()
                     log_latency("err", op_ended - self.started_at,
-                                op_ended - op_started)
+                                op_ended - op_started, self.node.idx)
                     cmdlog.info(
                         m(type="write_canceled",
                           node=self.node.name,
@@ -141,6 +143,13 @@ class WriterClient:
                           stacktrace=traceback.format_exc()).with_time())
 
                     self.checker.abort()
+                    break
+            except RequestViolated as e:
+                try:
+                    self.checker.report_violation("internal violation: " +
+                                                  json.dumps(e.info))
+                except Violation as e:
+                    log_violation(self.pid, e.message)
                     break
             except Violation as e:
                 log_violation(self.pid, e.message)

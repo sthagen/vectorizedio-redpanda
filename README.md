@@ -3,8 +3,10 @@
 [![Documentation](https://img.shields.io/badge/documentation-black)](https://vectorized.io/documentation)
 [![Slack](https://img.shields.io/badge/slack-purple)](https://vectorized.io/slack)
 [![Twitter](https://img.shields.io/twitter/follow/vectorizedio.svg?style=social&label=Follow)](https://twitter.com/intent/follow?screen_name=vectorizedio)
+![Go](https://github.com/vectorizedio/redpanda/workflows/Go/badge.svg)
+![C++](https://github.com/vectorizedio/redpanda/workflows/build-test/badge.svg)
 
-[<img src="docs/PANDA_sitting.jpg" alt="redpanda sitting" width="400"/>](https://vectorized.io/redpanda)
+[<p align="center"><img src="docs/PANDA_sitting.jpg" alt="redpanda sitting" width="400"/></p>](https://vectorized.io/redpanda)
 
 
 Redpanda is a streaming platform for mission critical workloads. Kafka® compatible, 
@@ -37,7 +39,7 @@ We recommend using our free & prebuilt stable releases below.
 Simply download our `rpk` [binary here](https://github.com/vectorizedio/redpanda/releases). We require Docker on MacOS
 
 ```
-rpk container start
+brew install vectorizedio/tap/redpanda && rpk container start
 ```
 
 ### On Debian/Ubuntu

@@ -13,6 +13,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"runtime"
 	"sync"
 	"vectorized/pkg/cli/cmd/container/common"
 	"vectorized/pkg/cli/ui"
@@ -31,7 +33,7 @@ type node struct {
 	addr string
 }
 
-func Start(fs afero.Fs) *cobra.Command {
+func Start(fs afero.Fs, mgr config.Manager) *cobra.Command {
 	var (
 		nodes uint
 	)
@@ -52,6 +54,7 @@ func Start(fs afero.Fs) *cobra.Command {
 
 			return common.WrapIfConnErr(startCluster(
 				fs,
+				mgr,
 				c,
 				nodes,
 			))
@@ -69,7 +72,9 @@ func Start(fs afero.Fs) *cobra.Command {
 	return command
 }
 
-func startCluster(fs afero.Fs, c common.Client, n uint) error {
+func startCluster(
+	fs afero.Fs, mgr config.Manager, c common.Client, n uint,
+) error {
 	// Check if cluster exists and start it again.
 	restarted, err := restartCluster(fs, c)
 	if err != nil {
@@ -79,6 +84,13 @@ func startCluster(fs afero.Fs, c common.Client, n uint) error {
 	if len(restarted) != 0 {
 		log.Info("\nFound an existing cluster:\n")
 		renderClusterInfo(restarted)
+		if len(restarted) != int(n) {
+			log.Infof(
+				"\nTo change the number of nodes, first purge" +
+					" the existing cluster:\n\n" +
+					"rpk container purge\n",
+			)
+		}
 		return nil
 	}
 
@@ -145,9 +157,11 @@ func startCluster(fs afero.Fs, c common.Client, n uint) error {
 		return err
 	}
 
+	coreCount := int(math.Max(1, float64(runtime.NumCPU())/float64(n)))
+
 	log.Info("Starting cluster")
 	seedIP, seedKafkaPort, err := startNode(
-		fs,
+		mgr,
 		c,
 		seedID,
 		seedKafkaPort,
@@ -156,6 +170,7 @@ func startCluster(fs afero.Fs, c common.Client, n uint) error {
 		seedState.ContainerID,
 		seedState.ContainerIP,
 		"",
+		coreCount,
 	)
 	if err != nil {
 		return err
@@ -191,7 +206,7 @@ func startCluster(fs afero.Fs, c common.Client, n uint) error {
 				state.ContainerID,
 			)
 			ip, port, err := startNode(
-				fs,
+				mgr,
 				c,
 				id,
 				kafkaPort,
@@ -200,6 +215,7 @@ func startCluster(fs afero.Fs, c common.Client, n uint) error {
 				state.ContainerID,
 				state.ContainerIP,
 				seedState.ContainerIP,
+				coreCount,
 			)
 			if err != nil {
 				return err
@@ -293,12 +309,13 @@ func restartCluster(fs afero.Fs, c common.Client) ([]node, error) {
 }
 
 func startNode(
-	fs afero.Fs,
+	mgr config.Manager,
 	c common.Client,
 	nodeID, kafkaPort, rpcPort, seedRPCPort uint,
 	containerID, ip, seedIP string,
+	cores int,
 ) (string, uint, error) {
-	conf, err := writeNodeConfig(fs, nodeID, kafkaPort, rpcPort, seedRPCPort, ip, seedIP, common.ConfPath(nodeID))
+	conf, err := writeNodeConfig(mgr, nodeID, kafkaPort, rpcPort, seedRPCPort, ip, seedIP, common.ConfPath(nodeID), cores)
 	if err != nil {
 		return "", 0, err
 	}
@@ -309,22 +326,40 @@ func startNode(
 }
 
 func writeNodeConfig(
-	fs afero.Fs,
+	mgr config.Manager,
 	nodeID, kafkaPort, rpcPort, seedRPCPort uint,
 	ip, seedIP, path string,
+	cores int,
 ) (*config.Config, error) {
-	conf := config.DefaultConfig()
+	localhost := "127.0.0.1"
+	conf := config.Default()
 	conf.Redpanda.Id = int(nodeID)
+	conf.ConfigFile = path
 
-	conf.Rpk.Overprovisioned = true
-	conf.Redpanda.DeveloperMode = true
+	conf.Redpanda.KafkaApi.Address = ip
+	conf.Redpanda.RPCServer.Address = ip
 
-	err := applyPlatformSpecificConf(&conf, kafkaPort, rpcPort, seedRPCPort, ip, seedIP)
-	if err != nil {
-		return nil, err
+	conf.Redpanda.AdvertisedKafkaApi = &config.SocketAddress{
+		Address: localhost,
+		Port:    int(kafkaPort),
+	}
+	conf.Redpanda.AdvertisedRPCAPI = &config.SocketAddress{
+		Address: ip,
+		Port:    conf.Redpanda.RPCServer.Port,
 	}
 
-	return &conf, config.WriteConfig(fs, &conf, path)
+	if seedIP != "" {
+		conf.Redpanda.SeedServers = []config.SeedServer{{
+			Id: 0,
+			Host: config.SocketAddress{
+				Address: seedIP,
+				Port:    conf.Redpanda.RPCServer.Port,
+			},
+		}}
+	}
+	config.SetMode(config.ModeDev, conf)
+	conf.Rpk.SMP = &cores
+	return conf, mgr.Write(conf)
 }
 
 func renderClusterInfo(nodes []node) {

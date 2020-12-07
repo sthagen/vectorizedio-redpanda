@@ -6,9 +6,9 @@
   "author": "hi@vectorized.io",
   "scripts": {
     "fmt": "./node_modules/typescript-formatter/bin/tsfmt --baseDir ../../src/js/ -r",
-    "build:ts": "npx tsc --build ../../src/js/tsconfig.json",
-    "build": "npm run generate:serialization && npm run build:ts",
-    "test": "./node_modules/mocha/bin/mocha --recursive \"./output/test\"",
+    "build:ts": "npx tsc",
+    "build": "./build.sh",
+    "test": "./node_modules/mocha/bin/mocha -r ts-node/register \"./test/**/*.ts\"",
     "prettier:format": "npx prettier --write .",
     "prettier:check": "npx prettier --list-different .",
     "eslint:check": "eslint . --ext .ts",
@@ -16,14 +16,15 @@
     "generate:serialization": "./generate-entries.sh && npm run prettier:format",
     "postinstall": "npm run generate:serialization",
     "build:public": "./compact-public.js",
-    "start": "sudo npx ts-node ./modules/rpc/service.ts"
+    "start:dev": "sudo npx ts-node ./modules/rpc/service.ts",
+    "start": "sudo node ./modules/rpc/service.js"
   },
   "requires": true,
   "dependencies": {
     "@types/mocha": "7.0.2",
     "@types/node": "14.0.23",
     "fast-crc32c": "2.0.0",
-    "inotifywait": "1.8.3",
+    "chokidar": "^3.4.3",
     "mocha": "7.1.1",
     "prettier": "2.0.5",
     "rewire": "5.0.0",

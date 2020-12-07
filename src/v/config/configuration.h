@@ -20,6 +20,8 @@
 #include <seastar/net/ip.hh>
 #include <seastar/net/socket_defs.hh>
 
+#include <boost/filesystem.hpp>
+
 namespace config {
 
 /// Redpanda configuration
@@ -38,7 +40,7 @@ struct configuration final : public config_store {
     property<tls_config> rpc_server_tls;
     // Coproc
     property<bool> enable_coproc;
-    property<unresolved_address> coproc_management_server;
+    property<unresolved_address> coproc_script_manager_server;
     property<unresolved_address> coproc_supervisor_server;
     // Raft
     property<int32_t> node_id;
@@ -81,6 +83,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> kafka_group_recovery_timeout_ms;
     property<std::chrono::milliseconds> replicate_append_timeout_ms;
     property<std::chrono::milliseconds> recovery_append_timeout_ms;
+    property<std::chrono::milliseconds> replicate_request_debounce_timeout_ms;
 
     property<size_t> reclaim_min_size;
     property<size_t> reclaim_max_size;
@@ -98,6 +101,7 @@ struct configuration final : public config_store {
       raft_transfer_leader_recovery_timeout_ms;
     property<bool> release_cache_on_segment_roll;
     property<std::chrono::milliseconds> segment_appender_flush_timeout_ms;
+    property<std::chrono::milliseconds> fetch_session_eviction_timeout_ms;
 
     configuration();
 
@@ -245,6 +249,22 @@ struct convert<std::chrono::milliseconds> {
     }
 };
 
+inline ss::sstring to_absolute(const ss::sstring& path) {
+    namespace fs = boost::filesystem;
+    if (path.empty()) {
+        return path;
+    }
+    return fs::absolute(fs::path(path)).native();
+}
+
+inline std::optional<ss::sstring>
+to_absolute(const std::optional<ss::sstring>& path) {
+    if (path) {
+        return to_absolute(*path);
+    }
+    return std::nullopt;
+}
+
 template<>
 struct convert<config::tls_config> {
     static Node encode(const config::tls_config& rhs) {
@@ -280,18 +300,23 @@ struct convert<config::tls_config> {
           ^ static_cast<bool>(node["cert_file"])) {
             return false;
         }
-
-        auto key_cert = node["key_file"] ? std::make_optional<config::key_cert>(
-                          config::key_cert{
-                            node["key_file"].as<ss::sstring>(),
-                            node["cert_file"].as<ss::sstring>()})
-                                         : std::nullopt;
-        rhs = config::tls_config(
-          node["enabled"] && node["enabled"].as<bool>(),
-          key_cert,
-          read_optional(node, "truststore_file"),
-          node["require_client_auth"]
-            && node["require_client_auth"].as<bool>());
+        auto enabled = node["enabled"] && node["enabled"].as<bool>();
+        if (!enabled) {
+            rhs = config::tls_config(false, std::nullopt, std::nullopt, false);
+        } else {
+            auto key_cert
+              = node["key_file"]
+                  ? std::make_optional<config::key_cert>(config::key_cert{
+                    to_absolute(node["key_file"].as<ss::sstring>()),
+                    to_absolute(node["cert_file"].as<ss::sstring>())})
+                  : std::nullopt;
+            rhs = config::tls_config(
+              enabled,
+              key_cert,
+              to_absolute(read_optional(node, "truststore_file")),
+              node["require_client_auth"]
+                && node["require_client_auth"].as<bool>());
+        }
         return true;
     }
 };

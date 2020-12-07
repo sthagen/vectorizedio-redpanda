@@ -55,9 +55,9 @@ configuration::configuration()
       tls_config::validate)
   , enable_coproc(
       *this, "enable_coproc", "Enable coprocessing mode", required::no, false)
-  , coproc_management_server(
+  , coproc_script_manager_server(
       *this,
-      "coproc_management_server",
+      "coproc_script_manager_server",
       "IpAddress and port for management service",
       required::no,
       unresolved_address("127.0.0.1", 43118))
@@ -184,7 +184,7 @@ configuration::configuration()
       "heartbeats at the cost of a longer time to detect failures. "
       "Default quota tracking window size in milliseconds",
       required::no,
-      30'000ms)
+      300s)
   , group_initial_rebalance_delay(
       *this,
       "group_initial_rebalance_delay",
@@ -282,6 +282,12 @@ configuration::configuration()
       "follower",
       required::no,
       5s)
+  , replicate_request_debounce_timeout_ms(
+      *this,
+      "replicate_request_debounce_timeout_ms",
+      "Max duration before dispatching batched replicate requests",
+      required::no,
+      4ms)
   , reclaim_min_size(
       *this,
       "reclaim_min_size",
@@ -368,6 +374,15 @@ configuration::configuration()
       "Maximum delay until buffered data is written",
       required::no,
       std::chrono::milliseconds(1s))
+  , fetch_session_eviction_timeout_ms(
+      *this,
+      "fetch_session_eviction_timeout_ms",
+      "Minimum time before which unused session will get evicted from "
+      "sessions. Maximum time after which inactive session will be deleted is "
+      "two time given configuration value"
+      "cache",
+      required::no,
+      60s)
   , _advertised_kafka_api(
       *this,
       "advertised_kafka_api",

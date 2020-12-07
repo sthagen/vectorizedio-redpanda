@@ -21,6 +21,8 @@ set(request_srcs
   requests/delete_topics_request.cc
   requests/alter_configs_request.cc
   requests/describe_groups_request.cc
+  requests/sasl_handshake_request.cc
+  requests/sasl_authenticate_request.cc
   requests/topics/types.cc
   requests/topics/topic_utils.cc)
 
@@ -39,6 +41,7 @@ v_cc_library(
     protocol_utils.cc
     logger.cc
     quota_manager.cc
+    fetch_session_cache.cc
  DEPS
     Seastar::seastar
     v::bytes
@@ -49,3 +52,7 @@ v_cc_library(
     absl::flat_hash_set
 )
 add_subdirectory(tests)
+
+set_source_files_properties(
+    groups/group.cc # too big => negative impact on minimal rebuilds for unity
+  PROPERTIES SKIP_UNITY_BUILD_INCLUSION 1)

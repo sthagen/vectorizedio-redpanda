@@ -42,9 +42,9 @@ const createRecordHeader = (
   recordHeader: Partial<RecordHeader>
 ): RecordHeader => {
   return {
-    headerKey: "",
-    headerKeyLength: BigInt(0),
-    headerValueLength: BigInt(0),
+    headerKey: Buffer.from(""),
+    headerKeyLength: 0,
+    headerValueLength: 0,
     value: Buffer.from(""),
     ...recordHeader,
   };
@@ -101,4 +101,57 @@ export const createRecordBatchFunctor = (
     return fn(record);
   };
   return { ...record, map };
+};
+
+// receive int64 and return Uint64
+const encodeZigzag = (field: bigint): bigint => {
+  // Create Bigint with 64 bytes length and sign 63
+  const digits = BigInt.asUintN(64, BigInt(63));
+  // Create Bigint with 64 bytes length and sign 1
+  const lsb = BigInt.asUintN(64, BigInt(1));
+  return BigInt.asUintN(64, (field << lsb) ^ (field >> digits));
+};
+
+// given a number, it returns number bytes size on varint encode format
+export const varintZigzagSize = (field: bigint): number => {
+  let value = encodeZigzag(field);
+  let size = 1;
+  while (value >= 128) {
+    value >>= BigInt(7);
+    size += 1;
+  }
+  return size;
+};
+
+export const calculateRecordLength = (record: Record): number => {
+  let size = 0;
+  size += varintZigzagSize(BigInt(record.attributes));
+  size += varintZigzagSize(BigInt(record.timestampDelta));
+  size += varintZigzagSize(BigInt(record.offsetDelta));
+  size += varintZigzagSize(BigInt(record.keyLength));
+  size += record.key.length;
+  size += varintZigzagSize(BigInt(record.valueLen));
+  size += record.value.length;
+  size += varintZigzagSize(BigInt(record.headers.length));
+  size += record.headers.reduceRight<number>((totalHeaderSize, header) => {
+    totalHeaderSize += varintZigzagSize(BigInt(header.headerKeyLength));
+    totalHeaderSize += varintZigzagSize(BigInt(header.headerValueLength));
+    totalHeaderSize += header.value.length;
+    totalHeaderSize += header.headerKey.length;
+    return totalHeaderSize;
+  }, 0);
+  return size;
+};
+
+export const calculateRecordBatchSize = (records: Record[]): number => {
+  const headerBytesSize = 57;
+  const arrayBytesSize = 4;
+  return (
+    headerBytesSize +
+    records.reduce(
+      (p, r) => p + r.length + varintZigzagSize(BigInt(r.length)),
+      0
+    ) +
+    arrayBytesSize
+  );
 };

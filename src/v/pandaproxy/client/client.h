@@ -15,6 +15,7 @@
 #include "pandaproxy/client/broker.h"
 #include "pandaproxy/client/brokers.h"
 #include "pandaproxy/client/configuration.h"
+#include "pandaproxy/client/fetcher.h"
 #include "pandaproxy/client/producer.h"
 #include "pandaproxy/client/retry_with_mitigation.h"
 #include "utils/retry.h"
@@ -63,29 +64,43 @@ public:
     /// \brief Disconnect from all brokers.
     ss::future<> stop();
 
-    /// \brief Dispatch a request to any broker.
-    template<typename T>
-    CONCEPT(requires(KafkaRequest<typename T::api_type>))
-    ss::future<typename T::api_type::response_type> dispatch(T r) {
-        return ss::with_gate(_gate, [this, r{std::move(r)}]() {
+    /// \brief Invoke func, on failure, mitigate error and retry.
+    template<typename Func>
+    std::invoke_result_t<Func> gated_retry_with_mitigation(Func func) {
+        return ss::with_gate(_gate, [this, func{std::move(func)}]() {
             return retry_with_mitigation(
               shard_local_cfg().retries(),
               shard_local_cfg().retry_base_backoff(),
-              [this, r{std::move(r)}]() {
+              [this, func{std::move(func)}]() {
                   _gate.check();
-                  return _brokers.any().then(
-                    [r{std::move(r)}](shared_broker_t broker) mutable {
-                        return broker->dispatch(std::move(r));
-                    });
+                  return func();
               },
-              [this](std::exception_ptr ex) {
-                  return mitigate_error(std::move(ex));
+              [this](std::exception_ptr ex) { return mitigate_error(ex); });
+        });
+    }
+
+    /// \brief Dispatch a request to any broker.
+    template<typename Func>
+    CONCEPT(
+      requires(typename std::invoke_result_t<Func>::api_type::response_type))
+    ss::future<typename std::invoke_result_t<
+      Func>::api_type::response_type> dispatch(Func func) {
+        return gated_retry_with_mitigation([this, func{std::move(func)}]() {
+            return _brokers.any().then(
+              [func{std::move(func)}](shared_broker_t broker) mutable {
+                  return broker->dispatch(func());
               });
         });
     }
 
     ss::future<kafka::produce_response::partition> produce_record_batch(
       model::topic_partition tp, model::record_batch&& batch);
+
+    ss::future<kafka::fetch_response::partition> fetch_partition(
+      model::topic_partition tp,
+      model::offset offset,
+      int32_t max_bytes,
+      std::chrono::milliseconds timeout);
 
 private:
     /// \brief Connect and update metdata.

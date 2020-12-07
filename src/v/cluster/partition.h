@@ -87,9 +87,7 @@ public:
      * Greatest offset visible to consumers. Named high_watermark to be
      * consistent with Kafka nomenclature.
      */
-    model::offset high_watermark() const {
-        return _raft->last_visible_index();
-    }
+    model::offset high_watermark() const { return _raft->last_visible_index(); }
 
     const model::ntp& ntp() const { return _raft->ntp(); }
 
@@ -113,6 +111,10 @@ public:
     }
 
     partition_probe& probe() { return _probe; }
+
+    model::revision_id get_revision_id() const {
+        return _raft->log_config().get_revision();
+    }
 
 private:
     friend partition_manager;
