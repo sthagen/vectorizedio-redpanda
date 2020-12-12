@@ -157,10 +157,16 @@ configuration::configuration()
   , target_quota_byte_rate(
       *this,
       "target_quota_byte_rate",
-      "Target quota byte rate (bytes per second) - 64MB default",
+      "Target quota byte rate (bytes per second) - 1GB default",
       required::no,
-      64_MiB)
+      1_GiB)
   , rack(*this, "rack", "Rack identifier", required::no, std::nullopt)
+  , dashboard_dir(
+      *this,
+      "dashboard_dir",
+      "serve http dashboard on / url",
+      required::no,
+      std::nullopt)
   , disable_metrics(
       *this,
       "disable_metrics",
@@ -288,6 +294,12 @@ configuration::configuration()
       "Max duration before dispatching batched replicate requests",
       required::no,
       4ms)
+  , raft_replicate_batch_window_size(
+      *this,
+      "raft_replicate_batch_window_size",
+      "Max size of requests cached for replication",
+      required::no,
+      128_KiB)
   , reclaim_min_size(
       *this,
       "reclaim_min_size",

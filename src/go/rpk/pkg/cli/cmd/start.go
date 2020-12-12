@@ -80,7 +80,10 @@ func NewStartCommand(fs afero.Fs, mgr config.Manager) *cobra.Command {
 	prestartCfg := prestartConfig{}
 	var (
 		configFile      string
+		nodeID          uint
 		seeds           []string
+		kafkaAddr       string
+		rpcAddr         string
 		advertisedKafka string
 		advertisedRPC   string
 		installDirFlag  string
@@ -115,7 +118,36 @@ func NewStartCommand(fs afero.Fs, mgr config.Manager) *cobra.Command {
 				sendEnv(mgr, env, conf, err)
 				return err
 			}
-			conf.Redpanda.SeedServers = seedServers
+			if len(seedServers) != 0 {
+				conf.Redpanda.SeedServers = seedServers
+			}
+
+			kafkaAddr = stringOr(
+				kafkaAddr,
+				os.Getenv("REDPANDA_KAFKA_ADDRESS"),
+			)
+			kafkaApi, err := parseAddress(kafkaAddr)
+			if err != nil {
+				sendEnv(mgr, env, conf, err)
+				return err
+			}
+			if kafkaApi != nil {
+				conf.Redpanda.KafkaApi = *kafkaApi
+			}
+
+			rpcAddr = stringOr(
+				rpcAddr,
+				os.Getenv("REDPANDA_RPC_ADDRESS"),
+			)
+			rpcServer, err := parseAddress(rpcAddr)
+			if err != nil {
+				sendEnv(mgr, env, conf, err)
+				return err
+			}
+			if rpcServer != nil {
+				conf.Redpanda.RPCServer = *rpcServer
+			}
+
 			advertisedKafka = stringOr(
 				advertisedKafka,
 				os.Getenv("REDPANDA_ADVERTISE_KAFKA_ADDRESS"),
@@ -169,6 +201,12 @@ func NewStartCommand(fs afero.Fs, mgr config.Manager) *cobra.Command {
 				return err
 			}
 
+			err = mgr.Write(conf)
+			if err != nil {
+				sendEnv(mgr, env, conf, err)
+				return err
+			}
+
 			sendEnv(mgr, env, conf, nil)
 			rpArgs.ExtraArgs = args
 			launcher := redpanda.NewLauncher(installDirectory, rpArgs)
@@ -185,6 +223,14 @@ func NewStartCommand(fs afero.Fs, mgr config.Manager) *cobra.Command {
 			" in the default locations",
 	)
 	mgr.BindFlag("config_file", command.Flags().Lookup("config"))
+	command.Flags().UintVar(
+		&nodeID,
+		"node-id",
+		0,
+		"The node ID. Must be an integer and must be unique"+
+			" within a cluster",
+	)
+	mgr.BindFlag("redpanda.node_id", command.Flags().Lookup("node-id"))
 	command.Flags().StringSliceVarP(
 		&seeds,
 		"seeds",
@@ -194,13 +240,25 @@ func NewStartCommand(fs afero.Fs, mgr config.Manager) *cobra.Command {
 			seedFormat,
 	)
 	command.Flags().StringVar(
+		&kafkaAddr,
+		"kafka-addr",
+		"",
+		"The Kafka address to bind to (<host>:<port>)",
+	)
+	command.Flags().StringVar(
+		&rpcAddr,
+		"rpc-addr",
+		"",
+		"The RPC address to bind to (<host>:<port>)",
+	)
+	command.Flags().StringVar(
 		&advertisedKafka,
 		"advertise-kafka-addr",
 		"",
 		"The Kafka address to advertise (<host>:<port>)",
 	)
 	command.Flags().StringVar(
-		&advertisedKafka,
+		&advertisedRPC,
 		"advertise-rpc-addr",
 		"",
 		"The advertised RPC address (<host>:<port>)",
@@ -646,7 +704,7 @@ func parseAddress(addr string) (*config.SocketAddress, error) {
 		// It's just a hostname with no port. Assume 9092.
 		return &config.SocketAddress{
 			Address: strings.Trim(hostPort[0], " "),
-			Port:    9092,
+			Port:    config.Default().Redpanda.RPCServer.Port,
 		}, nil
 	}
 	// It's a host:port combo.

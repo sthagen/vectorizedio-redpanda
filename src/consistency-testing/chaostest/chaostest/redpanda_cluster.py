@@ -119,6 +119,42 @@ class RedpandaNode:
             self.node_config["ssh_user"] + "@" + self.node_config["host"],
             self.node_config["rejoin_script"], *ips)
 
+    def create_topic(self):
+        ssh("-i", self.node_config["ssh_key"],
+            self.node_config["ssh_user"] + "@" + self.node_config["host"],
+            self.node_config["create_topic_script"])
+
+    def io_ruin(self, op_name):
+        ssh("-i", self.node_config["ssh_key"],
+            self.node_config["ssh_user"] + "@" + self.node_config["host"],
+            self.node_config["io_ruin_script"], op_name)
+        # todo check status code
+
+    def io_delay(self, op_name, delay_ms):
+        ssh("-i", self.node_config["ssh_key"],
+            self.node_config["ssh_user"] + "@" + self.node_config["host"],
+            self.node_config["io_delay_script"], op_name, delay_ms)
+        # todo check status code
+
+    def io_recover(self):
+        ssh("-i", self.node_config["ssh_key"],
+            self.node_config["ssh_user"] + "@" + self.node_config["host"],
+            self.node_config["io_recover_script"])
+        # todo check status code
+
+
+class EndpointNode:
+    def __init__(self, config, node_id):
+        self.config = config
+        self.node_id = node_id
+        self.node_config = None
+        for node in config["endpoints"]:
+            if node["id"] == node_id:
+                self.node_config = node
+        if self.node_config == None:
+            raise Exception(f"Unknown node_id: {node_id}")
+        self.ip = self.node_config["host"]
+
     def start_api(self):
         ssh("-i", self.node_config["ssh_key"],
             self.node_config["ssh_user"] + "@" + self.node_config["host"],
@@ -137,29 +173,6 @@ class RedpandaNode:
             self.node_config["ssh_user"] + "@" + self.node_config["host"],
             self.node_config["rm_api_log_script"])
 
-    def create_topic(self):
-        ssh("-i", self.node_config["ssh_key"],
-            self.node_config["ssh_user"] + "@" + self.node_config["host"],
-            self.node_config["create_topic_script"])
-
-    def io_ruin(self):
-        ssh("-i", self.node_config["ssh_key"],
-            self.node_config["ssh_user"] + "@" + self.node_config["host"],
-            self.node_config["io_ruin_script"])
-        # todo check status code
-
-    def io_delay(self, delay_ms):
-        ssh("-i", self.node_config["ssh_key"],
-            self.node_config["ssh_user"] + "@" + self.node_config["host"],
-            self.node_config["io_delay_script"], delay_ms)
-        # todo check status code
-
-    def io_recover(self):
-        ssh("-i", self.node_config["ssh_key"],
-            self.node_config["ssh_user"] + "@" + self.node_config["host"],
-            self.node_config["io_recover_script"])
-        # todo check status code
-
 
 chaos_stdout = logging.getLogger("chaos-stdout")
 
@@ -170,6 +183,10 @@ class RedpandaCluster:
         self.nodes = {
             config_node["id"]: RedpandaNode(config, config_node["id"])
             for config_node in config["nodes"]
+        }
+        self.endpoints = {
+            config_node["id"]: EndpointNode(config, config_node["id"])
+            for config_node in config["endpoints"]
         }
 
     def __enter__(self):
@@ -304,13 +321,13 @@ class RedpandaCluster:
                 break
 
     def _start_api(self):
-        for node_id in self.nodes:
-            node = self.nodes[node_id]
+        for node_id in self.endpoints:
+            node = self.endpoints[node_id]
             node.start_api()
 
     def _kill_api(self):
-        for node_id in self.nodes:
-            node = self.nodes[node_id]
+        for node_id in self.endpoints:
+            node = self.endpoints[node_id]
             node.kill_api()
 
     def _strobe_api_kill(self):
@@ -329,6 +346,6 @@ class RedpandaCluster:
             node.strobe_recover()
 
     def _rm_api_log(self):
-        for node_id in self.nodes:
-            node = self.nodes[node_id]
+        for node_id in self.endpoints:
+            node = self.endpoints[node_id]
             node.rm_api_log()

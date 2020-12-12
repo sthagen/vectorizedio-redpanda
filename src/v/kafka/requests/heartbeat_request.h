@@ -48,8 +48,7 @@ struct heartbeat_request final {
     }
 };
 
-static inline std::ostream&
-operator<<(std::ostream& os, const heartbeat_request& r) {
+inline std::ostream& operator<<(std::ostream& os, const heartbeat_request& r) {
     return os << r.data;
 }
 
@@ -77,8 +76,7 @@ make_heartbeat_error(error_code error) {
     return ss::make_ready_future<heartbeat_response>(error);
 }
 
-static inline std::ostream&
-operator<<(std::ostream& os, const heartbeat_response& r) {
+inline std::ostream& operator<<(std::ostream& os, const heartbeat_response& r) {
     return os << r.data;
 }
 

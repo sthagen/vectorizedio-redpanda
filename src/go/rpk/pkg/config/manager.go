@@ -83,8 +83,8 @@ func (m *manager) FindOrGenerate(path string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
-			conf.ConfigFile = m.v.ConfigFileUsed()
-			return conf, nil
+			conf.ConfigFile, err = absPath(m.v.ConfigFileUsed())
+			return conf, err
 		}
 
 	}
@@ -218,8 +218,8 @@ func (m *manager) Read(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	conf.ConfigFile = m.v.ConfigFileUsed()
-	return conf, nil
+	conf.ConfigFile, err = absPath(m.v.ConfigFileUsed())
+	return conf, err
 }
 
 func (m *manager) readMap(path string) (map[string]interface{}, error) {
@@ -249,6 +249,7 @@ func (m *manager) Write(conf *Config) error {
 	// Merge the config into a new viper.Viper instance to prevent
 	// concurrent writes to the underlying config map.
 	v := InitViper(m.fs)
+	v.MergeConfigMap(m.v.AllSettings())
 	v.MergeConfigMap(confMap)
 	return checkAndWrite(m.fs, v, conf.ConfigFile)
 }
@@ -295,10 +296,7 @@ func (m *manager) Set(key, value, format, path string) error {
 	}
 	newV := viper.New()
 	newV.Set(key, newConfValue)
-	log.Infof("k %s, v: %v", key, newConfValue)
-	log.Infof("all: %v", newV.AllSettings())
 	m.v.MergeConfigMap(newV.AllSettings())
-	log.Infof("m.v: %v", m.v.AllSettings())
 	err = checkAndWrite(m.fs, m.v, path)
 	if err == nil {
 		checkAndPrintRestartWarning(key)
@@ -371,8 +369,8 @@ func unmarshal(v *viper.Viper) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	conf.ConfigFile = v.ConfigFileUsed()
-	return conf, nil
+	conf.ConfigFile, err = absPath(v.ConfigFileUsed())
+	return conf, err
 }
 
 func base58Encode(s string) string {
@@ -429,4 +427,16 @@ func parse(val string) interface{} {
 		return b
 	}
 	return val
+}
+
+func absPath(path string) (string, error) {
+	absPath, err := fp.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf(
+			"Couldn't convert the used config file path to"+
+				" absolute: %s",
+			path,
+		)
+	}
+	return absPath, nil
 }
