@@ -18,6 +18,7 @@
 #include "raft/event_manager.h"
 #include "raft/follower_stats.h"
 #include "raft/logger.h"
+#include "raft/mutex_buffer.h"
 #include "raft/prevote_stm.h"
 #include "raft/probe.h"
 #include "raft/replicate_batcher.h"
@@ -217,6 +218,10 @@ public:
 
     probe& get_probe() { return _probe; };
 
+    bool are_heartbeats_suppressed(model::node_id) const;
+
+    void suppress_heartbeats(model::node_id, follower_req_seq, bool);
+
 private:
     friend replicate_entries_stm;
     friend vote_stm;
@@ -329,6 +334,12 @@ private:
     void maybe_update_majority_replicated_index();
 
     void start_dispatching_disk_append_events();
+
+    ss::future<> create_recovery_snapshot(const storage::offset_stats&);
+
+    voter_priority next_target_priority();
+    voter_priority get_node_priority(model::node_id id) const;
+
     // args
     model::node_id _self;
     raft::group_id _group;
@@ -386,6 +397,7 @@ private:
     configuration_manager _configuration_manager;
     model::offset _majority_replicated_index;
     model::offset _visibility_upper_bound_index;
+    voter_priority _target_priority = voter_priority::max();
     /**
      * We keep an idex of the most recent entry replicated with quorum
      * consistency level to make sure that all requests replicated with quorum
@@ -395,7 +407,8 @@ private:
     model::offset _last_quorum_replicated_index;
     offset_monitor _consumable_offset_monitor;
     ss::condition_variable _disk_append;
-
+    details::mutex_buffer<append_entries_request, append_entries_reply>
+      _append_requests_buffer;
     friend std::ostream& operator<<(std::ostream&, const consensus&);
 };
 

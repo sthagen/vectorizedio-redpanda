@@ -147,6 +147,11 @@ struct follower_index_metadata {
      * - follower is going to be removed
      */
     ss::condition_variable follower_state_change;
+    /**
+     * We prevent race conditions accessing suppress_heartbeats flag using the
+     * `last_sent_seq` value for version control.
+     */
+    bool suppress_heartbeats = false;
 };
 
 struct append_entries_request {
@@ -391,6 +396,14 @@ enum class metadata_key : int8_t {
     config_latest_known_offset = 2,
     last_applied_offset = 3,
 };
+
+// priority used to implement semi-deterministic leader election
+using voter_priority = named_type<uint32_t, struct voter_priority_tag>;
+
+// zero priority doesn't allow node to become a leader
+static constexpr voter_priority zero_voter_priority = voter_priority{0};
+// 1 is smallest possible priority allowing node to become a leader
+static constexpr voter_priority min_voter_priority = voter_priority{1};
 
 std::ostream& operator<<(std::ostream& o, const consistency_level& l);
 std::ostream& operator<<(std::ostream& o, const protocol_metadata& m);

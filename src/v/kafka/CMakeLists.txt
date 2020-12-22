@@ -24,6 +24,7 @@ set(request_srcs
   requests/describe_groups_request.cc
   requests/sasl_handshake_request.cc
   requests/sasl_authenticate_request.cc
+  requests/incremental_alter_configs_request.cc
   requests/topics/types.cc
   requests/topics/topic_utils.cc)
 
@@ -32,12 +33,17 @@ set(group_srcs
   groups/group.cc
   groups/group_manager.cc)
 
+set(security_srcs
+    security/scram_algorithm.cc)
+
 v_cc_library(
   NAME kafka
   SRCS
     ${request_srcs}
     ${group_srcs}
+    ${security_srcs}
     errors.cc
+    connection_context.cc
     protocol.cc
     protocol_utils.cc
     logger.cc

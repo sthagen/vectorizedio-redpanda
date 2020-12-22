@@ -125,7 +125,7 @@ bool recovery_stm::state_changed() {
         return true;
     }
     return _ptr->_log.offsets().dirty_offset
-           >= meta.value()->last_dirty_log_index;
+           > meta.value()->last_dirty_log_index;
 }
 
 ss::future<> recovery_stm::read_range_for_recovery(
@@ -329,7 +329,9 @@ ss::future<> recovery_stm::replicate(
     _ptr->update_node_append_timestamp(_node_id);
 
     auto seq = _ptr->next_follower_sequence(_node_id);
+    _ptr->suppress_heartbeats(_node_id, seq, true);
     return dispatch_append_entries(std::move(r))
+      .finally([this, seq] { _ptr->suppress_heartbeats(_node_id, seq, false); })
       .then([this, seq, dirty_offset = lstats.dirty_offset](auto r) {
           if (!r) {
               vlog(

@@ -135,7 +135,7 @@ configuration::configuration()
       "admin_api_doc_dir",
       "Admin API doc directory",
       required::no,
-      "/etc/redpanda/admin-api-doc")
+      "/usr/share/redpanda/admin-api-doc")
   , default_num_windows(
       *this,
       "default_num_windows",
@@ -209,6 +209,13 @@ configuration::configuration()
       "Interaval for metadata dissemination batching",
       required::no,
       3'000ms)
+  , fetch_reads_debounce_timeout(
+      *this,
+      "fetch_reads_debounce_timeout",
+      "Time to wait for next read in fetch request when requested min bytes "
+      "wasn't reached",
+      required::no,
+      1ms)
   , delete_retention_ms(
       *this,
       "delete_retention_ms",
@@ -288,18 +295,12 @@ configuration::configuration()
       "follower",
       required::no,
       5s)
-  , replicate_request_debounce_timeout_ms(
-      *this,
-      "replicate_request_debounce_timeout_ms",
-      "Max duration before dispatching batched replicate requests",
-      required::no,
-      4ms)
   , raft_replicate_batch_window_size(
       *this,
       "raft_replicate_batch_window_size",
       "Max size of requests cached for replication",
       required::no,
-      128_KiB)
+      1_MiB)
   , reclaim_min_size(
       *this,
       "reclaim_min_size",

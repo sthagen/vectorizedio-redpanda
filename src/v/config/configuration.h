@@ -69,6 +69,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> group_initial_rebalance_delay;
     property<std::chrono::milliseconds> group_new_member_join_timeout;
     property<std::chrono::milliseconds> metadata_dissemination_interval_ms;
+    property<std::chrono::milliseconds> fetch_reads_debounce_timeout;
     // same as delete.retention.ms in kafka
     property<std::chrono::milliseconds> delete_retention_ms;
     property<std::chrono::milliseconds> log_compaction_interval_ms;
@@ -84,7 +85,6 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> kafka_group_recovery_timeout_ms;
     property<std::chrono::milliseconds> replicate_append_timeout_ms;
     property<std::chrono::milliseconds> recovery_append_timeout_ms;
-    property<std::chrono::milliseconds> replicate_request_debounce_timeout_ms;
     property<size_t> raft_replicate_batch_window_size;
 
     property<size_t> reclaim_min_size;

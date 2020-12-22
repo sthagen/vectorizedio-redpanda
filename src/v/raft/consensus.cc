@@ -11,6 +11,7 @@
 
 #include "config/configuration.h"
 #include "likely.h"
+#include "model/metadata.h"
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/configuration.h"
 #include "raft/consensus_client_protocol.h"
@@ -23,6 +24,7 @@
 #include "raft/types.h"
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
+#include "storage/types.h"
 #include "utils/state_crc_file.h"
 #include "utils/state_crc_file_errc.h"
 #include "vlog.h"
@@ -55,10 +57,7 @@ consensus::consensus(
   , _client_protocol(client)
   , _leader_notification(std::move(cb))
   , _fstats({})
-  , _batcher(
-      this,
-      config::shard_local_cfg().replicate_request_debounce_timeout_ms(),
-      config::shard_local_cfg().raft_replicate_batch_window_size())
+  , _batcher(this, config::shard_local_cfg().raft_replicate_batch_window_size())
   , _event_manager(this)
   , _ctxlog(group, _log.config().ntp())
   , _replicate_append_timeout(
@@ -68,7 +67,8 @@ consensus::consensus(
   , _storage(storage)
   , _snapshot_mgr(
       std::filesystem::path(_log.config().work_directory()), _io_priority)
-  , _configuration_manager(std::move(initial_cfg), _group, _storage, _ctxlog) {
+  , _configuration_manager(std::move(initial_cfg), _group, _storage, _ctxlog)
+  , _append_requests_buffer(_op_lock, 256) {
     setup_metrics();
     update_follower_stats(_configuration_manager.get_latest());
     _vote_timeout.set_callback([this] {
@@ -133,6 +133,7 @@ ss::future<> consensus::stop() {
     _disk_append.broken();
 
     return _event_manager.stop()
+      .then([this] { return _append_requests_buffer.stop(); })
       .then([this] { return _bg.close(); })
       .then([this] { return _batcher.stop(); })
       .then([this] {
@@ -266,6 +267,10 @@ consensus::success_reply consensus::update_follower_index(
         // we are already recovering, if follower dirty log index moved back
         // from some reason (i.e. truncation, data loss, trigger recovery)
         if (idx.last_dirty_log_index > reply.last_dirty_log_index) {
+            // update follower state to allow recovery of follower with
+            // missing entries
+            idx.last_dirty_log_index = reply.last_dirty_log_index;
+            idx.last_committed_log_index = reply.last_committed_log_index;
             idx.next_index = details::next_offset(idx.last_dirty_log_index);
             idx.follower_state_change.broadcast();
         }
@@ -533,7 +538,23 @@ void consensus::dispatch_vote(bool leadership_transfer) {
         arm_vote_timeout();
         return;
     }
+    auto self_priority = get_node_priority(_self);
+    // check if current node priority is high enough
+    bool current_priority_to_low = _target_priority > self_priority;
+    // update target priority
+    _target_priority = next_target_priority();
 
+    // if priority is to low, skip dispatching votes, do not take priority into
+    // account when we transfer leadership
+    if (current_priority_to_low && !leadership_transfer) {
+        vlog(
+          _ctxlog.trace,
+          "current node priority {} is to low, target priority {}",
+          self_priority,
+          _target_priority);
+        arm_vote_timeout();
+        return;
+    }
     // background, acquire lock, transition state
     (void)with_gate(_bg, [this, leadership_transfer] {
         return dispatch_prevote(leadership_transfer)
@@ -700,19 +721,43 @@ ss::future<> consensus::start() {
                   _term = lstats.dirty_offset_term;
                   _voted_for = {};
               }
-              vlog(
-                _ctxlog.info,
-                "Recovered, log offsets: {}, term:{}",
-                lstats,
-                _term);
+              auto f = ss::now();
+              /**
+               * Snapshot and log was delted, try to recover by creating
+               * snapshot with initial data.
+               *
+               * MOST IMPORTANT:
+               * we can only do this when log is empty and there
+               * is no snapshot for given offset.
+               */
+              if (
+                _log.segment_count() == 0
+                // if log is empty and start offset is persisted in kvstore
+                // dirty offset is equal to (start_offset-1)
+                && lstats.start_offset > lstats.dirty_offset
+                // snapshot must be deleted (it is in the same folder as log
+                // segments)
+                && _last_snapshot_index != lstats.dirty_offset) {
+                  f = f.then([this, lstats] {
+                      return create_recovery_snapshot(lstats);
+                  });
+              }
               /**
                * The configuration manager state may be divereged from the log
                * state, as log is flushed lazily, we have to make sure that the
                * log and configuration manager has exactly the same offsets
                * range
                */
-              auto f = _configuration_manager.truncate(
-                details::next_offset(lstats.dirty_offset));
+              f = f.then([this, dirty = lstats.dirty_offset] {
+                  return _configuration_manager.truncate(
+                    details::next_offset(dirty));
+              });
+
+              vlog(
+                _ctxlog.info,
+                "Recovered, log offsets: {}, term:{}",
+                lstats,
+                _term);
 
               /**
                * We read some batches from the log and have to update the
@@ -764,8 +809,50 @@ ss::future<> consensus::start() {
           .then([this] {
               start_dispatching_disk_append_events();
               return _event_manager.start();
+          })
+          .then([this] {
+              _append_requests_buffer.start(
+                [this](append_entries_request&& request) {
+                    return do_append_entries(std::move(request));
+                });
           });
     });
+}
+ss::future<> consensus::create_recovery_snapshot(
+  const storage::offset_stats& initial_offsets) {
+    auto snapshot_offset = details::prev_offset(initial_offsets.start_offset);
+    static constexpr model::term_id poisson_value{-2};
+    /**
+     * IMPORTANT NOTICE
+     *
+     * We can leverage the fact that log start offset is only updated up to the
+     * committed offset. We can safely update committed index with offset that
+     * is previous to log start offset (last prefix truncation offset).
+     */
+    _commit_index = snapshot_offset;
+    snapshot_metadata md{
+      .last_included_index = snapshot_offset,
+      .last_included_term = poisson_value,
+      .latest_configuration = _configuration_manager.get_latest(),
+      .cluster_time = clock_type::time_point::min(),
+    };
+
+    return details::persist_snapshot(_snapshot_mgr, std::move(md), iobuf())
+      .then([this,
+             snapshot_offset,
+             cfg = _configuration_manager.get_latest()]() mutable {
+          // update consensus state
+          _last_snapshot_index = snapshot_offset;
+          _last_snapshot_term = poisson_value;
+          // update configuration manager
+          return _configuration_manager
+            .add(_last_snapshot_index, std::move(cfg))
+            .then([this] {
+                return _configuration_manager.prefix_truncate(
+                  _last_snapshot_index);
+            });
+      });
+    ;
 }
 
 void consensus::start_dispatching_disk_append_events() {
@@ -912,7 +999,20 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
     if (r.term < _term) {
         return ss::make_ready_future<vote_reply>(std::move(reply));
     }
-
+    auto n_priority = get_node_priority(r.node_id);
+    // do not grant vote if voter priority is lower than current target
+    // priority
+    if (n_priority < _target_priority && !r.leadership_transfer) {
+        vlog(
+          _ctxlog.info,
+          "not grainting vote to node {}, it has priority {} which is lower "
+          "than current target priority {}",
+          r.node_id,
+          n_priority,
+          _target_priority);
+        reply.granted = false;
+        return ss::make_ready_future<vote_reply>(reply);
+    }
     /// Stable leadership optimization
     ///
     /// When current node is a leader (we set _hbeat to max after
@@ -999,9 +1099,7 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
 ss::future<append_entries_reply>
 consensus::append_entries(append_entries_request&& r) {
     return with_gate(_bg, [this, r = std::move(r)]() mutable {
-        return _op_lock.with([this, r = std::move(r)]() mutable {
-            return do_append_entries(std::move(r));
-        });
+        return _append_requests_buffer.enqueue(std::move(r));
     });
 }
 
@@ -1025,7 +1123,11 @@ consensus::do_append_entries(append_entries_request&& r) {
         reply.result = append_entries_reply::status::failure;
         return ss::make_ready_future<append_entries_reply>(std::move(reply));
     }
-
+    /**
+     * When the current leader is alive, whenever a follower receives heartbeat,
+     * it updates its target priority to the initial value
+     */
+    _target_priority = voter_priority::max();
     do_step_down();
     if (r.meta.term > _term) {
         vlog(
@@ -1076,12 +1178,17 @@ consensus::do_append_entries(append_entries_request&& r) {
           ? lstats.dirty_offset_term // use term from lstats
           : get_term(model::offset(
             r.meta.prev_log_index)); // lookup for request term in log
-    // We can only check prev_log_term for entries that are present in the
-    // log. When leader installed snapshot on the follower we may require to
-    // skip the term check as term of prev_log_idx may not be available.
-    if (
-      r.meta.prev_log_index >= lstats.start_offset
-      && r.meta.prev_log_term != last_log_term) {
+
+    // if request prev log index is equal to snapshot index use snapshot as a
+    // source of term information
+    if (r.meta.prev_log_index == _last_snapshot_index) {
+        last_log_term = _last_snapshot_term;
+    }
+    /**
+     * Skip checking term if follower log is empty, we just accept any term from
+     * the leader. This is the case when follower log was deleted.
+     */
+    if (_log.segment_count() > 0 && r.meta.prev_log_term != last_log_term) {
         vlog(
           _ctxlog.debug,
           "Rejecting append entries. missmatching entry term at offset: "
@@ -1996,4 +2103,60 @@ void consensus::maybe_update_majority_replicated_index() {
       _majority_replicated_index, majority_match);
     _consumable_offset_monitor.notify(last_visible_index());
 }
+
+bool consensus::are_heartbeats_suppressed(model::node_id id) const {
+    if (!_fstats.contains(id)) {
+        return true;
+    }
+
+    return _fstats.get(id).suppress_heartbeats;
+}
+
+void consensus::suppress_heartbeats(
+  model::node_id id, follower_req_seq last_seq, bool is_suppressed) {
+    if (auto it = _fstats.find(id); it != _fstats.end()) {
+        if (last_seq <= it->second.last_sent_seq) {
+            it->second.suppress_heartbeats = is_suppressed;
+        }
+    }
+}
+
+voter_priority consensus::next_target_priority() {
+    return voter_priority(std::max<voter_priority::type>(
+      (_target_priority / 5) * 4, min_voter_priority));
+}
+
+/**
+ * We use simple policy where we calculate priority based on the position of the
+ * node in configuration broker vector. We shuffle brokers in raft configuration
+ * so it should give us fairly even distribution of leaders across the nodes.
+ */
+voter_priority consensus::get_node_priority(model::node_id id) const {
+    auto& latest_cfg = _configuration_manager.get_latest();
+    auto& brokers = latest_cfg.brokers();
+
+    auto it = std::find_if(
+      brokers.cbegin(), brokers.cend(), [id](const model::broker& b) {
+          return b.id() == id;
+      });
+
+    if (it == brokers.cend()) {
+        /**
+         * If node is not present in current configuration i.e. was added to the
+         * cluster, return 1 which is lowest priority allowing to become a
+         * leader.
+         */
+        return min_voter_priority;
+    }
+
+    auto idx = std::distance(brokers.cbegin(), it);
+
+    /**
+     * Voter priority is inversly proportion to node position in brokers
+     * vector.
+     */
+    return voter_priority(
+      (brokers.size() - idx) * (voter_priority::max() / brokers.size()));
+}
+
 } // namespace raft
