@@ -13,10 +13,10 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type DeviceInfo interface {
@@ -26,13 +26,13 @@ type DeviceInfo interface {
 func NewDeviceInfo(fs afero.Fs, procFile ProcFile) DeviceInfo {
 
 	return &deviceInfo{
-		procFile: procFile,
-		fs:       fs}
+		procFile:	procFile,
+		fs:		fs}
 }
 
 type deviceInfo struct {
-	procFile ProcFile
-	fs       afero.Fs
+	procFile	ProcFile
+	fs		afero.Fs
 }
 
 func (deviceInfo *deviceInfo) GetIRQs(

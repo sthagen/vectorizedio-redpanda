@@ -10,15 +10,14 @@
 package cmd
 
 import (
-	"vectorized/pkg/cli/cmd/container"
-
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/container"
 )
 
 func NewContainerCommand() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "container",
-		Short: "Manage a local container cluster",
+		Use:	"container",
+		Short:	"Manage a local container cluster",
 	}
 
 	command.AddCommand(container.Start())

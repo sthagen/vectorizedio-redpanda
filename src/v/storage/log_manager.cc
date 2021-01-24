@@ -82,13 +82,14 @@ ss::future<> log_manager::stop() {
     });
 }
 
-inline logs_type::iterator find_next_non_compacted_log(logs_type& logs) {
+static inline logs_type::iterator find_next_non_compacted_log(logs_type& logs) {
     using bflags = log_housekeeping_meta::bitflags;
     return std::find_if(
       logs.begin(), logs.end(), [](const logs_type::value_type& l) {
           return bflags::none == (l.second.flags & bflags::compacted);
       });
 }
+
 ss::future<> log_manager::housekeeping() {
     auto collection_threshold = model::timestamp(
       model::timestamp::now().value() - _config.delete_retention.count());
@@ -153,12 +154,15 @@ ss::future<ss::lw_shared_ptr<segment>> log_manager::make_log_segment(
             version,
             buf_size,
             _config.sanitize_fileops,
-            create_cache());
+            create_cache(ntp.cache_enabled()));
       });
 }
 
-std::optional<batch_cache_index> log_manager::create_cache() {
-    if (unlikely(_config.cache == log_config::with_cache::no)) {
+std::optional<batch_cache_index>
+log_manager::create_cache(with_cache ntp_cache_enabled) {
+    if (unlikely(
+          _config.cache == with_cache::no
+          || ntp_cache_enabled == with_cache::no)) {
         return std::nullopt;
     }
 
@@ -203,11 +207,12 @@ ss::future<log> log_manager::do_manage(ntp_config cfg) {
 
     return recover_log_state(cfg).then([this, cfg = std::move(cfg)]() mutable {
         ss::sstring path = cfg.work_directory();
+        with_cache cache_enabled = cfg.cache_enabled();
         return recover_segments(
                  std::filesystem::path(path),
                  _config.sanitize_fileops,
                  cfg.is_compacted(),
-                 [this] { return create_cache(); },
+                 [this, cache_enabled] { return create_cache(cache_enabled); },
                  _abort_source)
           .then([this, cfg = std::move(cfg)](segment_set segments) mutable {
               auto l = storage::make_disk_backed_log(

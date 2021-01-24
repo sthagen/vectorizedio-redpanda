@@ -14,26 +14,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"vectorized/pkg/system"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
 
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
 )
 
 const enabledFile = "enabled"
 
 type thpTuner struct {
-	fs       afero.Fs
-	executor executors.Executor
+	fs		afero.Fs
+	executor	executors.Executor
 }
 
 // Returns the known locations where config files for Transparent Huge Pages
 // might be found across distros.
 func locations() []string {
 	return []string{
-		"/sys/kernel/mm/transparent_hugepage",        // default
-		"/sys/kernel/mm/redhat_transparent_hugepage", // some versions of RHEL
+		"/sys/kernel/mm/transparent_hugepage",		// default
+		"/sys/kernel/mm/redhat_transparent_hugepage",	// some versions of RHEL
 	}
 }
 

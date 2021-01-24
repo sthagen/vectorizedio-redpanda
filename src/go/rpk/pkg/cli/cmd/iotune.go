@@ -12,25 +12,25 @@ package cmd
 import (
 	"path/filepath"
 	"time"
-	"vectorized/pkg/config"
-	"vectorized/pkg/tuners"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners"
 )
 
 func NewIoTuneCmd(fs afero.Fs, mgr config.Manager) *cobra.Command {
 	var (
-		configFile  string
-		outputFile  string
-		duration    time.Duration
-		directories []string
-		timeout     time.Duration
+		configFile	string
+		outputFile	string
+		duration	time.Duration
+		directories	[]string
+		timeout		time.Duration
 	)
 	command := &cobra.Command{
-		Use:   "iotune",
-		Short: "Measure filesystem performance and create IO configuration file",
+		Use:	"iotune",
+		Short:	"Measure filesystem performance and create IO configuration file",
 		RunE: func(ccmd *cobra.Command, args []string) error {
 			timeout += duration
 			conf, err := mgr.FindOrGenerate(configFile)

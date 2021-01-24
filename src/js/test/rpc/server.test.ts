@@ -20,6 +20,8 @@ import { createHandle } from "../testUtilities";
 import { PolicyError, RecordBatch } from "../../modules/public/Coprocessor";
 import assert = require("assert");
 import * as chokidar from "chokidar";
+import LogService from "../../modules/utilities/Logging";
+const fs = require("fs");
 
 let sinonInstance: SinonSandbox;
 let server: ProcessBatchServer;
@@ -82,8 +84,8 @@ const createProcessBatchRequest = (
 describe("Client", function () {
   it("create() should not return a client if fails to connect", () => {
     return SupervisorClient.create(40000)
-      .then((_c) => false)
-      .catch((_e) => true)
+      .then(() => false)
+      .catch(() => true)
       .then((value) => {
         assert(value, "A client should not have been created");
       });
@@ -94,6 +96,15 @@ describe("Server", function () {
   describe("Given a Request", function () {
     beforeEach(() => {
       sinonInstance = createSandbox();
+      //Mock LogService
+      sinonInstance.stub(LogService, "createLogger").returns({
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        info: sinonInstance.stub(),
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        error: sinonInstance.stub(),
+      });
       manageServer = new ManagementServer();
       manageServer.disable_copros = () => Promise.resolve({ inputs: [0] });
       manageServer.listen(43118);
@@ -262,5 +273,150 @@ describe("Server", function () {
           });
       }
     );
+
+    it("should apply coprocessors to multiple record batches", function () {
+      const { spyGetHandles } = createStubs(sinonInstance);
+      // transform coprocessor function
+      const uppercase = (record) => ({
+        ...record,
+        value: record.value.map((char) => {
+          if (char > 97 && char < 122) {
+            return char - 32;
+          } else {
+            return char;
+          }
+        }),
+      });
+
+      const coprocessors = [1, 2, 3].map((id) =>
+        createHandle({
+          globalId: BigInt(id),
+          apply: (recordBatch) => {
+            const result = new Map();
+            const transformedRecord =
+              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+              // @ts-ignore
+              recordBatch.map(({ header, records }) => ({
+                header,
+                records: records.map(uppercase),
+              }));
+            result.set("result", transformedRecord);
+            return result;
+          },
+        })
+      );
+
+      spyGetHandles.returns(coprocessors);
+
+      // it sends 101 record batches, for each of those this should be
+      // apply 3 coprocessors.
+      const requests = new Array(100).fill({
+        recordBatch: [
+          createRecordBatch({
+            header: {
+              recordCount: 1,
+            },
+            records: [{ value: Buffer.from("b") }],
+          }),
+        ],
+        coprocessorIds: [BigInt(1), BigInt(2), BigInt(3)],
+        ntp: { partition: 1, namespace: "", topic: "produce" },
+      });
+
+      return Promise.all([
+        client.process_batch({
+          requests,
+        }),
+      ]).then(([{ result }]) => {
+        // 101 record batches * 3 coprocessor definition = 303
+        assert(result.length === 300);
+        result.forEach((processBatches) => {
+          processBatches.resultRecordBatch.forEach((rb) => {
+            rb.records.forEach((record) => {
+              // each record must have "A", because the coprocessors
+              // definition transform all letter to uppercase
+              assert.strictEqual(record.value.toString(), "B");
+              assert.strictEqual(record.valueLen, 1);
+            });
+          });
+        });
+      });
+    });
+
+    it("should close logger if there is a fatal exception", (done) => {
+      const fsStub = sinonInstance.stub(fs, "writeFile").returns(null);
+      sinonInstance.stub(LogService, "getPath").returns("a");
+      const close = sinonInstance.stub(LogService, "close");
+      close.returns(Promise.resolve());
+      new ProcessBatchServer("a", "a", "a");
+      // waiting for firing exception
+      setTimeout(() => {
+        assert(close.called);
+        assert(fsStub.called);
+        // validate FileManager exception, this exception happens when it tries
+        // to read unexciting folder
+        assert.strictEqual(
+          fsStub.firstCall.args[1],
+          "Error: ENOENT: no such file or directory, scandir 'a'"
+        );
+        done();
+      }, 10);
+    });
+
+    it("should server process 100 requests", function () {
+      const { spyGetHandles } = createStubs(sinonInstance);
+      // transform coprocessor function
+      const uppercase = (record) => ({
+        ...record,
+        value: record.value.map((char) => {
+          if (char > 97 && char < 122) {
+            return char - 32;
+          } else {
+            return char;
+          }
+        }),
+      });
+
+      const coprocessors = [1].map((id) =>
+        createHandle({
+          globalId: BigInt(id),
+          apply: (recordBatch) => {
+            const result = new Map();
+            const transformedRecord =
+              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+              // @ts-ignore
+              recordBatch.map(({ header, records }) => ({
+                header,
+                records: records.map(uppercase),
+              }));
+            result.set("result", transformedRecord);
+            return result;
+          },
+        })
+      );
+
+      spyGetHandles.returns(coprocessors);
+      const requests = new Array(100).fill({
+        recordBatch: [
+          createRecordBatch({
+            header: {
+              recordCount: 1,
+            },
+            records: [{ value: Buffer.from("b") }],
+          }),
+        ],
+        coprocessorIds: [BigInt(1)],
+        ntp: { partition: 1, namespace: "", topic: "produce" },
+      });
+
+      return Promise.all(
+        requests.map((item) => client.process_batch({ requests: [item] }))
+      ).then(([{ result }]) => {
+        result.forEach((r) => {
+          const e = r.resultRecordBatch[0].records[0].value;
+          assert.deepStrictEqual(e, Buffer.from("B"));
+        });
+      });
+    });
   });
 });

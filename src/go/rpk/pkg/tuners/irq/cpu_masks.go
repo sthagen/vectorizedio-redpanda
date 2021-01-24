@@ -13,12 +13,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
-	"vectorized/pkg/tuners/hwloc"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/hwloc"
 )
 
 type CpuMasks interface {
@@ -42,16 +42,16 @@ func NewCpuMasks(
 	fs afero.Fs, hwloc hwloc.HwLoc, executor executors.Executor,
 ) CpuMasks {
 	return &cpuMasks{
-		fs:       fs,
-		hwloc:    hwloc,
-		executor: executor,
+		fs:		fs,
+		hwloc:		hwloc,
+		executor:	executor,
 	}
 }
 
 type cpuMasks struct {
-	hwloc    hwloc.HwLoc
-	fs       afero.Fs
-	executor executors.Executor
+	hwloc		hwloc.HwLoc
+	fs		afero.Fs
+	executor	executors.Executor
 }
 
 func (masks *cpuMasks) BaseCpuMask(cpuMask string) (string, error) {

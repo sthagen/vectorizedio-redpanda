@@ -101,6 +101,10 @@ public:
         return _conn->server().topics_frontend();
     }
 
+    cluster::id_allocator_frontend& id_allocator_frontend() const {
+        return _conn->server().id_allocator_frontend();
+    }
+
     int32_t throttle_delay_ms() const {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                  _throttle_delay)
@@ -123,7 +127,7 @@ public:
     template<typename ResponseType>
     CONCEPT(requires requires (
             ResponseType r, const request_context& ctx, response& resp) {
-        { r.encode(ctx, resp) } -> void;
+        { r.encode(ctx, resp) } -> std::same_as<void>;
     })
     // clang-format on
     ss::future<response_ptr> respond(ResponseType r) {
@@ -141,6 +145,8 @@ public:
     coordinator_ntp_mapper& coordinator_mapper() {
         return _conn->server().coordinator_mapper();
     }
+
+    const ss::sstring& listener() const { return _conn->listener(); }
 
 private:
     ss::lw_shared_ptr<connection_context> _conn;

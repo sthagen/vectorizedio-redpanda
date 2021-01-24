@@ -85,12 +85,12 @@ using move_partition_replicas_cmd = controller_command<
 CONCEPT(
 template<typename T>
 concept ControllerCommand = requires (T cmd) {
-        typename T::key_t;
-        typename T::value_t;
-        { cmd.key } -> typename T::key_t;
-        { cmd.value } -> typename T::value_t;
-        { T::type } -> command_type;
-        { T::batch_type } -> model::record_batch_type;
+    typename T::key_t;
+    typename T::value_t;
+    { cmd.key } -> std::convertible_to<const typename T::key_t&>;
+    { cmd.value } -> std::convertible_to<const typename T::value_t&>;
+    { T::type } -> std::convertible_to<const command_type&>;
+    { T::batch_type } -> std::convertible_to<const model::record_batch_type&>;
 };
 )
 // clang-format on

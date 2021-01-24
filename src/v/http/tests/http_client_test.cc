@@ -20,6 +20,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/timer.hh>
 #include <seastar/http/function_handlers.hh>
 #include <seastar/http/handlers.hh>
 #include <seastar/http/httpd.hh>
@@ -107,6 +108,12 @@ started_client_and_server(const rpc::base_transport::configuration& conf) {
     };
 }
 
+template<typename Header, typename Host>
+static void header_set_host(Header& header, Host& h) {
+    auto host = fmt::format("{}", h);
+    header.insert(boost::beast::http::field::host, host);
+}
+
 /// Test success path (should run in ss::async)
 template<class Func>
 void test_http_request(
@@ -147,8 +154,8 @@ SEASTAR_TEST_CASE(test_http_POST_roundtrip) {
         header.target("/echo");
         header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        header.insert(boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(header, config.server_addr);
         header.insert(
           boost::beast::http::field::content_type, "application/json");
         test_http_request(
@@ -169,13 +176,117 @@ SEASTAR_TEST_CASE(test_http_POST_roundtrip) {
     });
 }
 
+/// Test http streaming requests e2e in ss::async
+template<class Func>
+void test_http_streaming_request(
+  const rpc::base_transport::configuration& conf,
+  http::client::request_header&& header,
+  std::optional<ss::sstring> request_data,
+  size_t skip,
+  const Func& check_reply) {
+    auto [server, client] = started_client_and_server(conf);
+
+    http::client::response_stream_ref response;
+    if (request_data) {
+        iobuf body;
+        body.append(request_data->data(), request_data->size());
+        auto body_stream = make_iobuf_input_stream(std::move(body));
+        response = client->request(std::move(header), body_stream).get0();
+    } else {
+        response = client->request(std::move(header)).get0();
+    }
+
+    // Receive response
+    auto stream = response->as_input_stream();
+    iobuf response_body;
+    if (skip) {
+        stream.skip(skip).get();
+    }
+    while (!stream.eof()) {
+        auto buf = stream.read().get0();
+        response_body.append(std::move(buf));
+    }
+
+    // Check response
+    check_reply(response->get_headers(), std::move(response_body));
+
+    server->stop().get0();
+}
+
+/// Check GET streaming request and skip method of the response data source
+SEASTAR_TEST_CASE(test_http_GET_streaming_roundtrip) {
+    return ss::async([] {
+        auto config = transport_configuration();
+        http::client::request_header header;
+        header.method(boost::beast::http::verb::get);
+        header.target("/get");
+        header.insert(
+          boost::beast::http::field::content_length,
+          boost::beast::to_static_string(0));
+        header_set_host(header, config.server_addr);
+        header.insert(
+          boost::beast::http::field::content_type, "application/json");
+        constexpr size_t skip_bytes = 100;
+        test_http_streaming_request(
+          config,
+          std::move(header),
+          std::nullopt,
+          skip_bytes,
+          [skip_bytes](
+            http::client::response_header const& header, iobuf&& body) {
+              BOOST_REQUIRE_EQUAL(
+                header.result(), boost::beast::http::status::ok);
+
+              iobuf_parser parser(std::move(body));
+              std::string actual = parser.read_string(parser.bytes_left());
+              std::string expected
+                = "\"" + std::string(httpd_server_reply)
+                  + "\""; // sestar will return json string containing the
+              expected = expected.substr(skip_bytes);
+              BOOST_REQUIRE_EQUAL(expected, actual);
+          });
+    });
+}
+
+SEASTAR_TEST_CASE(test_http_POST_streaming_roundtrip) {
+    return ss::async([] {
+        auto config = transport_configuration();
+        http::client::request_header header;
+        header.method(boost::beast::http::verb::post);
+        header.target("/echo");
+        header.insert(
+          boost::beast::http::field::content_length,
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(header, config.server_addr);
+        header.insert(
+          boost::beast::http::field::content_type, "application/json");
+
+        test_http_streaming_request(
+          config,
+          std::move(header),
+          ss::sstring(httpd_server_reply),
+          0,
+          [](http::client::response_header const& header, iobuf&& body) {
+              BOOST_REQUIRE_EQUAL(
+                header.result(), boost::beast::http::status::ok);
+
+              iobuf_parser parser(std::move(body));
+              std::string actual = parser.read_string(parser.bytes_left());
+              std::string expected
+                = "\"" + std::string(httpd_server_reply)
+                  + "\""; // sestar will return json string containing the
+              BOOST_REQUIRE_EQUAL(expected, actual);
+          });
+    });
+}
+
 SEASTAR_TEST_CASE(test_error_500) {
     return ss::async([] {
         auto config = transport_configuration();
         http::client::request_header header;
         header.method(boost::beast::http::verb::get);
         header.target("/fail-status-500");
-        header.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(header, config.server_addr);
         header.insert(
           boost::beast::http::field::content_type, "application/json");
         test_http_request(
@@ -201,7 +312,7 @@ SEASTAR_TEST_CASE(test_http_GET_roundtrip) {
         http::client::request_header header;
         header.method(boost::beast::http::verb::get);
         header.target("/get");
-        header.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(header, config.server_addr);
         header.insert(
           boost::beast::http::field::content_type, "application/json");
         test_http_request(
@@ -229,8 +340,8 @@ SEASTAR_TEST_CASE(test_http_PUT_roundtrip) {
         header.target("/put");
         header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        header.insert(boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(header, config.server_addr);
         header.insert(
           boost::beast::http::field::content_type, "application/json");
         test_http_request(
@@ -365,6 +476,7 @@ void test_impostor_request(
   http::client::request_header header,
   const ss::sstring& request_data,
   std::vector<ss::sstring> response_data,
+  bool prefetch_header,
   const OKFunc& check_reply,
   const ErrFunc check_error = &std::rethrow_exception) {
     auto [server, client] = started_client_and_impostor(
@@ -382,6 +494,10 @@ void test_impostor_request(
         req_stream->send_eof().get();
 
         // Receive response
+        if (prefetch_header) {
+            resp_stream->prefetch_headers().get();
+            BOOST_REQUIRE(resp_stream->is_header_done());
+        }
         while (!resp_stream->is_done()) {
             iobuf res = resp_stream->recv_some().get0();
             response_body.append(std::move(res));
@@ -410,9 +526,8 @@ SEASTAR_TEST_CASE(test_http_via_impostor) {
         request_header.target("/");
         request_header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        request_header.insert(
-          boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(request_header, config.server_addr);
         request_header.insert(
           boost::beast::http::field::content_type, "application/json");
 
@@ -420,9 +535,10 @@ SEASTAR_TEST_CASE(test_http_via_impostor) {
         ss::sstring response_data = httpd_server_reply;
         http::client::response_header resp_hdr;
         resp_hdr.result(boost::beast::http::status::ok);
-        resp_hdr.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(resp_hdr, config.server_addr);
         resp_hdr.insert(
-          boost::beast::http::field::content_length, response_data.size());
+          boost::beast::http::field::content_length,
+          boost::beast::to_static_string(response_data.size()));
         auto full_response = get_response_header(resp_hdr) + response_data;
 
         // Run test case
@@ -431,6 +547,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor) {
           std::move(request_header),
           ss::sstring(httpd_server_reply),
           {full_response},
+          false,
           [](http::client::response_header const& header, iobuf&& body) {
               BOOST_REQUIRE_EQUAL(
                 header.result(), boost::beast::http::status::ok);
@@ -453,9 +570,8 @@ SEASTAR_TEST_CASE(test_http_via_impostor_incorrect_reply) {
         request_header.target("/");
         request_header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        request_header.insert(
-          boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(request_header, config.server_addr);
         request_header.insert(
           boost::beast::http::field::content_type, "application/json");
 
@@ -467,6 +583,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor_incorrect_reply) {
           std::move(request_header),
           ss::sstring(httpd_server_reply),
           {full_response},
+          false,
           [](http::client::response_header const&, iobuf&&) {
               BOOST_FAIL("Exception expected");
           },
@@ -492,9 +609,8 @@ SEASTAR_TEST_CASE(test_http_via_impostor_chunked_encoding) {
         request_header.target("/");
         request_header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        request_header.insert(
-          boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(request_header, config.server_addr);
         request_header.insert(
           boost::beast::http::field::content_type, "application/json");
 
@@ -505,7 +621,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor_chunked_encoding) {
         resp_hdr.result(boost::beast::http::status::ok);
         resp_hdr.insert(
           boost::beast::http::field::transfer_encoding, "chunked");
-        resp_hdr.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(resp_hdr, config.server_addr);
         auto header_str = get_response_header(resp_hdr);
         iobuf outbuf;
         outbuf.append(header_str.data(), header_str.size());
@@ -520,6 +636,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor_chunked_encoding) {
           std::move(request_header),
           ss::sstring(httpd_server_reply),
           {bufparser.read_string(bufparser.bytes_left())},
+          false,
           [](http::client::response_header const& header, iobuf&& body) {
               BOOST_REQUIRE_EQUAL(
                 header.result(), boost::beast::http::status::ok);
@@ -550,9 +667,10 @@ struct range_t {
     size_t ixend;
 };
 
-ss::future<> run_framing_test_using_impostor(bool chunked, size_t n_iters) {
+ss::future<> run_framing_test_using_impostor(
+  bool chunked, size_t n_iters, bool prefetch_headers) {
     // Send data and recv chunked response
-    return ss::async([chunked, n_iters] {
+    return ss::async([chunked, n_iters, prefetch_headers] {
         auto config = transport_configuration();
         // Generate request
         http::client::request_header request_header;
@@ -560,9 +678,8 @@ ss::future<> run_framing_test_using_impostor(bool chunked, size_t n_iters) {
         request_header.target("/");
         request_header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        request_header.insert(
-          boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(request_header, config.server_addr);
         request_header.insert(
           boost::beast::http::field::content_type, "application/json");
 
@@ -575,9 +692,10 @@ ss::future<> run_framing_test_using_impostor(bool chunked, size_t n_iters) {
               boost::beast::http::field::transfer_encoding, "chunked");
         } else {
             resp_hdr.insert(
-              boost::beast::http::field::content_length, response_data.size());
+              boost::beast::http::field::content_length,
+              boost::beast::to_static_string(response_data.size()));
         }
-        resp_hdr.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(resp_hdr, config.server_addr);
         auto header_str = get_response_header(resp_hdr);
 
         using split_t = std::vector<range_t>;
@@ -612,6 +730,7 @@ ss::future<> run_framing_test_using_impostor(bool chunked, size_t n_iters) {
               request_header,
               ss::sstring(httpd_server_reply),
               chunks,
+              prefetch_headers,
               [](http::client::response_header const& header, iobuf&& body) {
                   BOOST_REQUIRE_EQUAL(
                     header.result(), boost::beast::http::status::ok);
@@ -625,11 +744,20 @@ ss::future<> run_framing_test_using_impostor(bool chunked, size_t n_iters) {
 }
 
 SEASTAR_TEST_CASE(test_http_via_impostor_framing) {
-    return run_framing_test_using_impostor(false, 32);
+    return run_framing_test_using_impostor(false, 32, false);
+}
+
+SEASTAR_TEST_CASE(test_http_via_impostor_framing_with_prefetch) {
+    return run_framing_test_using_impostor(false, 32, true);
 }
 
 SEASTAR_TEST_CASE(test_http_via_impostor_chunked_encoding_framing) {
-    return run_framing_test_using_impostor(true, 32);
+    return run_framing_test_using_impostor(true, 32, false);
+}
+
+SEASTAR_TEST_CASE(
+  test_http_via_impostor_chunked_encoding_framing_with_prefetch) {
+    return run_framing_test_using_impostor(true, 32, true);
 }
 
 SEASTAR_TEST_CASE(test_http_via_impostor_no_content_length) {
@@ -643,9 +771,8 @@ SEASTAR_TEST_CASE(test_http_via_impostor_no_content_length) {
         request_header.target("/");
         request_header.insert(
           boost::beast::http::field::content_length,
-          std::strlen(httpd_server_reply));
-        request_header.insert(
-          boost::beast::http::field::host, config.server_addr);
+          boost::beast::to_static_string(std::strlen(httpd_server_reply)));
+        header_set_host(request_header, config.server_addr);
         request_header.insert(
           boost::beast::http::field::content_type, "application/json");
 
@@ -653,7 +780,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor_no_content_length) {
         ss::sstring response_data = httpd_server_reply;
         http::client::response_header resp_hdr;
         resp_hdr.result(boost::beast::http::status::ok);
-        resp_hdr.insert(boost::beast::http::field::host, config.server_addr);
+        header_set_host(resp_hdr, config.server_addr);
         auto full_response = get_response_header(resp_hdr) + response_data;
 
         // Run test case
@@ -662,6 +789,7 @@ SEASTAR_TEST_CASE(test_http_via_impostor_no_content_length) {
           std::move(request_header),
           ss::sstring(httpd_server_reply),
           {full_response},
+          false,
           [](http::client::response_header const& header, iobuf&& body) {
               // Expect normal reply despite the absence of content-length
               // header

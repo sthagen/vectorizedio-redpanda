@@ -14,7 +14,6 @@
 #include "cluster/controller.h"
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
-#include "cluster/namespace.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/service.h"
 #include "cluster/simple_batch_builder.h"
@@ -23,6 +22,7 @@
 #include "config/configuration.h"
 #include "fmt/format.h"
 #include "model/metadata.h"
+#include "model/namespace.h"
 #include "model/record.h"
 #include "raft/service.h"
 #include "random/generators.h"
@@ -109,7 +109,7 @@ public:
     void
     persist_test_batches(ss::circular_buffer<model::record_batch> batches) {
         tests::persist_log_file(
-          _base_dir, cluster::controller_ntp, std::move(batches))
+          _base_dir, model::controller_ntp, std::move(batches))
           .get0();
     }
 
@@ -118,7 +118,8 @@ public:
           .path = std::filesystem::path(_base_dir)};
         set_configuration("data_directory", data_dir_path);
         set_configuration("node_id", _current_node.id()());
-        set_configuration("kafka_api", _current_node.kafka_api_address());
+        set_configuration(
+          "kafka_api", _current_node.kafka_advertised_listeners());
         set_configuration("rpc_server", _current_node.rpc_address());
         set_configuration("seed_servers", _seeds);
         set_configuration("disable_metrics", true);
@@ -175,7 +176,7 @@ public:
         rpc::server_configuration rpc_cfg("cluster_tests_rpc");
         auto rpc_sa = _current_node.rpc_address().resolve().get0();
         rpc_cfg.max_service_memory_per_core = memory_groups::rpc_total_memory();
-        rpc_cfg.addrs.push_back(rpc_sa);
+        rpc_cfg.addrs.emplace_back(rpc_sa);
         rpc_cfg.disable_metrics = rpc::metrics_disabled::yes;
 
         _rpc.start(rpc_cfg).get0();
@@ -329,7 +330,6 @@ static void wait_for_leadership(cluster::partition_leaders_table& leaders) {
     using namespace std::chrono_literals;
 
     leaders
-      .wait_for_leader(
-        cluster::controller_ntp, ss::lowres_clock::now() + 10s, {})
+      .wait_for_leader(model::controller_ntp, ss::lowres_clock::now() + 10s, {})
       .get0();
 }

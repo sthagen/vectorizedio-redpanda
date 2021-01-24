@@ -17,6 +17,7 @@ import * as fs from "fs";
 import { createHandle } from "../testUtilities";
 import { hash64 } from "xxhash";
 import * as chokidar from "chokidar";
+import LogService from "../../modules/utilities/Logging";
 
 let sinonInstance: SinonSandbox;
 let server: ManagementServer;
@@ -45,6 +46,15 @@ const createStubs = (sandbox: SinonSandbox) => {
   const disableCoprocessor = sandbox
     .stub(FileManager.prototype, "disableCoprocessors")
     .returns(Promise.resolve());
+
+  sandbox.stub(LogService, "createLogger").returns({
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    info: sandbox.stub(),
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    error: sandbox.stub(),
+  });
 
   return {
     moveCoprocessor,
@@ -275,4 +285,37 @@ describe("FileManager", () => {
       done();
     });
   });
+
+  it(
+    "should remove a coprocessor, if it's removed from active folder and " +
+      "memory, although disable_coproc request fails",
+    function () {
+      const handle = createHandle({
+        globalId: hash64(Buffer.from("file"), 0).readBigUInt64LE(),
+      });
+      const {
+        getCoprocessor,
+        moveCoprocessor,
+        disableCoprocessor,
+      } = createStubs(sinonInstance);
+      moveCoprocessor.returns(Promise.resolve(handle));
+      getCoprocessor.returns(Promise.resolve(handle));
+      disableCoprocessor.reset();
+      disableCoprocessor.returns(Promise.reject("error"));
+
+      const repo = new Repository();
+      const removeSpy = sinonInstance.spy(repo, "remove");
+      const file = new FileManager(repo, "submit", "active", "inactive");
+
+      repo.add(handle);
+
+      return file.removeHandleFromFilePath(handle.filename, repo).then(() => {
+        assert(removeSpy.called);
+        assert(disableCoprocessor.called);
+        assert.strictEqual(repo.size(), 0);
+        assert(removeSpy.withArgs(handle));
+        assert.rejects(disableCoprocessor.firstCall.returnValue);
+      });
+    }
+  );
 });

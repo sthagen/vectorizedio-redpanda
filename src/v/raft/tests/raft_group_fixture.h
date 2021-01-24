@@ -145,7 +145,7 @@ struct raft_node {
         tstlog.info("Starting node {} stack ", id());
         // start rpc
         rpc::server_configuration scfg("raft_test_rpc");
-        scfg.addrs = {broker.rpc_address().resolve().get0()};
+        scfg.addrs.emplace_back(broker.rpc_address().resolve().get0());
         scfg.max_service_memory_per_core = 1024 * 1024 * 1024;
         scfg.credentials = nullptr;
         scfg.disable_metrics = rpc::metrics_disabled::yes;
@@ -345,7 +345,7 @@ struct raft_group {
           ntp,
           make_broker(node_id),
           _id,
-          raft::group_configuration(_initial_brokers),
+          raft::group_configuration(_initial_brokers, model::revision_id(0)),
           raft::timeout_jitter(heartbeat_interval * 2),
           fmt::format("{}/{}", _storage_dir, node_id()),
           _storage_type,
@@ -366,7 +366,7 @@ struct raft_group {
           ntp,
           broker,
           _id,
-          raft::group_configuration({}),
+          raft::group_configuration({}, model::revision_id(0)),
           raft::timeout_jitter(heartbeat_interval * 2),
           fmt::format("{}/{}", _storage_dir, node_id()),
           _storage_type,
@@ -416,14 +416,16 @@ struct raft_group {
     }
 
     void election_callback(model::node_id src, raft::leadership_status st) {
-        if (st.current_leader != src) {
+        if (
+          !st.current_leader
+          || st.current_leader && st.current_leader->id() != src) {
             // only accept election callbacks from current leader.
             return;
         }
         tstlog.info(
           "Group {} has new leader {}", st.group, st.current_leader.value());
 
-        _leader_id = st.current_leader;
+        _leader_id = st.current_leader->id();
         _election_cond.broadcast();
         _elections_count++;
     }
@@ -679,6 +681,28 @@ static ss::future<bool> replicate_random_batches(
           raft::replicate_options opts(c_lvl);
 
           return leader_node.consensus->replicate(std::move(rdr), opts)
+            .then([](result<raft::replicate_result> res) {
+                if (!res) {
+                    return false;
+                }
+                return true;
+            });
+      });
+}
+
+static ss::future<bool> replicate_random_batches(
+  model::term_id expected_term,
+  raft_group& gr,
+  int count,
+  raft::consistency_level c_lvl = raft::consistency_level::quorum_ack,
+  model::timeout_clock::duration tout = 1s) {
+    return retry_with_leader(
+      gr, 5, tout, [count, expected_term, c_lvl](raft_node& leader_node) {
+          auto rdr = random_batches_reader(count);
+          raft::replicate_options opts(c_lvl);
+
+          return leader_node.consensus
+            ->replicate(expected_term, std::move(rdr), opts)
             .then([](result<raft::replicate_result> res) {
                 if (!res) {
                     return false;

@@ -304,7 +304,7 @@ static ss::future<metadata_response::topic>
 create_topic(request_context& ctx, model::topic&& topic) {
     // default topic configuration
     cluster::topic_configuration cfg{
-      cluster::kafka_namespace,
+      model::kafka_namespace,
       topic,
       config::shard_local_cfg().default_topic_partitions(),
       config::shard_local_cfg().default_topic_replication()};
@@ -355,7 +355,7 @@ get_topic_metadata(request_context& ctx, metadata_request& request) {
         // only serve topics from the kafka namespace
         auto it = std::remove_if(
           topics.begin(), topics.end(), [](model::topic_metadata& t_md) {
-              return t_md.tp_ns.ns != cluster::kafka_namespace;
+              return t_md.tp_ns.ns != model::kafka_namespace;
           });
         std::transform(
           topics.begin(),
@@ -375,7 +375,7 @@ get_topic_metadata(request_context& ctx, metadata_request& request) {
         auto source_topic = model::get_source_topic(topic);
         if (auto md = ctx.metadata_cache().get_topic_metadata(
               model::topic_namespace_view(
-                cluster::kafka_namespace, source_topic));
+                model::kafka_namespace, source_topic));
             md) {
             auto src_topic_response
               = metadata_response::topic::make_from_topic_metadata(
@@ -412,17 +412,19 @@ ss::future<response_ptr> metadata_api::process(
       metadata_response{},
       [](request_context& ctx, metadata_response& reply) {
           auto brokers = ctx.metadata_cache().all_brokers();
-          std::transform(
-            brokers.begin(),
-            brokers.end(),
-            std::back_inserter(reply.brokers),
-            [](cluster::broker_ptr b) {
-                return metadata_response::broker{
-                  .node_id = b->id(),
-                  .host = b->kafka_api_address().host(),
-                  .port = b->kafka_api_address().port(),
-                  .rack = b->rack()};
-            });
+          for (const auto& broker : brokers) {
+              for (const auto& listener :
+                   broker->kafka_advertised_listeners()) {
+                  // filter broker listeners by active connection
+                  if (listener.name == ctx.listener()) {
+                      reply.brokers.push_back(metadata_response::broker{
+                        .node_id = broker->id(),
+                        .host = listener.address.host(),
+                        .port = listener.address.port(),
+                        .rack = broker->rack()});
+                  }
+              }
+          }
 
           // FIXME:  #95 Cluster Id
           reply.cluster_id = std::nullopt;

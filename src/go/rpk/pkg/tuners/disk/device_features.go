@@ -14,15 +14,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"vectorized/pkg/system"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
 )
 
 const (
-	CachePolicyWriteThrough string = "write through"
-	CachePolicyWriteBack    string = "write back"
+	CachePolicyWriteThrough	string	= "write through"
+	CachePolicyWriteBack	string	= "write back"
 )
 
 type DeviceFeatures interface {
@@ -37,14 +37,14 @@ type DeviceFeatures interface {
 
 func NewDeviceFeatures(fs afero.Fs, blockDevices BlockDevices) DeviceFeatures {
 	return &deviceFeatures{
-		fs:           fs,
-		blockDevices: blockDevices,
+		fs:		fs,
+		blockDevices:	blockDevices,
 	}
 }
 
 type deviceFeatures struct {
-	fs           afero.Fs
-	blockDevices BlockDevices
+	fs		afero.Fs
+	blockDevices	BlockDevices
 }
 
 func (d *deviceFeatures) GetScheduler(device string) (string, error) {

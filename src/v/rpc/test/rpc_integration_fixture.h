@@ -63,7 +63,7 @@ struct echo_impl final : echo::echo_service {
     }
 
     ss::future<echo::echo_resp>
-    sleep_1s(echo::echo_req&& req, rpc::streaming_context&) final {
+    sleep_1s(echo::echo_req&&, rpc::streaming_context&) final {
         using namespace std::chrono_literals;
         return ss::sleep(1s).then(
           []() { return echo::echo_resp{.str = "Zzz..."}; });
@@ -124,9 +124,9 @@ public:
     }
 
 protected:
+    ss::socket_address _listen_address;
     ss::smp_service_group _ssg;
     ss::scheduling_group _sg;
-    ss::socket_address _listen_address;
 
 private:
     virtual void check_server() = 0;
@@ -155,7 +155,7 @@ public:
       std::optional<ss::tls::credentials_builder> credentials = std::nullopt,
       ss::tls::reload_callback&& cb = {}) override {
         rpc::server_configuration scfg("unit_test_rpc");
-        scfg.addrs = {_listen_address};
+        scfg.addrs.emplace_back(_listen_address);
         scfg.max_service_memory_per_core = static_cast<int64_t>(
           ss::memory::stats().total_memory() / 10);
         scfg.credentials
@@ -201,7 +201,7 @@ public:
       std::optional<ss::tls::credentials_builder> credentials = std::nullopt,
       ss::tls::reload_callback&& cb = {}) override {
         rpc::server_configuration scfg("unit_test_rpc_sharded");
-        scfg.addrs = {_listen_address};
+        scfg.addrs.emplace_back(_listen_address);
         scfg.max_service_memory_per_core = static_cast<int64_t>(
           ss::memory::stats().total_memory() / 10);
         scfg.credentials
@@ -233,13 +233,16 @@ public:
 
 private:
     void check_server() override {
-        const bool all_initialized
-          = ss::map_reduce(
-              boost::irange<unsigned>(0, ss::smp::count),
-              [this](unsigned /*c*/) { return _server.local_is_initialized(); },
-              true,
-              std::logical_and<>())
-              .get0();
+        const bool all_initialized = ss::map_reduce(
+                                       boost::irange<unsigned>(
+                                         0, ss::smp::count),
+                                       [this](unsigned /*c*/) {
+                                           return ss::make_ready_future<bool>(
+                                             _server.local_is_initialized());
+                                       },
+                                       true,
+                                       std::logical_and<>())
+                                       .get0();
         if (!all_initialized) {
             throw std::runtime_error("Configure server first!!!");
         }

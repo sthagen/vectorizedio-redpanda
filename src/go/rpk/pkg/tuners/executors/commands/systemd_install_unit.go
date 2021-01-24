@@ -12,16 +12,16 @@ package commands
 import (
 	"bufio"
 	"fmt"
-	"vectorized/pkg/system/systemd"
 
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system/systemd"
 )
 
 type installSystemdUnitCommand struct {
-	client systemd.Client
-	fs     afero.Fs
-	body   string
-	name   string
+	client	systemd.Client
+	fs	afero.Fs
+	body	string
+	name	string
 }
 
 func NewInstallSystemdUnitCmd(
@@ -29,10 +29,10 @@ func NewInstallSystemdUnitCmd(
 	name string,
 ) (Command, error) {
 	cmd := &installSystemdUnitCommand{
-		client: client,
-		fs:     fs,
-		body:   body,
-		name:   name,
+		client:	client,
+		fs:	fs,
+		body:	body,
+		name:	name,
 	}
 	return cmd, nil
 }

@@ -23,15 +23,6 @@ rp_test(
 
 rp_test(
   UNIT_TEST
-  BINARY_NAME parser_test
-  SOURCES parser_test.cc
-  LIBRARIES v::seastar_testing_main v::storage_test_utils
-  LABELS storage
-  ARGS "-- -c 1"
-)
-
-rp_test(
-  UNIT_TEST
   BINARY_NAME log_segment_reader_test
   SOURCES log_segment_reader_test.cc
   LIBRARIES v::seastar_testing_main v::storage_test_utils
@@ -189,3 +180,10 @@ rp_test(
   LIBRARIES Seastar::seastar_perf_testing v::storage
   LABELS storage
 )
+
+rp_test(
+  UNIT_TEST
+  BINARY_NAME test_index_state
+  SOURCES index_state_test.cc
+  LIBRARIES v::seastar_testing_main v::storage_test_utils
+  LABELS storage)

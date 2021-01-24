@@ -12,11 +12,11 @@ package tuners
 import (
 	"fmt"
 	"time"
-	"vectorized/pkg/os"
-	"vectorized/pkg/tuners/iotune"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/iotune"
 )
 
 func NewIoTuneTuner(
@@ -50,11 +50,11 @@ func tune(
 ) TuneResult {
 	ioTune := iotune.NewIoTune(os.NewProc(), timeout)
 	args := iotune.IoTuneArgs{
-		Dirs:           evalDirectories,
-		Format:         iotune.Seastar,
-		PropertiesFile: ioConfigFile,
-		Duration:       duration,
-		FsCheck:        false,
+		Dirs:		evalDirectories,
+		Format:		iotune.Seastar,
+		PropertiesFile:	ioConfigFile,
+		Duration:	duration,
+		FsCheck:	false,
 	}
 	output, err := ioTune.Run(args)
 	for _, outLine := range output {

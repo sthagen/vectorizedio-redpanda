@@ -9,6 +9,8 @@
 
 #include "redpanda/application.h"
 
+#include "cluster/id_allocator.h"
+#include "cluster/id_allocator_frontend.h"
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/service.h"
@@ -35,6 +37,7 @@
 #include <seastar/core/thread.hh>
 #include <seastar/http/api_docs.hh>
 #include <seastar/http/exception.hh>
+#include <seastar/http/file_handler.hh>
 #include <seastar/json/json_elements.hh>
 #include <seastar/util/defer.hh>
 
@@ -166,7 +169,7 @@ void application::hydrate_config(const po::variables_map& cfg) {
 }
 
 void application::check_environment() {
-    syschecks::systemd_message("checking environment (CPU, Mem)");
+    syschecks::systemd_message("checking environment (CPU, Mem)").get();
     syschecks::cpu();
     syschecks::memory(config::shard_local_cfg().developer_mode());
     storage::directories::initialize(
@@ -174,12 +177,32 @@ void application::check_environment() {
       .get();
 }
 
+/**
+ * Prepend a / to the path component. This handles the case where path is an
+ * empty string (e.g. url/) or when the path omits the root file path directory
+ * (e.g. url/index.html vs url//index.html). The directory handler in seastar is
+ * opininated and not very forgiving here so we help it a bit.
+ */
+class dashboard_handler final : public ss::httpd::directory_handler {
+public:
+    dashboard_handler()
+      : directory_handler(*config::shard_local_cfg().dashboard_dir()) {}
+
+    ss::future<std::unique_ptr<ss::httpd::reply>> handle(
+      const ss::sstring& path,
+      std::unique_ptr<ss::httpd::request> req,
+      std::unique_ptr<ss::httpd::reply> rep) override {
+        req->param.set("path", "/" + req->param.at("path"));
+        return directory_handler::handle(path, std::move(req), std::move(rep));
+    }
+};
+
 void application::configure_admin_server() {
     auto& conf = config::shard_local_cfg();
     if (!conf.enable_admin_api()) {
         return;
     }
-    syschecks::systemd_message("constructing http server");
+    syschecks::systemd_message("constructing http server").get();
     construct_service(_admin, ss::sstring("admin")).get();
     // configure admin API TLS
     if (conf.admin_api_tls().is_enabled()) {
@@ -212,9 +235,8 @@ void application::configure_admin_server() {
           .invoke_on_all([](ss::http_server& server) {
               server._routes.add(
                 ss::httpd::operation_type::GET,
-                ss::httpd::url("/"),
-                new ss::httpd::directory_handler(
-                  *config::shard_local_cfg().dashboard_dir()));
+                ss::httpd::url("/dashboard").remainder("path"),
+                new dashboard_handler());
           })
           .get0();
     }
@@ -224,7 +246,8 @@ void application::configure_admin_server() {
     ss::prometheus::add_prometheus_routes(_admin, metrics_conf).get();
     if (conf.enable_admin_api()) {
         syschecks::systemd_message(
-          "enabling admin HTTP api: {}", config::shard_local_cfg().admin());
+          "enabling admin HTTP api: {}", config::shard_local_cfg().admin())
+          .get();
         auto rb = ss::make_shared<ss::api_registry_builder20>(
           conf.admin_api_doc_dir(), "/v1");
         _admin
@@ -292,12 +315,12 @@ static storage::log_config manager_config_from_global_config() {
       config::shard_local_cfg().data_directory().as_sstring(),
       config::shard_local_cfg().log_segment_size(),
       config::shard_local_cfg().compacted_log_segment_size(),
+      config::shard_local_cfg().max_compacted_log_segment_size(),
       storage::debug_sanitize_files::no,
       config::shard_local_cfg().retention_bytes(),
       config::shard_local_cfg().log_compaction_interval_ms(),
       config::shard_local_cfg().delete_retention_ms(),
-      storage::log_config::with_cache(
-        !config::shard_local_cfg().disable_batch_cache()),
+      storage::with_cache(!config::shard_local_cfg().disable_batch_cache()),
       storage::batch_cache::reclaim_options{
         .growth_window = config::shard_local_cfg().reclaim_growth_window(),
         .stable_window = config::shard_local_cfg().reclaim_stable_window(),
@@ -313,12 +336,12 @@ void application::wire_up_services() {
     }).get();
 
     // cluster
-    syschecks::systemd_message("Adding raft client cache");
+    syschecks::systemd_message("Adding raft client cache").get();
     construct_service(_raft_connection_cache).get();
-    syschecks::systemd_message("Building shard-lookup tables");
+    syschecks::systemd_message("Building shard-lookup tables").get();
     construct_service(shard_table).get();
 
-    syschecks::systemd_message("Intializing storage services");
+    syschecks::systemd_message("Intializing storage services").get();
     construct_service(
       storage,
       kvstore_config_from_global_config(),
@@ -330,15 +353,13 @@ void application::wire_up_services() {
                                                .coproc_supervisor_server()
                                                .resolve()
                                                .get0();
-        syschecks::systemd_message("Building coproc router");
+        syschecks::systemd_message("Building coproc pacemaker").get();
         construct_service(
-          router, coproc_supervisor_server_addr, std::ref(storage))
+          pacemaker, coproc_supervisor_server_addr, std::ref(storage))
           .get();
-        // Start the run loop
-        router.invoke_on_all([](coproc::router& r) { return r.start(); }).get();
     }
 
-    syschecks::systemd_message("Intializing raft group manager");
+    syschecks::systemd_message("Intializing raft group manager").get();
     construct_service(
       raft_group_manager,
       model::node_id(config::shard_local_cfg().node_id()),
@@ -348,7 +369,7 @@ void application::wire_up_services() {
       std::ref(storage))
       .get();
 
-    syschecks::systemd_message("Adding partition manager");
+    syschecks::systemd_message("Adding partition manager").get();
     construct_service(
       partition_manager, std::ref(storage), std::ref(raft_group_manager))
       .get();
@@ -356,7 +377,7 @@ void application::wire_up_services() {
 
     // controller
 
-    syschecks::systemd_message("Creating cluster::controller");
+    syschecks::systemd_message("Creating cluster::controller").get();
 
     construct_single_service(
       controller,
@@ -366,7 +387,7 @@ void application::wire_up_services() {
       storage);
 
     controller->wire_up().get0();
-    syschecks::systemd_message("Creating kafka metadata cache");
+    syschecks::systemd_message("Creating kafka metadata cache").get();
     construct_service(
       metadata_cache,
       std::ref(controller->get_topics_state()),
@@ -374,7 +395,7 @@ void application::wire_up_services() {
       std::ref(controller->get_partition_leaders()))
       .get();
 
-    syschecks::systemd_message("Creating metadata dissemination service");
+    syschecks::systemd_message("Creating metadata dissemination service").get();
     construct_service(
       md_dissemination_service,
       std::ref(raft_group_manager),
@@ -386,16 +407,16 @@ void application::wire_up_services() {
       .get();
 
     // group membership
-    syschecks::systemd_message("Creating partition manager");
+    syschecks::systemd_message("Creating partition manager").get();
     construct_service(
       _group_manager,
       std::ref(raft_group_manager),
       std::ref(partition_manager),
       std::ref(config::shard_local_cfg()))
       .get();
-    syschecks::systemd_message("Creating kafka group shard mapper");
+    syschecks::systemd_message("Creating kafka group shard mapper").get();
     construct_service(coordinator_ntp_mapper, std::ref(metadata_cache)).get();
-    syschecks::systemd_message("Creating kafka group router");
+    syschecks::systemd_message("Creating kafka group router").get();
     construct_service(
       group_router,
       _scheduling_groups.kafka_sg(),
@@ -406,7 +427,7 @@ void application::wire_up_services() {
       .get();
 
     // metrics and quota management
-    syschecks::systemd_message("Adding kafka quota manager");
+    syschecks::systemd_message("Adding kafka quota manager").get();
     construct_service(quota_mgr).get();
     // rpc
     rpc::server_configuration rpc_cfg("internal_rpc");
@@ -419,7 +440,7 @@ void application::wire_up_services() {
     rpc_cfg.max_service_memory_per_core = memory_groups::rpc_total_memory();
     auto rpc_server_addr
       = config::shard_local_cfg().rpc_server().resolve().get0();
-    rpc_cfg.addrs.push_back(rpc_server_addr);
+    rpc_cfg.addrs.emplace_back(rpc_server_addr);
     auto rpc_builder = config::shard_local_cfg()
                          .rpc_server_tls()
                          .get_credentials_builder()
@@ -435,7 +456,7 @@ void application::wire_up_services() {
                           })
                         .get0()
                     : nullptr;
-    syschecks::systemd_message("Starting internal RPC {}", rpc_cfg);
+    syschecks::systemd_message("Starting internal RPC {}", rpc_cfg).get();
     construct_service(_rpc, rpc_cfg).get();
 
     // coproc rpc
@@ -448,17 +469,31 @@ void application::wire_up_services() {
         rpc::server_configuration cp_rpc_cfg("coproc_rpc");
         cp_rpc_cfg.max_service_memory_per_core
           = memory_groups::rpc_total_memory();
-        cp_rpc_cfg.addrs.push_back(coproc_script_manager_server_addr);
+        cp_rpc_cfg.addrs.emplace_back(coproc_script_manager_server_addr);
         syschecks::systemd_message(
-          "Starting coprocessor internal RPC {}", cp_rpc_cfg);
+          "Starting coprocessor internal RPC {}", cp_rpc_cfg)
+          .get();
         construct_service(_coproc_rpc, cp_rpc_cfg).get();
     }
 
+    syschecks::systemd_message("Creating id allocator frontend").get();
+    construct_service(
+      id_allocator_frontend,
+      smp_service_groups.raft_smp_sg(),
+      std::ref(partition_manager),
+      std::ref(shard_table),
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      std::ref(controller))
+      .get();
+
     rpc::server_configuration kafka_cfg("kafka_rpc");
     kafka_cfg.max_service_memory_per_core = memory_groups::kafka_total_memory();
-    auto kafka_addr = config::shard_local_cfg().kafka_api().resolve().get0();
-    kafka_cfg.addrs.push_back(kafka_addr);
-    syschecks::systemd_message("Building TLS credentials for kafka");
+    for (const auto& ep : config::shard_local_cfg().kafka_api()) {
+        kafka_cfg.addrs.emplace_back(ep.name, ep.address.resolve().get0());
+    }
+    syschecks::systemd_message("Building TLS credentials for kafka").get();
     auto kafka_builder = config::shard_local_cfg()
                            .kafka_api_tls()
                            .get_credentials_builder()
@@ -474,7 +509,7 @@ void application::wire_up_services() {
                             })
                           .get0()
                       : nullptr;
-    syschecks::systemd_message("Starting kafka RPC {}", kafka_cfg);
+    syschecks::systemd_message("Starting kafka RPC {}", kafka_cfg).get();
     construct_service(_kafka_server, kafka_cfg).get();
     construct_service(
       fetch_session_cache,
@@ -483,32 +518,36 @@ void application::wire_up_services() {
 }
 
 void application::start() {
-    syschecks::systemd_message("Staring storage services");
+    syschecks::systemd_message("Staring storage services").get();
     storage.invoke_on_all(&storage::api::start).get();
 
-    syschecks::systemd_message("Starting the partition manager");
+    syschecks::systemd_message("Starting the partition manager").get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();
 
-    syschecks::systemd_message("Starting Raft group manager");
+    syschecks::systemd_message("Starting Raft group manager").get();
     raft_group_manager.invoke_on_all(&raft::group_manager::start).get();
 
-    syschecks::systemd_message("Starting Kafka group manager");
+    syschecks::systemd_message("Starting Kafka group manager").get();
     _group_manager.invoke_on_all(&kafka::group_manager::start).get();
 
-    syschecks::systemd_message("Starting controller");
+    syschecks::systemd_message("Starting controller").get();
     controller->start().get0();
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.
-    syschecks::systemd_message("Starting metadata dissination service");
+    syschecks::systemd_message("Starting metadata dissination service").get();
     md_dissemination_service
       .invoke_on_all(&cluster::metadata_dissemination_service::start)
       .get();
 
-    syschecks::systemd_message("Starting RPC");
+    syschecks::systemd_message("Starting RPC").get();
     _rpc
       .invoke_on_all([this](rpc::server& s) {
           auto proto = std::make_unique<rpc::simple_protocol>();
+          proto->register_service<cluster::id_allocator>(
+            _scheduling_groups.raft_sg(),
+            smp_service_groups.raft_smp_sg(),
+            std::ref(id_allocator_frontend));
           proto->register_service<
             raft::service<cluster::partition_manager, cluster::shard_table>>(
             _scheduling_groups.raft_sg(),
@@ -533,14 +572,14 @@ void application::start() {
     vlog(_log.info, "Started RPC server listening at {}", conf.rpc_server());
 
     if (coproc_enabled()) {
-        syschecks::systemd_message("Starting coproc RPC");
+        syschecks::systemd_message("Starting coproc RPC").get();
         _coproc_rpc
           .invoke_on_all([this](rpc::server& s) {
               auto proto = std::make_unique<rpc::simple_protocol>();
               proto->register_service<coproc::service>(
                 _scheduling_groups.coproc_sg(),
                 smp_service_groups.coproc_smp_sg(),
-                std::ref(router));
+                std::ref(pacemaker));
               s.set_protocol(std::move(proto));
           })
           .get();
@@ -565,7 +604,8 @@ void application::start() {
             shard_table,
             partition_manager,
             coordinator_ntp_mapper,
-            fetch_session_cache);
+            fetch_session_cache,
+            std::ref(id_allocator_frontend));
           s.set_protocol(std::move(proto));
       })
       .get();
@@ -574,7 +614,7 @@ void application::start() {
       _log.info, "Started Kafka API server listening at {}", conf.kafka_api());
 
     vlog(_log.info, "Successfully started Redpanda!");
-    syschecks::systemd_notify_ready();
+    syschecks::systemd_notify_ready().get();
 }
 
 void application::admin_register_raft_routes(ss::http_server& server) {
@@ -681,7 +721,7 @@ void application::admin_register_kafka_routes(ss::http_server& server) {
             partition,
             target);
 
-          model::ntp ntp(cluster::kafka_namespace, topic, partition);
+          model::ntp ntp(model::kafka_namespace, topic, partition);
 
           auto shard = shard_table.local().shard_for(ntp);
           if (!shard) {

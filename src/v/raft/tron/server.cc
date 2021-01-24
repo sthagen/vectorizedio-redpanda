@@ -72,7 +72,7 @@ void cli_opts(po::options_description_easy_init o) {
 
 struct simple_shard_lookup {
     ss::shard_id shard_for(raft::group_id g) { return g() % ss::smp::count; }
-    ss::shard_id contains(raft::group_id g) { return true; }
+    bool contains(raft::group_id g) { return true; }
 };
 
 class simple_group_manager {
@@ -232,7 +232,7 @@ group_cfg_from_args(const po::variables_map& opts) {
       model::broker_properties{
         .cores = ss::smp::count,
       }));
-    return raft::group_configuration(std::move(brokers));
+    return raft::group_configuration(std::move(brokers), model::revision_id(0));
 }
 
 int main(int args, char** argv, char** env) {
@@ -256,7 +256,7 @@ int main(int args, char** argv, char** env) {
             auto ccd = ss::defer(
               [&connection_cache] { connection_cache.stop().get(); });
             rpc::server_configuration scfg("tron_rpc");
-            scfg.addrs.push_back(ss::socket_address(
+            scfg.addrs.emplace_back(ss::socket_address(
               ss::net::inet_address(cfg["ip"].as<ss::sstring>()),
               cfg["port"].as<uint16_t>()));
             scfg.max_service_memory_per_core

@@ -18,24 +18,24 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"vectorized/pkg/os"
-	"vectorized/pkg/tuners/irq"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/irq"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type DiskType string
 
 const (
-	NonNvme DiskType = "non-nvme"
-	Nvme    DiskType = "nvme"
+	NonNvme	DiskType	= "non-nvme"
+	Nvme	DiskType	= "nvme"
 )
 
 type DevicesIRQs struct {
-	Devices []string
-	Irqs    []int
+	Devices	[]string
+	Irqs	[]int
 }
 type BlockDevices interface {
 	GetDirectoriesDevices(directories []string) (map[string][]string, error)
@@ -46,11 +46,11 @@ type BlockDevices interface {
 }
 
 type blockDevices struct {
-	proc          os.Proc
-	fs            afero.Fs
-	irqDeviceInfo irq.DeviceInfo
-	irqProcFile   irq.ProcFile
-	timeout       time.Duration
+	proc		os.Proc
+	fs		afero.Fs
+	irqDeviceInfo	irq.DeviceInfo
+	irqProcFile	irq.ProcFile
+	timeout		time.Duration
 }
 
 func NewBlockDevices(
@@ -61,11 +61,11 @@ func NewBlockDevices(
 	timeout time.Duration,
 ) BlockDevices {
 	return &blockDevices{
-		fs:            fs,
-		proc:          proc,
-		irqDeviceInfo: irqDeviceInfo,
-		irqProcFile:   irqProcFile,
-		timeout:       timeout,
+		fs:		fs,
+		proc:		proc,
+		irqDeviceInfo:	irqDeviceInfo,
+		irqProcFile:	irqProcFile,
+		timeout:	timeout,
 	}
 }
 
@@ -162,6 +162,9 @@ func (b *blockDevices) GetDeviceFromPath(path string) (BlockDevice, error) {
 func (b *blockDevices) GetDeviceSystemPath(path string) (string, error) {
 	device, err := b.getBlockDeviceFromPath(path,
 		getDevNumFromDeviceDirectory)
+	if err != nil {
+		return "", err
+	}
 	return device.Syspath(), err
 }
 

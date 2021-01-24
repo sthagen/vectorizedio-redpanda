@@ -14,13 +14,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"vectorized/pkg/os"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 const grubCfg = "/etc/default/grub"
@@ -41,20 +41,20 @@ func NewGrub(
 	timeout time.Duration,
 ) Grub {
 	return &grub{
-		commands: commands,
-		proc:     proc,
-		fs:       fs,
-		executor: executor,
-		timeout:  timeout,
+		commands:	commands,
+		proc:		proc,
+		fs:		fs,
+		executor:	executor,
+		timeout:	timeout,
 	}
 }
 
 type grub struct {
-	commands os.Commands
-	proc     os.Proc
-	fs       afero.Fs
-	executor executors.Executor
-	timeout  time.Duration
+	commands	os.Commands
+	proc		os.Proc
+	fs		afero.Fs
+	executor	executors.Executor
+	timeout		time.Duration
 }
 
 func (g *grub) CheckVersion() error {

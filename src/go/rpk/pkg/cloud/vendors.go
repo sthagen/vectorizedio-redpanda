@@ -12,11 +12,11 @@ package cloud
 import (
 	"errors"
 	"sync"
-	"vectorized/pkg/cloud/aws"
-	"vectorized/pkg/cloud/gcp"
-	"vectorized/pkg/cloud/vendor"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cloud/aws"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cloud/gcp"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cloud/vendor"
 )
 
 func vendors() map[string]vendor.Vendor {
@@ -39,8 +39,8 @@ func availableVendorFrom(
 	vendors map[string]vendor.Vendor,
 ) (vendor.InitializedVendor, error) {
 	type initResult struct {
-		vendor vendor.InitializedVendor
-		err    error
+		vendor	vendor.InitializedVendor
+		err	error
 	}
 	initAsync := func(v vendor.Vendor, c chan<- initResult) {
 		iv, err := v.Init()

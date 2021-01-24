@@ -10,11 +10,10 @@
 package tuners
 
 import (
-	"vectorized/pkg/tuners/disk"
-	"vectorized/pkg/utils"
-
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/disk"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 func NewDiskTuner(
@@ -25,20 +24,20 @@ func NewDiskTuner(
 	deviceTunerFactory func(string) Tunable,
 ) Tunable {
 	return &diskTuner{
-		fs:                 fs,
-		directories:        directories,
-		devices:            devices,
-		blockDevices:       blockDevices,
-		deviceTunerFactory: deviceTunerFactory,
+		fs:			fs,
+		directories:		directories,
+		devices:		devices,
+		blockDevices:		blockDevices,
+		deviceTunerFactory:	deviceTunerFactory,
 	}
 }
 
 type diskTuner struct {
-	fs                 afero.Fs
-	deviceTunerFactory func(string) Tunable
-	blockDevices       disk.BlockDevices
-	directories        []string
-	devices            []string
+	fs			afero.Fs
+	deviceTunerFactory	func(string) Tunable
+	blockDevices		disk.BlockDevices
+	directories		[]string
+	devices			[]string
 }
 
 func (tuner *diskTuner) Tune() TuneResult {

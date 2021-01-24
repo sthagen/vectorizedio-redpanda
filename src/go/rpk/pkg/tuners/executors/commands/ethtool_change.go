@@ -12,25 +12,25 @@ package commands
 import (
 	"bufio"
 	"fmt"
-	"vectorized/pkg/tuners/ethtool"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/ethtool"
 )
 
 type ethtoolChangeCommand struct {
 	Command
-	intf    string
-	config  map[string]bool
-	ethtool ethtool.EthtoolWrapper
+	intf	string
+	config	map[string]bool
+	ethtool	ethtool.EthtoolWrapper
 }
 
 func NewEthtoolChangeCmd(
 	ethtool ethtool.EthtoolWrapper, intf string, config map[string]bool,
 ) Command {
 	return &ethtoolChangeCommand{
-		intf:    intf,
-		config:  config,
-		ethtool: ethtool,
+		intf:		intf,
+		config:		config,
+		ethtool:	ethtool,
 	}
 }
 

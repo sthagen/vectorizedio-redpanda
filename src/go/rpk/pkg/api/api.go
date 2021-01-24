@@ -16,65 +16,68 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"vectorized/pkg/cli/cmd/version"
-	"vectorized/pkg/cloud"
-	"vectorized/pkg/config"
-	"vectorized/pkg/system"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/version"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cloud"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
 )
 
 const defaultUrl = "https://m.rp.vectorized.io"
 
 type MetricsPayload struct {
-	FreeMemoryMB  float64 `json:"freeMemoryMB"`
-	FreeSpaceMB   float64 `json:"freeSpaceMB"`
-	CpuPercentage float64 `json:"cpuPercentage"`
+	FreeMemoryMB	float64	`json:"freeMemoryMB"`
+	FreeSpaceMB	float64	`json:"freeSpaceMB"`
+	CpuPercentage	float64	`json:"cpuPercentage"`
+	Partitions	*int	`json:"partitions"`
+	Topics		*int	`json:"topics"`
 }
 
 type EnvironmentPayload struct {
-	Checks   []CheckPayload `json:"checks"`
-	Tuners   []TunerPayload `json:"tuners"`
-	ErrorMsg string         `json:"errorMsg"`
+	Checks		[]CheckPayload	`json:"checks"`
+	Tuners		[]TunerPayload	`json:"tuners"`
+	ErrorMsg	string		`json:"errorMsg"`
 }
 
 type CheckPayload struct {
-	Name     string `json:"name"`
-	ErrorMsg string `json:"errorMsg"`
-	Current  string `json:"current"`
-	Required string `json:"required"`
+	Name		string	`json:"name"`
+	ErrorMsg	string	`json:"errorMsg"`
+	Current		string	`json:"current"`
+	Required	string	`json:"required"`
 }
 
 type TunerPayload struct {
-	Name      string `json:"name"`
-	ErrorMsg  string `json:"errorMsg"`
-	Enabled   bool   `json:"enabled"`
-	Supported bool   `json:"supported"`
+	Name		string	`json:"name"`
+	ErrorMsg	string	`json:"errorMsg"`
+	Enabled		bool	`json:"enabled"`
+	Supported	bool	`json:"supported"`
 }
 
 type metricsBody struct {
 	MetricsPayload
-	SentAt       time.Time `json:"sentAt"`
-	NodeUuid     string    `json:"nodeUuid"`
-	Organization string    `json:"organization"`
-	ClusterId    string    `json:"clusterId"`
-	NodeId       int       `json:"nodeId"`
+	SentAt		time.Time	`json:"sentAt"`
+	NodeUuid	string		`json:"nodeUuid"`
+	Organization	string		`json:"organization"`
+	ClusterId	string		`json:"clusterId"`
+	NodeId		int		`json:"nodeId"`
 }
 
 type environmentBody struct {
-	Payload      EnvironmentPayload     `json:"payload"`
-	Config       map[string]interface{} `json:"config"`
-	SentAt       time.Time              `json:"sentAt"`
-	NodeUuid     string                 `json:"nodeUuid"`
-	Organization string                 `json:"organization"`
-	ClusterId    string                 `json:"clusterId"`
-	NodeId       int                    `json:"nodeId"`
-	CloudVendor  string                 `json:"cloudVendor"`
-	VMType       string                 `json:"vmType"`
-	OSInfo       string                 `json:"osInfo"`
-	CPUModel     string                 `json:"cpuModel"`
-	CPUCores     int                    `json:"cpuCores"`
-	RPVersion    string                 `json:"rpVersion"`
+	Payload		EnvironmentPayload	`json:"payload"`
+	Config		map[string]interface{}	`json:"config"`
+	SentAt		time.Time		`json:"sentAt"`
+	NodeUuid	string			`json:"nodeUuid"`
+	Organization	string			`json:"organization"`
+	ClusterId	string			`json:"clusterId"`
+	NodeId		int			`json:"nodeId"`
+	CloudVendor	string			`json:"cloudVendor"`
+	VMType		string			`json:"vmType"`
+	OSInfo		string			`json:"osInfo"`
+	CPUModel	string			`json:"cpuModel"`
+	CPUCores	int			`json:"cpuCores"`
+	RPVersion	string			`json:"rpVersion"`
 }
 
 func SendMetrics(p MetricsPayload, conf config.Config) error {
@@ -90,7 +93,7 @@ func SendMetrics(p MetricsPayload, conf config.Config) error {
 }
 
 func SendEnvironment(
-	env EnvironmentPayload, conf config.Config, confJSON string,
+	fs afero.Fs, env EnvironmentPayload, conf config.Config, confJSON string,
 ) error {
 	confMap := map[string]interface{}{}
 	err := json.Unmarshal([]byte(confJSON), &confMap)
@@ -121,7 +124,7 @@ func SendEnvironment(
 	}
 	cpuModel := "N/A"
 	cpuCores := 0
-	cpuInfo, err := system.CpuInfo()
+	cpuInfo, err := system.CpuInfo(fs)
 	if err != nil {
 		log.Debug("Error querying CPU info: ", err)
 	} else if len(cpuInfo) > 0 {
@@ -130,19 +133,19 @@ func SendEnvironment(
 	}
 
 	b := environmentBody{
-		Payload:      env,
-		Config:       confMap,
-		SentAt:       time.Now(),
-		NodeUuid:     conf.NodeUuid,
-		Organization: conf.Organization,
-		ClusterId:    conf.ClusterId,
-		NodeId:       conf.Redpanda.Id,
-		CloudVendor:  cloudVendor,
-		VMType:       vmType,
-		OSInfo:       osInfo,
-		CPUModel:     cpuModel,
-		CPUCores:     cpuCores,
-		RPVersion:    version.Pretty(),
+		Payload:	env,
+		Config:		confMap,
+		SentAt:		time.Now(),
+		NodeUuid:	conf.NodeUuid,
+		Organization:	conf.Organization,
+		ClusterId:	conf.ClusterId,
+		NodeId:		conf.Redpanda.Id,
+		CloudVendor:	cloudVendor,
+		VMType:		vmType,
+		OSInfo:		osInfo,
+		CPUModel:	cpuModel,
+		CPUCores:	cpuCores,
+		RPVersion:	version.Pretty(),
 	}
 	return sendEnvironmentToUrl(
 		b,

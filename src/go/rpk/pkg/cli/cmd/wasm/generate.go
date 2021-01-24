@@ -7,30 +7,30 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-package transform
+package wasm
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"vectorized/pkg/cli/cmd/wasm/template"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/wasm/template"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type genFile struct {
-	name       string
-	content    string
-	permission os.FileMode
+	name		string
+	content		string
+	permission	os.FileMode
 }
 
 var manifest = func() map[string][]genFile {
 	return map[string][]genFile{
-		"src":  {genFile{name: "wasm.js", content: template.GetWasmJs()}},
-		"test": {genFile{name: "wasm.test.js", content: template.GetWasmTestJs()}},
+		"src":	{genFile{name: "wasm.js", content: template.GetWasmJs()}},
+		"test":	{genFile{name: "wasm.test.js", content: template.GetWasmTestJs()}},
 		"": {
 			genFile{name: "package.json", content: template.GetPackageJson()},
 			genFile{name: "webpack.js", content: template.GetWebpack(), permission: 0766},
@@ -42,8 +42,8 @@ func NewGenerateCommand(fs afero.Fs) *cobra.Command {
 	var dir string
 	const localDir = "./"
 	command := &cobra.Command{
-		Use:   "generate",
-		Short: "Create a npm template project for inline WASM engine",
+		Use:	"generate",
+		Short:	"Create a npm template project for inline WASM engine",
 		RunE: func(_ *cobra.Command, args []string) error {
 			if dir == localDir {
 				path, err := filepath.Abs(dir)

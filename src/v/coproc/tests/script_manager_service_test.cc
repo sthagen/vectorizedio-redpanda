@@ -1,18 +1,21 @@
-// Copyright 2020 Vectorized, Inc.
-//
-// Licensed as a Redpanda Enterprise file under the Redpanda Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-// https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
+/*
+ * Copyright 2020 Vectorized, Inc.
+ *
+ * Licensed as a Redpanda Enterprise file under the Redpanda Community
+ * License (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
+ */
 
-#include "coproc/router.h"
+#include "coproc/pacemaker.h"
 #include "coproc/script_manager.h"
 #include "coproc/service.h"
-#include "coproc/tests/coproc_test_fixture.h"
-#include "coproc/tests/utils.h"
+#include "coproc/tests/utils/coproc_test_fixture.h"
+#include "coproc/tests/utils/helpers.h"
 #include "coproc/types.h"
 #include "rpc/test/rpc_integration_fixture.h"
+#include "ssx/future-util.h"
 #include "test_utils/fixture.h"
 
 class script_manager_service_fixture : public coproc_test_fixture {
@@ -21,17 +24,19 @@ public:
     // caches are laid out how they are expected to be i.e. the right ntps
     // existing on the correct cores determined by the _shard_table
     ss::future<bool> coproc_validate() {
-        return app.router.map_reduce0(
-          [this](const coproc::router& r) {
-              return std::all_of(
+        return app.pacemaker.map_reduce0(
+          [this](coproc::pacemaker& p) {
+              return ssx::async_all_of(
                 get_layout().cbegin(),
                 get_layout().cend(),
-                [this, &r](auto& p) {
-                    const auto logs = app.storage.local().log_mgr().get(
-                      p.first);
-                    return std::all_of(
-                      logs.begin(), logs.end(), [&r](auto& p2) {
-                          return r.ntp_exists(p2.first);
+                [this, &p](const log_layout_map::value_type& pair) {
+                    auto logs = app.storage.local().log_mgr().get(pair.first);
+                    return ss::do_with(
+                      std::move(logs), [&p](decltype(logs)& logs) {
+                          return ssx::async_all_of(
+                            logs.cbegin(), logs.cend(), [&p](const auto& e) {
+                                return p.ntp_is_registered(e.first);
+                            });
                       });
                 });
           },
@@ -41,12 +46,9 @@ public:
 };
 
 FIXTURE_TEST(test_coproc_topic_dne, script_manager_service_fixture) {
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 5}}).get();
     const auto resp = register_coprocessors(
-                        client, {make_enable_req(1234, {{"bar", l}})})
+                        sm_client(), {make_enable_req(1234, {{"bar", l}})})
                         .get0()
                         .value()
                         .data;
@@ -57,11 +59,9 @@ FIXTURE_TEST(test_coproc_topic_dne, script_manager_service_fixture) {
 }
 
 FIXTURE_TEST(test_coproc_no_topics, script_manager_service_fixture) {
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 5}}).get();
-    const auto resp = register_coprocessors(client, {make_enable_req(1234, {})})
+    const auto resp = register_coprocessors(
+                        sm_client(), {make_enable_req(54, {})})
                         .get0()
                         .value()
                         .data;
@@ -70,9 +70,6 @@ FIXTURE_TEST(test_coproc_no_topics, script_manager_service_fixture) {
 
 // This test fixture tests the edge cases, i.e. situations that should fail
 FIXTURE_TEST(test_coproc_invalid_topics, script_manager_service_fixture) {
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 5}, {make_ts("bar"), 3}, {make_ts("baz"), 18}})
       .get();
     // This string is more then 249 chars, should be an error to attempt to
@@ -86,9 +83,9 @@ FIXTURE_TEST(test_coproc_invalid_topics, script_manager_service_fixture) {
 
     const auto resp
       = register_coprocessors(
-          client,
+          sm_client(),
           {make_enable_req(
-            1234,
+            999,
             {{".", l}, {"..", l}, {"foo", l}, {"", l}, {too_long_topic, l}})})
           .get0()
           .value()
@@ -96,7 +93,7 @@ FIXTURE_TEST(test_coproc_invalid_topics, script_manager_service_fixture) {
     BOOST_CHECK_EQUAL(resp.acks.size(), 1);
     const auto& first_acks = resp.acks[0].second;
     BOOST_CHECK_EQUAL(first_acks.size(), 5);
-    BOOST_CHECK_EQUAL(resp.acks[0].first, coproc::script_id(1234));
+    BOOST_CHECK_EQUAL(resp.acks[0].first, coproc::script_id(999));
     BOOST_CHECK_EQUAL(first_acks[0], erc::invalid_topic);
     BOOST_CHECK_EQUAL(first_acks[1], erc::invalid_topic);
     BOOST_CHECK_EQUAL(first_acks[2], erc::success);
@@ -107,14 +104,11 @@ FIXTURE_TEST(test_coproc_invalid_topics, script_manager_service_fixture) {
 
 FIXTURE_TEST(
   test_coproc_reg_materialized_topic, script_manager_service_fixture) {
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 6}, {make_ts("bar"), 3}, {make_ts("baz"), 18}})
       .get();
 
     const auto resp = register_coprocessors(
-                        client,
+                        sm_client(),
                         {make_enable_req(2313, {{"foo", l}, {"foo.$bar$", l}})})
                         .get0()
                         .value()
@@ -131,15 +125,12 @@ FIXTURE_TEST(
 FIXTURE_TEST(
   test_coproc_script_id_already_exists, script_manager_service_fixture) {
     const uint32_t script_id = 55431;
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 5}, {make_ts("bar"), 3}, {make_ts("baz"), 18}})
       .get();
 
     /// First register a copro
     const auto init = register_coprocessors(
-                        client, {make_enable_req(script_id, {{"foo", l}})})
+                        sm_client(), {make_enable_req(script_id, {{"foo", l}})})
                         .get0()
                         .value()
                         .data;
@@ -150,7 +141,7 @@ FIXTURE_TEST(
 
     /// Then attempt to re-register one with the same id
     const auto resp = register_coprocessors(
-                        client,
+                        sm_client(),
                         {make_enable_req(3289, {{"foo", l}, {"bar", e}}),
                          {make_enable_req(script_id, {{"nogo", l}})}})
                         .get0()
@@ -171,18 +162,15 @@ FIXTURE_TEST(
 }
 
 FIXTURE_TEST(test_coproc_topics, script_manager_service_fixture) {
-    auto client = make_client();
-    client.connect().get();
-    auto dclient = ss::defer([&client] { client.stop().get(); });
     startup({{make_ts("foo"), 8}, {make_ts("bar"), 2}, {make_ts("baz"), 18}})
       .get();
 
     // 1. Attempt to register foo, bar and baz
     const auto resp = register_coprocessors(
-                        client,
+                        sm_client(),
                         {make_enable_req(
-                           1523, {{"foo", l}, {"bar", l}, {"baz", l}}),
-                         make_enable_req(123, {{"foo", l}})})
+                           523, {{"foo", l}, {"bar", l}, {"baz", l}}),
+                         make_enable_req(332, {{"foo", l}})})
                         .get0()
                         .value()
                         .data;
@@ -190,8 +178,8 @@ FIXTURE_TEST(test_coproc_topics, script_manager_service_fixture) {
     BOOST_CHECK_EQUAL(resp.acks.size(), 2);
     const auto& first_acks = resp.acks[0].second;
     const auto& second_acks = resp.acks[1].second;
-    BOOST_CHECK_EQUAL(resp.acks[0].first, coproc::script_id(1523));
-    BOOST_CHECK_EQUAL(resp.acks[1].first, coproc::script_id(123));
+    BOOST_CHECK_EQUAL(resp.acks[0].first, coproc::script_id(523));
+    BOOST_CHECK_EQUAL(resp.acks[1].first, coproc::script_id(332));
     BOOST_CHECK_EQUAL(first_acks.size(), 3);
     BOOST_CHECK_EQUAL(first_acks[0], erc::success);
     BOOST_CHECK_EQUAL(first_acks[1], erc::success);
@@ -204,13 +192,13 @@ FIXTURE_TEST(test_coproc_topics, script_manager_service_fixture) {
 
     // 4-6. Attempt to deregister some
     const auto disable_acks
-      = deregister_coprocessors(client, {1523}).get0().value().data;
+      = deregister_coprocessors(sm_client(), {523}).get0().value().data;
     BOOST_CHECK_EQUAL(disable_acks.acks.size(), 1);
     BOOST_CHECK_EQUAL(disable_acks.acks[0], drc::success);
     BOOST_CHECK(coproc_validate().get0());
 
     const auto disable_acks2
-      = deregister_coprocessors(client, {123}).get0().value().data;
+      = deregister_coprocessors(sm_client(), {332}).get0().value().data;
     BOOST_CHECK_EQUAL(disable_acks2.acks.size(), 1);
     BOOST_CHECK_EQUAL(disable_acks2.acks[0], drc::success);
     BOOST_CHECK(coproc_validate().get0());

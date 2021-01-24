@@ -16,19 +16,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"vectorized/pkg/os"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type balanceServiceInfo struct {
-	optionsKey string
-	configFile string
-	systemd    bool
+	optionsKey	string
+	configFile	string
+	systemd		bool
 }
 
 type BalanceService interface {
@@ -41,18 +41,18 @@ func NewBalanceService(
 	fs afero.Fs, proc os.Proc, executor executors.Executor, timeout time.Duration,
 ) BalanceService {
 	return &balanceService{
-		fs:       fs,
-		proc:     proc,
-		executor: executor,
-		timeout:  timeout,
+		fs:		fs,
+		proc:		proc,
+		executor:	executor,
+		timeout:	timeout,
 	}
 }
 
 type balanceService struct {
-	fs       afero.Fs
-	proc     os.Proc
-	executor executors.Executor
-	timeout  time.Duration
+	fs		afero.Fs
+	proc		os.Proc
+	executor	executors.Executor
+	timeout		time.Duration
 }
 
 func (balanceService *balanceService) BanIRQsAndRestart(
@@ -216,9 +216,9 @@ func (balanceService *balanceService) getBalanceServiceInfo() (
 		}
 	}
 	return &balanceServiceInfo{
-		configFile: configFile,
-		optionsKey: optionsKey,
-		systemd:    systemd,
+		configFile:	configFile,
+		optionsKey:	optionsKey,
+		systemd:	systemd,
 	}, nil
 }
 

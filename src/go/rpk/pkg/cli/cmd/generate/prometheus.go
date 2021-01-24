@@ -14,18 +14,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"vectorized/pkg/cli"
-	"vectorized/pkg/config"
-	"vectorized/pkg/kafka"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/kafka"
 	"gopkg.in/yaml.v2"
 )
 
 type ScrapeConfig struct {
-	JobName       string         `yaml:"job_name"`
-	StaticConfigs []StaticConfig `yaml:"static_configs"`
+	JobName		string		`yaml:"job_name"`
+	StaticConfigs	[]StaticConfig	`yaml:"static_configs"`
 }
 
 type StaticConfig struct {
@@ -34,14 +34,14 @@ type StaticConfig struct {
 
 func NewPrometheusConfigCmd(mgr config.Manager) *cobra.Command {
 	var (
-		jobName    string
-		nodeAddrs  []string
-		seedAddr   string
-		configFile string
+		jobName		string
+		nodeAddrs	[]string
+		seedAddr	string
+		configFile	string
 	)
 	command := &cobra.Command{
-		Use:   "prometheus-config",
-		Short: "Generate the Prometheus configuration to scrape redpanda nodes.",
+		Use:	"prometheus-config",
+		Short:	"Generate the Prometheus configuration to scrape redpanda nodes.",
 		Long: `
 Generate the Prometheus configuration to scrape redpanda nodes. This command's
 output should be added to the 'scrape_configs' array in your Prometheus
@@ -140,8 +140,8 @@ func executePrometheusConfig(
 
 func renderConfig(jobName string, targets []string) ([]byte, error) {
 	scrapeConfig := ScrapeConfig{
-		JobName:       jobName,
-		StaticConfigs: []StaticConfig{StaticConfig{Targets: targets}},
+		JobName:	jobName,
+		StaticConfigs:	[]StaticConfig{{Targets: targets}},
 	}
 	return yaml.Marshal([]ScrapeConfig{scrapeConfig})
 }

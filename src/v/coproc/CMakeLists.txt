@@ -20,8 +20,8 @@ v_cc_library(
     types.cc
     logger.cc
     service.cc
-    router.cc
-    router_source_manager.cc
+    script_context.cc
+    pacemaker.cc
   DEPS
     v::rpc
     v::model
@@ -31,27 +31,4 @@ v_cc_library(
     coproc_engine_gen
   )
 
-rp_test(
-  UNIT_TEST
-  BINARY_NAME coproc_unit_tests
-  SOURCES
-    tests/script_manager_service_test.cc
-    tests/supervisor.cc
-    tests/coproc_test_fixture.cc
-    tests/router_test_fixture.cc
-    tests/router_test.cc
-    tests/utils.cc
-  DEFINITIONS BOOST_TEST_DYN_LINK
-  LIBRARIES v::seastar_testing_main v::coproc v::storage_test_utils v::application
-  )
-
-rp_test(
-  UNIT_TEST
-  BINARY_NAME read_materialized_topic_unit_tests
-  SOURCES
-    tests/read_materialized_topic_test.cc
-    tests/utils.cc
-    tests/supervisor.cc
-  DEFINITIONS BOOST_TEST_DYN_LINK
-  LIBRARIES v::seastar_testing_main v::coproc v::kafka v::storage_test_utils v::application
-  )
+add_subdirectory(tests)

@@ -15,10 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type BlockDevice interface {
@@ -28,9 +28,9 @@ type BlockDevice interface {
 }
 
 type blockDevice struct {
-	syspath string
-	devnode string
-	parent  BlockDevice
+	syspath	string
+	devnode	string
+	parent	BlockDevice
 }
 
 func (d *blockDevice) Syspath() string {
@@ -67,9 +67,9 @@ func deviceFromSystemPath(syspath string, fs afero.Fs) (BlockDevice, error) {
 	}
 
 	return &blockDevice{
-		syspath: syspath,
-		devnode: filepath.Join("/dev", deviceAttrs["DEVNAME"]),
-		parent:  parent,
+		syspath:	syspath,
+		devnode:	filepath.Join("/dev", deviceAttrs["DEVNAME"]),
+		parent:		parent,
 	}, nil
 }
 

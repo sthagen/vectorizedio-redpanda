@@ -15,26 +15,26 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"vectorized/pkg/tuners/ethtool"
-	"vectorized/pkg/tuners/irq"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/ethtool"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/irq"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 var (
 	driverMaxRssQueues = map[string]int{
-		"ixgbe":   16,
-		"ixgbevf": 4,
-		"i40e":    64,
-		"i40evf":  16}
+		"ixgbe":	16,
+		"ixgbevf":	4,
+		"i40e":		64,
+		"i40evf":	16}
 )
 
 type NTupleStatus int
 
 const (
-	NTupleEnabled NTupleStatus = iota
+	NTupleEnabled	NTupleStatus	= iota
 	NTupleDisabled
 	NTupleNotSupported
 )
@@ -54,11 +54,11 @@ type Nic interface {
 }
 
 type nic struct {
-	fs            afero.Fs
-	irqProcFile   irq.ProcFile
-	irqDeviceInfo irq.DeviceInfo
-	ethtool       ethtool.EthtoolWrapper
-	name          string
+	fs		afero.Fs
+	irqProcFile	irq.ProcFile
+	irqDeviceInfo	irq.DeviceInfo
+	ethtool		ethtool.EthtoolWrapper
+	name		string
 }
 
 func NewNic(
@@ -69,11 +69,11 @@ func NewNic(
 	name string,
 ) Nic {
 	return &nic{
-		name:          name,
-		fs:            fs,
-		irqDeviceInfo: irqDeviceInfo,
-		irqProcFile:   irqProcFile,
-		ethtool:       ethtool,
+		name:		name,
+		fs:		fs,
+		irqDeviceInfo:	irqDeviceInfo,
+		irqProcFile:	irqProcFile,
+		ethtool:	ethtool,
 	}
 }
 

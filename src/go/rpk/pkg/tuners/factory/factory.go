@@ -12,48 +12,48 @@ package factory
 import (
 	"runtime"
 	"time"
-	"vectorized/pkg/cloud/gcp"
-	"vectorized/pkg/config"
-	"vectorized/pkg/net"
-	"vectorized/pkg/os"
-	"vectorized/pkg/system"
-	"vectorized/pkg/tuners"
-	"vectorized/pkg/tuners/coredump"
-	"vectorized/pkg/tuners/cpu"
-	"vectorized/pkg/tuners/disk"
-	"vectorized/pkg/tuners/ethtool"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/hwloc"
-	"vectorized/pkg/tuners/irq"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cloud/gcp"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/net"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/coredump"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/cpu"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/disk"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/ethtool"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/hwloc"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/irq"
 )
 
 var (
 	allTuners = map[string]func(*tunersFactory, *TunerParams) tuners.Tunable{
-		"disk_irq":              (*tunersFactory).newDiskIRQTuner,
-		"disk_scheduler":        (*tunersFactory).newDiskSchedulerTuner,
-		"disk_nomerges":         (*tunersFactory).newDiskNomergesTuner,
-		"disk_write_cache":      (*tunersFactory).newGcpWriteCacheTuner,
-		"fstrim":                (*tunersFactory).newFstrimTuner,
-		"net":                   (*tunersFactory).newNetworkTuner,
-		"cpu":                   (*tunersFactory).newCpuTuner,
-		"aio_events":            (*tunersFactory).newMaxAIOEventsTuner,
-		"clocksource":           (*tunersFactory).newClockSourceTuner,
-		"swappiness":            (*tunersFactory).newSwappinessTuner,
-		"transparent_hugepages": (*tunersFactory).newTHPTuner,
-		"coredump":              (*tunersFactory).newCoredumpTuner,
+		"disk_irq":			(*tunersFactory).newDiskIRQTuner,
+		"disk_scheduler":		(*tunersFactory).newDiskSchedulerTuner,
+		"disk_nomerges":		(*tunersFactory).newDiskNomergesTuner,
+		"disk_write_cache":		(*tunersFactory).newGcpWriteCacheTuner,
+		"fstrim":			(*tunersFactory).newFstrimTuner,
+		"net":				(*tunersFactory).newNetworkTuner,
+		"cpu":				(*tunersFactory).newCpuTuner,
+		"aio_events":			(*tunersFactory).newMaxAIOEventsTuner,
+		"clocksource":			(*tunersFactory).newClockSourceTuner,
+		"swappiness":			(*tunersFactory).newSwappinessTuner,
+		"transparent_hugepages":	(*tunersFactory).newTHPTuner,
+		"coredump":			(*tunersFactory).newCoredumpTuner,
 	}
 )
 
 type TunerParams struct {
-	Mode          string
-	CpuMask       string
-	RebootAllowed bool
-	Disks         []string
-	Directories   []string
-	Nics          []string
+	Mode		string
+	CpuMask		string
+	RebootAllowed	bool
+	Disks		[]string
+	Directories	[]string
+	Nics		[]string
 }
 
 type TunersFactory interface {
@@ -61,16 +61,16 @@ type TunersFactory interface {
 }
 
 type tunersFactory struct {
-	fs                afero.Fs
-	conf              config.Config
-	irqDeviceInfo     irq.DeviceInfo
-	cpuMasks          irq.CpuMasks
-	irqBalanceService irq.BalanceService
-	irqProcFile       irq.ProcFile
-	blockDevices      disk.BlockDevices
-	proc              os.Proc
-	grub              system.Grub
-	executor          executors.Executor
+	fs			afero.Fs
+	conf			config.Config
+	irqDeviceInfo		irq.DeviceInfo
+	cpuMasks		irq.CpuMasks
+	irqBalanceService	irq.BalanceService
+	irqProcFile		irq.ProcFile
+	blockDevices		disk.BlockDevices
+	proc			os.Proc
+	grub			system.Grub
+	executor		executors.Executor
 }
 
 func NewDirectExecutorTunersFactory(
@@ -103,16 +103,16 @@ func newTunersFactory(
 	timeout time.Duration,
 ) TunersFactory {
 	return &tunersFactory{
-		fs:                fs,
-		conf:              conf,
-		irqProcFile:       irqProcFile,
-		irqDeviceInfo:     irqDeviceInfo,
-		cpuMasks:          irq.NewCpuMasks(fs, hwloc.NewHwLocCmd(proc, timeout), executor),
-		irqBalanceService: irq.NewBalanceService(fs, proc, executor, timeout),
-		blockDevices:      disk.NewBlockDevices(fs, irqDeviceInfo, irqProcFile, proc, timeout),
-		grub:              system.NewGrub(os.NewCommands(proc), proc, fs, executor, timeout),
-		proc:              proc,
-		executor:          executor,
+		fs:			fs,
+		conf:			conf,
+		irqProcFile:		irqProcFile,
+		irqDeviceInfo:		irqDeviceInfo,
+		cpuMasks:		irq.NewCpuMasks(fs, hwloc.NewHwLocCmd(proc, timeout), executor),
+		irqBalanceService:	irq.NewBalanceService(fs, proc, executor, timeout),
+		blockDevices:		disk.NewBlockDevices(fs, irqDeviceInfo, irqProcFile, proc, timeout),
+		grub:			system.NewGrub(os.NewCommands(proc), proc, fs, executor, timeout),
+		proc:			proc,
+		executor:		executor,
 	}
 }
 

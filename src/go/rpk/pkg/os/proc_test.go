@@ -12,11 +12,11 @@ package os_test
 import (
 	"fmt"
 	"testing"
-	"vectorized/pkg/os"
-	"vectorized/pkg/utils"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type beforeFunc func(afero.Fs) error
@@ -33,42 +33,42 @@ func TestIsRunningPID(t *testing.T) {
 		}
 	}
 	tests := []struct {
-		name        string
-		before      beforeFunc
-		expected    bool
-		expectedErr string
+		name		string
+		before		beforeFunc
+		expected	bool
+		expectedErr	string
 	}{
 		{
-			name:     "it should return false if the file doesn't exist",
-			expected: false,
+			name:		"it should return false if the file doesn't exist",
+			expected:	false,
 		},
 		{
-			name:     "it should return false if the process' state is Z",
-			before:   defaultSetup("Z"),
-			expected: false,
+			name:		"it should return false if the process' state is Z",
+			before:		defaultSetup("Z"),
+			expected:	false,
 		},
 		{
-			name:     "it should return false if the process' state is X",
-			before:   defaultSetup("X"),
-			expected: false,
+			name:		"it should return false if the process' state is X",
+			before:		defaultSetup("X"),
+			expected:	false,
 		},
 		{
-			name:     "it should return false if the process' state is x",
-			before:   defaultSetup("x"),
-			expected: false,
+			name:		"it should return false if the process' state is x",
+			before:		defaultSetup("x"),
+			expected:	false,
 		},
 		{
-			name:     "it should return true if the process' isn't Z, X or x",
-			before:   defaultSetup("R"),
-			expected: true,
+			name:		"it should return true if the process' isn't Z, X or x",
+			before:		defaultSetup("R"),
+			expected:	true,
 		},
 		{
-			name: "it should fail if the file is corrupt",
+			name:	"it should fail if the file is corrupt",
 			before: func(fs afero.Fs) error {
 				_, err := utils.WriteBytes(fs, []byte("lolwut"), path)
 				return err
 			},
-			expectedErr: "corrupt info for process 4321",
+			expectedErr:	"corrupt info for process 4321",
 		},
 	}
 

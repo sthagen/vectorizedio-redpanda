@@ -10,19 +10,18 @@
 package cmd
 
 import (
-	"vectorized/pkg/cli"
-	"vectorized/pkg/cli/cmd/version"
-
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/version"
 )
 
 func NewVersionCommand() *cobra.Command {
 	command := &cobra.Command{
-		Use:          "version",
-		Short:        "Check the current version",
-		Long:         "",
-		SilenceUsage: true,
+		Use:		"version",
+		Short:		"Check the current version",
+		Long:		"",
+		SilenceUsage:	true,
 		Run: func(_ *cobra.Command, _ []string) {
 			log.SetFormatter(cli.NewNoopFormatter())
 			log.Infof("%s\n", version.Pretty())

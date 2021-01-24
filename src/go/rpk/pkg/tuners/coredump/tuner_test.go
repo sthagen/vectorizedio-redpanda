@@ -12,11 +12,11 @@ package coredump
 import (
 	"os"
 	"testing"
-	"vectorized/pkg/config"
-	"vectorized/pkg/tuners/executors"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
 )
 
 func validConfig() *config.Config {
@@ -28,21 +28,21 @@ func validConfig() *config.Config {
 
 func TestTune(t *testing.T) {
 	tests := []struct {
-		name string
-		pre  func(afero.Fs) error
-		conf func() *config.Config
+		name	string
+		pre	func(afero.Fs) error
+		conf	func() *config.Config
 	}{
 		{
-			name: "it should install the coredump config file",
-			conf: validConfig,
+			name:	"it should install the coredump config file",
+			conf:	validConfig,
 		},
 		{
-			name: "it should not fail to install if the coredump config file already exists",
+			name:	"it should not fail to install if the coredump config file already exists",
 			pre: func(fs afero.Fs) error {
 				_, err := fs.Create(corePatternFilePath)
 				return err
 			},
-			conf: validConfig,
+			conf:	validConfig,
 		},
 	}
 	for _, tt := range tests {

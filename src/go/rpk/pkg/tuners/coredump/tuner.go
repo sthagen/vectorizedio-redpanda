@@ -12,19 +12,19 @@ package coredump
 import (
 	"bytes"
 	"text/template"
-	"vectorized/pkg/config"
-	"vectorized/pkg/tuners"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
 
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
 )
 
 const (
-	corePatternFilePath string = "/proc/sys/kernel/core_pattern"
-	scriptFilePath      string = "/var/lib/redpanda/save_coredump"
-	coredumpPattern     string = "|" + scriptFilePath + " %e %t %p"
-	coredumpScriptTmpl  string = `#!/bin/bash
+	corePatternFilePath	string	= "/proc/sys/kernel/core_pattern"
+	scriptFilePath		string	= "/var/lib/redpanda/save_coredump"
+	coredumpPattern		string	= "|" + scriptFilePath + " %e %t %p"
+	coredumpScriptTmpl	string	= `#!/bin/bash
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -40,9 +40,9 @@ cat - > "${COREDUMP_PATH}"
 )
 
 type tuner struct {
-	fs       afero.Fs
-	conf     config.Config
-	executor executors.Executor
+	fs		afero.Fs
+	conf		config.Config
+	executor	executors.Executor
 }
 
 func NewCoredumpTuner(

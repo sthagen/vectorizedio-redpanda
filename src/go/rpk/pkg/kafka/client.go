@@ -16,11 +16,11 @@ import (
 	"io/ioutil"
 	"sync"
 	"time"
-	"vectorized/pkg/config"
 
 	"github.com/Shopify/sarama"
 	"github.com/avast/retry-go"
 	log "github.com/sirupsen/logrus"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
 )
 
 func DefaultConfig() *sarama.Config {
@@ -92,8 +92,8 @@ func HighWatermarks(
 	wg.Add(len(leaders))
 
 	type result struct {
-		watermarks map[int32]int64
-		err        error
+		watermarks	map[int32]int64
+		err		error
 	}
 
 	results := make(chan result, len(leaders))

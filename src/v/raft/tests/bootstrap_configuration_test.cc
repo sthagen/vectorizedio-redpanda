@@ -39,7 +39,7 @@ struct bootstrap_fixture : raft::simple_record_fixture {
           "test.dir",
           1_GiB,
           storage::debug_sanitize_files::yes,
-          storage::log_config::with_cache::no)) {
+          storage::with_cache::no)) {
         _storage.start().get();
         // ignore the get_log()
         (void)_storage.log_mgr()
@@ -84,12 +84,13 @@ FIXTURE_TEST(write_configs, bootstrap_fixture) {
       cfg.data_batches_seen(),
       cfg.config_batches_seen());
 
-    cfg.config().for_each_voter([](model::node_id id) {
-        BOOST_REQUIRE(id >= 0 && id <= bootstrap_fixture::active_nodes);
+    cfg.config().for_each_voter([](raft::vnode rni) {
+        BOOST_REQUIRE(
+          rni.id() >= 0 && rni.id() <= bootstrap_fixture::active_nodes);
     });
 
-    cfg.config().for_each_learner([](model::node_id id) {
-        BOOST_REQUIRE(id > bootstrap_fixture::active_nodes);
+    cfg.config().for_each_learner([](raft::vnode rni) {
+        BOOST_REQUIRE(rni.id() > bootstrap_fixture::active_nodes);
     });
 
     BOOST_REQUIRE_EQUAL(cfg.data_batches_seen(), 10);

@@ -17,10 +17,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"vectorized/pkg/os"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
 )
 
 const reachMask int64 = 1
@@ -31,16 +31,16 @@ type NtpQuery interface {
 
 func NewNtpQuery(timeout time.Duration, fs afero.Fs) NtpQuery {
 	return &ntpQuery{
-		timeout: timeout,
-		fs:      fs,
-		proc:    os.NewProc(),
+		timeout:	timeout,
+		fs:		fs,
+		proc:		os.NewProc(),
 	}
 }
 
 type ntpQuery struct {
-	timeout time.Duration
-	fs      afero.Fs
-	proc    os.Proc
+	timeout	time.Duration
+	fs	afero.Fs
+	proc	os.Proc
 }
 
 func (q *ntpQuery) IsNtpSynced() (bool, error) {

@@ -76,8 +76,8 @@ public:
         auto stype = i > 50 ? storage::log_config::storage_type::disk
                             : storage::log_config::storage_type::memory;
 
-        auto cache = i > 50 ? storage::log_config::with_cache::yes
-                            : storage::log_config::with_cache::no;
+        auto cache = i > 50 ? storage::with_cache::yes
+                            : storage::with_cache::no;
         return storage::log_config(
           stype,
           std::move(test_dir),
@@ -125,7 +125,7 @@ public:
     template<typename T = random_batches_generator>
     CONCEPT(
         requires requires (T generator) {
-            { generator() } -> ss::circular_buffer<model::record_batch>;
+            { generator() } -> std::same_as<ss::circular_buffer<model::record_batch>>;
         }
     )
     // clang-format on

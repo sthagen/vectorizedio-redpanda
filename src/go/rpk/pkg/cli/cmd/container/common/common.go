@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"vectorized/pkg/config"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -26,30 +25,31 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	log "github.com/sirupsen/logrus"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
 )
 
 var (
-	registry          = "docker.io"
-	tag               = "latest"
-	redpandaImageBase = "vectorized/redpanda:" + tag
-	redpandaImage     = registry + "/" + redpandaImageBase
+	registry		= "docker.io"
+	tag			= "latest"
+	redpandaImageBase	= "vectorized/redpanda:" + tag
+	redpandaImage		= registry + "/" + redpandaImageBase
 )
 
 const (
-	redpandaNetwork = "redpanda"
+	redpandaNetwork	= "redpanda"
 
-	defaultDockerClientTimeout = 10 * time.Second
+	defaultDockerClientTimeout	= 10 * time.Second
 )
 
 type NodeState struct {
-	Status        string
-	Running       bool
-	ConfigFile    string
-	HostRPCPort   uint
-	HostKafkaPort uint
-	ID            uint
-	ContainerIP   string
-	ContainerID   string
+	Status		string
+	Running		bool
+	ConfigFile	string
+	HostRPCPort	uint
+	HostKafkaPort	uint
+	ID		uint
+	ContainerIP	string
+	ContainerID	string
 }
 
 // Returns the container name for the given node ID.
@@ -69,8 +69,8 @@ func GetExistingNodes(c Client) ([]*NodeState, error) {
 	containers, err := c.ContainerList(
 		ctx,
 		types.ContainerListOptions{
-			All:     true,
-			Filters: filters,
+			All:		true,
+			Filters:	filters,
 		},
 	)
 	if err != nil {
@@ -125,13 +125,13 @@ func GetState(c Client, nodeID uint) (*NodeState, error) {
 		return nil, err
 	}
 	return &NodeState{
-		Running:       containerJSON.State.Running,
-		Status:        containerJSON.State.Status,
-		ContainerID:   containerJSON.ID,
-		ContainerIP:   ipAddress,
-		HostKafkaPort: hostKafkaPort,
-		HostRPCPort:   hostRPCPort,
-		ID:            nodeID,
+		Running:	containerJSON.State.Running,
+		Status:		containerJSON.State.Status,
+		ContainerID:	containerJSON.ID,
+		ContainerIP:	ipAddress,
+		HostKafkaPort:	hostKafkaPort,
+		HostRPCPort:	hostRPCPort,
+		ID:		nodeID,
 	}, nil
 }
 
@@ -162,13 +162,13 @@ func CreateNetwork(c Client) (string, error) {
 	)
 	resp, err := c.NetworkCreate(
 		ctx, redpandaNetwork, types.NetworkCreate{
-			Driver: "bridge",
+			Driver:	"bridge",
 			IPAM: &network.IPAM{
-				Driver: "default",
+				Driver:	"default",
 				Config: []network.IPAMConfig{
-					network.IPAMConfig{
-						Subnet:  "172.24.1.0/24",
-						Gateway: "172.24.1.1",
+					{
+						Subnet:		"172.24.1.0/24",
+						Gateway:	"172.24.1.1",
 					},
 				},
 			},
@@ -194,8 +194,10 @@ func RemoveNetwork(c Client) error {
 }
 
 func CreateNode(
-	c Client, nodeID,
-	kafkaPort, rpcPort uint, netID string, args ...string,
+	c Client,
+	nodeID, kafkaPort, rpcPort, metricsPort uint,
+	netID string,
+	args ...string,
 ) (*NodeState, error) {
 	rPort, err := nat.NewPort(
 		"tcp",
@@ -207,6 +209,13 @@ func CreateNode(
 	kPort, err := nat.NewPort(
 		"tcp",
 		strconv.Itoa(config.Default().Redpanda.KafkaApi.Port),
+	)
+	if err != nil {
+		return nil, err
+	}
+	metPort, err := nat.NewPort(
+		"tcp",
+		strconv.Itoa(config.Default().Redpanda.AdminApi.Port),
 	)
 	if err != nil {
 		return nil, err
@@ -228,37 +237,41 @@ func CreateNode(
 		fmt.Sprintf("127.0.0.1:%d", kafkaPort),
 		"--advertise-rpc-addr",
 		fmt.Sprintf("%s:%d", ip, config.Default().Redpanda.RPCServer.Port),
+		"--smp 1 --memory 1G --reserve-memory 0M",
 	}
 	containerConfig := container.Config{
-		Image:    redpandaImageBase,
-		Hostname: hostname,
-		Cmd:      append(cmd, args...),
+		Image:		redpandaImageBase,
+		Hostname:	hostname,
+		Cmd:		append(cmd, args...),
 		ExposedPorts: nat.PortSet{
-			rPort: {},
-			kPort: {},
+			rPort:	{},
+			kPort:	{},
 		},
 		Labels: map[string]string{
-			"cluster-id": "redpanda",
-			"node-id":    fmt.Sprint(nodeID),
+			"cluster-id":	"redpanda",
+			"node-id":	fmt.Sprint(nodeID),
 		},
 	}
 	hostConfig := container.HostConfig{
 		PortBindings: nat.PortMap{
-			rPort: []nat.PortBinding{nat.PortBinding{
+			rPort: []nat.PortBinding{{
 				HostPort: fmt.Sprint(rpcPort),
 			}},
-			kPort: []nat.PortBinding{nat.PortBinding{
+			kPort: []nat.PortBinding{{
 				HostPort: fmt.Sprint(kafkaPort),
+			}},
+			metPort: []nat.PortBinding{{
+				HostPort: fmt.Sprint(metricsPort),
 			}},
 		},
 	}
 	networkConfig := network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
-			redpandaNetwork: &network.EndpointSettings{
+			redpandaNetwork: {
 				IPAMConfig: &network.EndpointIPAMConfig{
 					IPv4Address: ip,
 				},
-				Aliases: []string{hostname},
+				Aliases:	[]string{hostname},
 			},
 		},
 	}
@@ -275,10 +288,10 @@ func CreateNode(
 		return nil, err
 	}
 	return &NodeState{
-		HostKafkaPort: kafkaPort,
-		ID:            nodeID,
-		ContainerID:   container.ID,
-		ContainerIP:   ip,
+		HostKafkaPort:	kafkaPort,
+		ID:		nodeID,
+		ContainerID:	container.ID,
+		ContainerIP:	ip,
 	}, nil
 }
 

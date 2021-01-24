@@ -34,7 +34,7 @@ public:
 
     ppc::client make_client() {
         return ppc::client(std::vector<unresolved_address>{
-          config::shard_local_cfg().kafka_api()});
+          config::shard_local_cfg().kafka_api()[0].address});
     }
     ppc::client make_connected_client() {
         auto client = make_client();
@@ -48,10 +48,10 @@ public:
     }
 
     model::topic_namespace
-    make_data(model::revision_id rev, int partitions = 1) {
-        auto topic_name = fmt::format("my_topic_{}", 0);
+    make_data(model::revision_id rev, int partitions = 1, int topic = 0) {
+        auto topic_name = fmt::format("my_topic_{}", topic);
         auto tp_ns = model::topic_namespace(
-          cluster::kafka_namespace, model::topic{topic_name});
+          model::kafka_namespace, model::topic{topic_name});
 
         for (int p = 0; p < partitions; ++p) {
             model::ntp ntp(tp_ns.ns, tp_ns.tp, model::partition_id(p));

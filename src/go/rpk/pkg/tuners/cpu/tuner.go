@@ -12,25 +12,25 @@ package cpu
 import (
 	"fmt"
 	"strconv"
-	"vectorized/pkg/system"
-	"vectorized/pkg/tuners"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
-	"vectorized/pkg/tuners/irq"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/irq"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type tuner struct {
-	cpuMasks      irq.CpuMasks
-	grub          system.Grub
-	rebootAllowed bool
-	cores         uint
-	pus           uint
-	fs            afero.Fs
-	executor      executors.Executor
+	cpuMasks	irq.CpuMasks
+	grub		system.Grub
+	rebootAllowed	bool
+	cores		uint
+	pus		uint
+	fs		afero.Fs
+	executor	executors.Executor
 }
 
 func NewCpuTuner(
@@ -41,11 +41,11 @@ func NewCpuTuner(
 	executor executors.Executor,
 ) tuners.Tunable {
 	return &tuner{
-		cpuMasks:      cpuMasks,
-		grub:          grub,
-		fs:            fs,
-		rebootAllowed: rebootAllowed,
-		executor:      executor,
+		cpuMasks:	cpuMasks,
+		grub:		grub,
+		fs:		fs,
+		rebootAllowed:	rebootAllowed,
+		executor:	executor,
 	}
 }
 

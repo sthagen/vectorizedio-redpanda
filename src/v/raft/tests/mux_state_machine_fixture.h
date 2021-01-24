@@ -9,6 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
+#pragma once
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
@@ -89,7 +90,7 @@ struct mux_state_machine_fixture {
           _data_dir,
           100_MiB,
           storage::debug_sanitize_files::yes,
-          storage::log_config::with_cache::yes);
+          storage::with_cache::yes);
     }
 
     model::broker self_broker() {

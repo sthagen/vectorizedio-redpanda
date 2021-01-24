@@ -11,36 +11,36 @@ package factory_test
 
 import (
 	"testing"
-	"vectorized/pkg/config"
-	"vectorized/pkg/tuners/factory"
 
 	"github.com/stretchr/testify/require"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/factory"
 )
 
 func getValidTunerParams() *factory.TunerParams {
 	return &factory.TunerParams{
-		Mode:          "",
-		CpuMask:       "00000000000000000000000000000001",
-		RebootAllowed: true,
-		Disks:         []string{"dev1"},
-		Directories:   []string{"/var/lib/redpanda"},
-		Nics:          []string{"eth0"},
+		Mode:		"",
+		CpuMask:	"00000000000000000000000000000001",
+		RebootAllowed:	true,
+		Disks:		[]string{"dev1"},
+		Directories:	[]string{"/var/lib/redpanda"},
+		Nics:		[]string{"eth0"},
 	}
 }
 
 func TestMergeTunerParamsConfig(t *testing.T) {
 	tests := []struct {
-		name        string
-		tunerParams func() *factory.TunerParams
-		expected    func() *factory.TunerParams
+		name		string
+		tunerParams	func() *factory.TunerParams
+		expected	func() *factory.TunerParams
 	}{
 		{
-			name:        "it should override the configuration",
-			tunerParams: getValidTunerParams,
-			expected:    getValidTunerParams,
+			name:		"it should override the configuration",
+			tunerParams:	getValidTunerParams,
+			expected:	getValidTunerParams,
 		},
 		{
-			name: "it should take values from the configuration when they're not in the params",
+			name:	"it should take values from the configuration when they're not in the params",
 			tunerParams: func() *factory.TunerParams {
 				params := getValidTunerParams()
 				params.Directories = []string{}

@@ -12,9 +12,12 @@
 #pragma once
 
 #include "kafka/client.h"
+#include "kafka/types.h"
+#include "pandaproxy/client/assignment_plans.h"
 #include "pandaproxy/client/broker.h"
 #include "pandaproxy/client/brokers.h"
 #include "pandaproxy/client/configuration.h"
+#include "pandaproxy/client/consumer.h"
 #include "pandaproxy/client/fetcher.h"
 #include "pandaproxy/client/producer.h"
 #include "pandaproxy/client/retry_with_mitigation.h"
@@ -81,8 +84,9 @@ public:
 
     /// \brief Dispatch a request to any broker.
     template<typename Func>
-    CONCEPT(
-      requires(typename std::invoke_result_t<Func>::api_type::response_type))
+    CONCEPT(requires requires {
+        typename std::invoke_result_t<Func>::api_type::response_type;
+    })
     ss::future<typename std::invoke_result_t<
       Func>::api_type::response_type> dispatch(Func func) {
         return gated_retry_with_mitigation([this, func{std::move(func)}]() {
@@ -96,11 +100,37 @@ public:
     ss::future<kafka::produce_response::partition> produce_record_batch(
       model::topic_partition tp, model::record_batch&& batch);
 
-    ss::future<kafka::fetch_response::partition> fetch_partition(
+    ss::future<kafka::fetch_response> fetch_partition(
       model::topic_partition tp,
       model::offset offset,
       int32_t max_bytes,
       std::chrono::milliseconds timeout);
+
+    ss::future<kafka::member_id> create_consumer(const kafka::group_id& g_id);
+
+    ss::future<>
+    remove_consumer(const kafka::group_id& g_id, const kafka::member_id& m_id);
+
+    ss::future<> subscribe_consumer(
+      const kafka::group_id& group_id,
+      const kafka::member_id& member_id,
+      std::vector<model::topic> topics);
+
+    ss::future<std::vector<model::topic>>
+    consumer_topics(const kafka::group_id& g_id, const kafka::member_id& m_id);
+
+    ss::future<assignment> consumer_assignment(
+      const kafka::group_id& g_id, const kafka::member_id& m_id);
+
+    ss::future<kafka::offset_fetch_response> consumer_offset_fetch(
+      const kafka::group_id& g_id,
+      const kafka::member_id& m_id,
+      std::vector<kafka::offset_fetch_request_topic> topics);
+
+    ss::future<kafka::offset_commit_response> consumer_offset_commit(
+      const kafka::group_id& g_id,
+      const kafka::member_id& m_id,
+      std::vector<kafka::offset_commit_request_topic> topics);
 
 private:
     /// \brief Connect and update metdata.
@@ -118,6 +148,9 @@ private:
     /// the error
     ss::future<> mitigate_error(std::exception_ptr ex);
 
+    ss::future<shared_consumer_t>
+    get_consumer(const kafka::group_id& g_id, const kafka::member_id& m_id);
+
     /// \brief Seeds are used when no brokers are connected.
     std::vector<unresolved_address> _seeds;
     /// \brief Broker lookup from topic_partition.
@@ -126,6 +159,12 @@ private:
     wait_or_start _wait_or_start_update_metadata;
     /// \brief Batching producer.
     producer _producer;
+    /// \brief Consumers
+    absl::flat_hash_set<
+      shared_consumer_t,
+      detail::consumer_hash,
+      detail::consumer_eq>
+      _consumers;
     /// \brief Wait for retries.
     ss::gate _gate;
 };

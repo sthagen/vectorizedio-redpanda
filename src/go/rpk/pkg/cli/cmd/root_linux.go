@@ -10,18 +10,23 @@
 package cmd
 
 import (
-	"vectorized/pkg/config"
-
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/redpanda"
 )
 
 func addPlatformDependentCmds(
 	fs afero.Fs, mgr config.Manager, cmd *cobra.Command,
 ) {
+	cmd.AddCommand(NewRedpandaCommand(fs, mgr, redpanda.NewLauncher()))
+	cmd.AddCommand(NewDebugCommand(fs, mgr))
+
 	cmd.AddCommand(NewTuneCommand(fs, mgr))
 	cmd.AddCommand(NewCheckCommand(fs, mgr))
 	cmd.AddCommand(NewIoTuneCmd(fs, mgr))
-	cmd.AddCommand(NewStartCommand(fs, mgr))
+	cmd.AddCommand(NewStartCommand(fs, mgr, redpanda.NewLauncher()))
 	cmd.AddCommand(NewStopCommand(fs, mgr))
+	cmd.AddCommand(NewConfigCommand(fs, mgr))
+	cmd.AddCommand(NewStatusCommand(fs, mgr))
 }

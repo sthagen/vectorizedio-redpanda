@@ -12,12 +12,13 @@ package commands
 import (
 	"bufio"
 	"fmt"
-	"vectorized/pkg/system/systemd"
+
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system/systemd"
 )
 
 type startSystemdUnitCommand struct {
-	client systemd.Client
-	name   string
+	client	systemd.Client
+	name	string
 }
 
 /*

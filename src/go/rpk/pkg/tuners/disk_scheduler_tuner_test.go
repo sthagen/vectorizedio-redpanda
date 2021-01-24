@@ -11,22 +11,22 @@ package tuners
 
 import (
 	"testing"
-	"vectorized/pkg/tuners/disk"
-	"vectorized/pkg/tuners/executors"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/disk"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
 )
 
 type deviceFeaturesMock struct {
 	disk.DeviceFeatures
-	getSupportedSchedulers   func(string) ([]string, error)
-	getNomerges              func(string) (int, error)
-	getNomergesFeatureFile   func(string) (string, error)
-	getSchedulerFeatureFile  func(string) (string, error)
-	getScheduler             func(string) (string, error)
-	getWriteCacheFeatureFile func(string) (string, error)
-	getWriteCache            func(string) (string, error)
+	getSupportedSchedulers		func(string) ([]string, error)
+	getNomerges			func(string) (int, error)
+	getNomergesFeatureFile		func(string) (string, error)
+	getSchedulerFeatureFile		func(string) (string, error)
+	getScheduler			func(string) (string, error)
+	getWriteCacheFeatureFile	func(string) (string, error)
+	getWriteCache			func(string) (string, error)
 }
 
 func (m *deviceFeaturesMock) GetScheduler(device string) (string, error) {

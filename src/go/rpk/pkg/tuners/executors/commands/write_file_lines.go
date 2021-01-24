@@ -12,24 +12,24 @@ package commands
 import (
 	"bufio"
 	"fmt"
-	"vectorized/pkg/utils"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 type writeFileLinesCommand struct {
 	Command
-	fs    afero.Fs
-	path  string
-	lines []string
+	fs	afero.Fs
+	path	string
+	lines	[]string
 }
 
 func NewWriteFileLinesCmd(fs afero.Fs, path string, lines []string) Command {
 	return &writeFileLinesCommand{
-		fs:    fs,
-		path:  path,
-		lines: lines,
+		fs:	fs,
+		path:	path,
+		lines:	lines,
 	}
 }
 

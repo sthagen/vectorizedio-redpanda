@@ -13,16 +13,16 @@ import (
 	"context"
 	"sync"
 	"time"
-	"vectorized/pkg/cli/cmd/container/common"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/container/common"
 )
 
 func Stop() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "stop",
-		Short: "Stop an existing local container cluster",
+		Use:	"stop",
+		Short:	"Stop an existing local container cluster",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			c, err := common.NewDockerClient()
 			if err != nil {

@@ -15,6 +15,7 @@
 #include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "model/namespace.h"
 #include "model/timeout_clock.h"
 #include "raft/types.h"
 #include "reflection/adl.h"
@@ -30,8 +31,18 @@ class consensus;
 namespace cluster {
 
 static constexpr model::record_batch_type controller_record_batch_type{3};
+static constexpr model::record_batch_type id_allocator_stm_batch_type{8};
 using consensus_ptr = ss::lw_shared_ptr<raft::consensus>;
 using broker_ptr = ss::lw_shared_ptr<model::broker>;
+
+struct allocate_id_request {
+    model::timeout_clock::duration timeout;
+};
+
+struct allocate_id_reply {
+    int64_t id;
+    errc ec;
+};
 
 /// Join request sent by node to join raft-0
 struct join_request {
@@ -83,6 +94,10 @@ struct topic_configuration {
 
     storage::ntp_config make_ntp_config(
       const ss::sstring&, model::partition_id, model::revision_id) const;
+
+    bool is_internal() const {
+        return tp_ns.ns == model::kafka_internal_namespace;
+    }
 
     model::topic_namespace tp_ns;
     // using signed integer because Kafka protocol defines it as signed int

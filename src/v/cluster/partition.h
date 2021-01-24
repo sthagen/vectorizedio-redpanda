@@ -13,9 +13,11 @@
 
 #include "cluster/partition_probe.h"
 #include "cluster/types.h"
+#include "model/metadata.h"
 #include "model/record_batch_reader.h"
 #include "raft/configuration.h"
 #include "raft/consensus.h"
+#include "raft/id_allocator_stm.h"
 #include "raft/log_eviction_stm.h"
 #include "raft/types.h"
 #include "storage/types.h"
@@ -101,9 +103,10 @@ public:
         return _raft->transfer_leadership(target);
     }
 
-    ss::future<std::error_code>
-    update_replica_set(std::vector<model::broker> brokers) {
-        return _raft->replace_configuration(std::move(brokers));
+    ss::future<std::error_code> update_replica_set(
+      std::vector<model::broker> brokers, model::revision_id new_revision_id) {
+        return _raft->replace_configuration(
+          std::move(brokers), new_revision_id);
     }
 
     raft::group_configuration group_configuration() const {
@@ -116,6 +119,10 @@ public:
         return _raft->log_config().get_revision();
     }
 
+    std::unique_ptr<raft::id_allocator_stm>& id_allocator_stm() {
+        return _id_allocator_stm;
+    }
+
 private:
     friend partition_manager;
 
@@ -124,6 +131,7 @@ private:
 private:
     consensus_ptr _raft;
     std::unique_ptr<raft::log_eviction_stm> _nop_stm;
+    std::unique_ptr<raft::id_allocator_stm> _id_allocator_stm;
     ss::abort_source _as;
     partition_probe _probe;
 

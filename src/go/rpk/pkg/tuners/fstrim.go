@@ -11,24 +11,24 @@ package tuners
 
 import (
 	"time"
-	"vectorized/pkg/os"
-	"vectorized/pkg/system/systemd"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/executors/commands"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system/systemd"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors/commands"
 )
 
 const (
-	fstrim            = "fstrim"
-	unitPrefix        = "redpanda-"
-	timerName         = fstrim + ".timer"
-	serviceName       = fstrim + ".service"
-	customTimerName   = unitPrefix + timerName
-	customServiceName = unitPrefix + serviceName
+	fstrim			= "fstrim"
+	unitPrefix		= "redpanda-"
+	timerName		= fstrim + ".timer"
+	serviceName		= fstrim + ".service"
+	customTimerName		= unitPrefix + timerName
+	customServiceName	= unitPrefix + serviceName
 
-	fstrimTimer = `[Unit]
+	fstrimTimer	= `[Unit]
 Description=Discard unused blocks once a week
 Documentation=man:fstrim
 
@@ -41,12 +41,12 @@ Persistent=true
 WantedBy=timers.target
 `
 
-	timeout = 500 * time.Millisecond
+	timeout	= 500 * time.Millisecond
 )
 
 type fstrimTuner struct {
-	fs       afero.Fs
-	executor executors.Executor
+	fs		afero.Fs
+	executor	executors.Executor
 }
 
 func NewFstrimTuner(fs afero.Fs, executor executors.Executor) Tunable {

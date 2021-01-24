@@ -376,7 +376,6 @@ struct record_batch_header {
     /// context object with opaque environment data
     context ctx;
 
-    record_batch_header() = default;
     offset last_offset() const {
         return base_offset + offset(last_offset_delta);
     }
@@ -606,8 +605,6 @@ private:
     friend ss::future<>
     for_each_record(const model::record_batch& batch, Func&& f);
 };
-
-using record_batch_opt = ss::optimized_optional<record_batch>;
 
 /**
  * Iterate over records with lazy record materialization.

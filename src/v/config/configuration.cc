@@ -67,6 +67,24 @@ configuration::configuration()
       "IpAddress and port for supervisor service",
       required::no,
       unresolved_address("127.0.0.1", 43189))
+  , coproc_max_inflight_bytes(
+      *this,
+      "coproc_max_inflight_bytes",
+      "Maximum amountt of inflight bytes when sending data to wasm engine",
+      required::no,
+      10_MiB)
+  , coproc_max_ingest_bytes(
+      *this,
+      "coproc_max_ingest_bytes",
+      "Maximum amount of data to hold from input logs in memory",
+      required::no,
+      640_KiB)
+  , coproc_max_batch_size(
+      *this,
+      "coproc_max_batch_size",
+      "Maximum amount of bytes to read from one topic read",
+      required::no,
+      32_KiB)
   , node_id(
       *this,
       "node_id",
@@ -101,7 +119,7 @@ configuration::configuration()
       "kafka_api",
       "Address and port of an interface to listen for Kafka API requests",
       required::no,
-      unresolved_address("127.0.0.1", 9092))
+      {model::broker_endpoint(unresolved_address("127.0.0.1", 9092))})
   , kafka_api_tls(
       *this,
       "kafka_api_tls",
@@ -396,12 +414,33 @@ configuration::configuration()
       "cache",
       required::no,
       60s)
+  , max_compacted_log_segment_size(
+      *this,
+      "max_compacted_log_segment_size",
+      "Max compacted segment size after consolidation",
+      required::no,
+      5_GiB)
+  , id_allocator_log_capacity(
+      *this,
+      "id_allocator_log_capacity",
+      "Capacity of the id_allocator log in number of messages. "
+      "Once it reached id_allocator_stm should compact the log.",
+      required::no,
+      100)
+  , id_allocator_batch_size(
+      *this,
+      "id_allocator_batch_size",
+      "Id allocator allocates messages in batches (each batch is a "
+      "one log record) and then serves requests from memory without "
+      "touching the log until the batch is exhausted.",
+      required::no,
+      1000)
   , _advertised_kafka_api(
       *this,
       "advertised_kafka_api",
       "Address of Kafka API published to the clients",
       required::no,
-      std::nullopt)
+      {})
   , _advertised_rpc_api(
       *this,
       "advertised_rpc_api",

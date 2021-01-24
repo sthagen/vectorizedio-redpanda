@@ -11,18 +11,18 @@ package container
 
 import (
 	"context"
-	"vectorized/pkg/cli/cmd/container/common"
 
 	"github.com/docker/docker/api/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/container/common"
 	"golang.org/x/sync/errgroup"
 )
 
 func Purge() *cobra.Command {
 	command := &cobra.Command{
-		Use:   "purge",
-		Short: "Stop and remove an existing local container cluster's data",
+		Use:	"purge",
+		Short:	"Stop and remove an existing local container cluster's data",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			c, err := common.NewDockerClient()
 			if err != nil {
@@ -62,8 +62,8 @@ You may start a new local cluster with 'rpk container start'`,
 				ctx,
 				name,
 				types.ContainerRemoveOptions{
-					RemoveVolumes: true,
-					Force:         true,
+					RemoveVolumes:	true,
+					Force:		true,
 				},
 			)
 			if err != nil {

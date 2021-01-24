@@ -41,7 +41,6 @@ namespace storage {
 
 struct log_config {
     enum class storage_type { memory, disk };
-    using with_cache = ss::bool_class<struct log_cache_tag>;
     log_config(
       storage_type type,
       ss::sstring directory,
@@ -67,6 +66,7 @@ struct log_config {
       ss::sstring directory,
       size_t segment_size,
       size_t compacted_segment_size,
+      size_t max_compacted_segment_size,
       debug_sanitize_files should,
       std::optional<size_t> ret_bytes,
       std::chrono::milliseconds compaction_ival,
@@ -76,7 +76,8 @@ struct log_config {
       : stype(type)
       , base_dir(std::move(directory))
       , max_segment_size(segment_size)
-      , max_compacted_segment_size(compacted_segment_size)
+      , compacted_segment_size(compacted_segment_size)
+      , max_compacted_segment_size(max_compacted_segment_size)
       , sanitize_fileops(should)
       , retention_bytes(ret_bytes)
       , compaction_interval(compaction_ival)
@@ -97,7 +98,8 @@ struct log_config {
     size_t max_segment_size;
 
     // compacted segment size
-    size_t max_compacted_segment_size = 256_MiB;
+    size_t compacted_segment_size = 256_MiB;
+    size_t max_compacted_segment_size = 5_GiB;
     // used for testing: keeps a backtrace of operations for debugging
     debug_sanitize_files sanitize_fileops = debug_sanitize_files::no;
     // same as retention.bytes in kafka
@@ -105,7 +107,7 @@ struct log_config {
     std::chrono::milliseconds compaction_interval = std::chrono::minutes(10);
     // same as delete.retention.ms in kafka - default 1 week
     std::chrono::milliseconds delete_retention = std::chrono::minutes(10080);
-    with_cache cache = log_config::with_cache::yes;
+    with_cache cache = with_cache::yes;
     batch_cache::reclaim_options reclaim_opts{
       .growth_window = std::chrono::seconds(3),
       .stable_window = std::chrono::seconds(10),
@@ -205,7 +207,7 @@ private:
     void arm_housekeeping();
     ss::future<> housekeeping();
 
-    std::optional<batch_cache_index> create_cache();
+    std::optional<batch_cache_index> create_cache(with_cache);
 
     ss::future<> dispatch_topic_dir_deletion(ss::sstring dir);
     ss::future<> recover_log_state(const ntp_config&);

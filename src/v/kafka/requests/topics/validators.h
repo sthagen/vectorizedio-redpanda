@@ -19,9 +19,9 @@ namespace kafka {
 CONCEPT(
 template<typename Request, typename T>
 concept RequestValidator = requires (T validator, const Request& request) {
-    { T::is_valid(request) } -> bool;
-    { T::ec } -> error_code;
-    { T::error_message } -> const char*;
+    { T::is_valid(request) } -> std::same_as<bool>;
+    { T::ec } -> std::convertible_to<const error_code&>;
+    { T::error_message } -> std::convertible_to<const char*>;
 };)
 // clang-format on
 

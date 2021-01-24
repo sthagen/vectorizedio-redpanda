@@ -10,27 +10,26 @@
 package tuners
 
 import (
-	"vectorized/pkg/tuners/disk"
-	"vectorized/pkg/tuners/executors"
-	"vectorized/pkg/tuners/irq"
-
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/disk"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/executors"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/tuners/irq"
 )
 
 type disksIRQsTuner struct {
-	fs                afero.Fs
-	irqDeviceInfo     irq.DeviceInfo
-	cpuMasks          irq.CpuMasks
-	irqBalanceService irq.BalanceService
-	irqProcFile       irq.ProcFile
-	blockDevices      disk.BlockDevices
-	mode              irq.Mode
-	baseCPUMask       string
-	directories       []string
-	devices           []string
-	numberOfCpus      int
-	executor          executors.Executor
+	fs			afero.Fs
+	irqDeviceInfo		irq.DeviceInfo
+	cpuMasks		irq.CpuMasks
+	irqBalanceService	irq.BalanceService
+	irqProcFile		irq.ProcFile
+	blockDevices		disk.BlockDevices
+	mode			irq.Mode
+	baseCPUMask		string
+	directories		[]string
+	devices			[]string
+	numberOfCpus		int
+	executor		executors.Executor
 }
 
 func NewDiskIRQTuner(
@@ -51,18 +50,18 @@ func NewDiskIRQTuner(
 		mode, cpuMask, dirs, devices)
 
 	return &disksIRQsTuner{
-		fs:                fs,
-		irqDeviceInfo:     irqDeviceInfo,
-		cpuMasks:          cpuMasks,
-		irqBalanceService: irqBalanceService,
-		irqProcFile:       irqProcFile,
-		blockDevices:      blockDevices,
-		mode:              mode,
-		baseCPUMask:       cpuMask,
-		directories:       dirs,
-		devices:           devices,
-		numberOfCpus:      numberOfCpus,
-		executor:          executor,
+		fs:			fs,
+		irqDeviceInfo:		irqDeviceInfo,
+		cpuMasks:		cpuMasks,
+		irqBalanceService:	irqBalanceService,
+		irqProcFile:		irqProcFile,
+		blockDevices:		blockDevices,
+		mode:			mode,
+		baseCPUMask:		cpuMask,
+		directories:		dirs,
+		devices:		devices,
+		numberOfCpus:		numberOfCpus,
+		executor:		executor,
 	}
 }
 
