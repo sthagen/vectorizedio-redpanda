@@ -4,13 +4,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/Shopify/sarama"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/kafka"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 )
 
 func NewDeployCommand(
@@ -32,7 +30,6 @@ func NewDeployCommand(
 			if fileExt != ".js" {
 				return fmt.Errorf("can't deploy '%s': only .js files are supported.", path)
 			}
-			fileName := strings.Replace(fullFileName, fileExt, "", 1)
 			fileContent, err := afero.ReadFile(fs, path)
 			if err != nil {
 				return err
@@ -49,7 +46,7 @@ func NewDeployCommand(
 			}
 
 			return deploy(
-				fileName,
+				fullFileName,
 				fileContent,
 				description,
 				producer,
@@ -103,13 +100,8 @@ func deploy(
 	if err != nil {
 		return err
 	}
-	// create message
-	messageContent, err := utils.WriteBuffer([]byte{}, fileContent)
-	if err != nil {
-		return err
-	}
 	// publish message
-	error := kafka.PublishMessage(producer, messageContent, fileName, kafka.CoprocessorTopic, headers)
+	error := kafka.PublishMessage(producer, fileContent, fileName, kafka.CoprocessorTopic, headers)
 	if error != nil {
 		return fmt.Errorf("error deploying '%s.js: %v'", fileName, error)
 	}
@@ -130,14 +122,8 @@ func createHeaders(
 	}
 	// create RecordHeader and append to headersResult
 	for _, v := range value {
-		keyH, err := utils.WriteString([]byte{}, v.key)
-		if err != nil {
-			return nil, err
-		}
-		valueH, err := utils.WriteString([]byte{}, v.value)
-		if err != nil {
-			return nil, err
-		}
+		keyH := []byte(v.key)
+		valueH := []byte(v.value)
 		headersResult = append(headersResult, struct {
 			Key	[]byte
 			Value	[]byte
@@ -155,19 +141,11 @@ func createHeaders(
 
 func createCheckSumHeader(content []byte) (sarama.RecordHeader, error) {
 	// create key for checksum
-	keySha, err := utils.WriteString([]byte{}, "checksum")
-	if err != nil {
-		return sarama.RecordHeader{}, err
-	}
+	keySha := []byte("sha256")
 	// create sha256 value for content
 	shaValue := sha256.Sum256(content)
-	// create value for checksum
-	valueSha, err := utils.WriteBuffer([]byte{}, shaValue[:])
-	if err != nil {
-		return sarama.RecordHeader{}, err
-	}
 	return sarama.RecordHeader{
 		Key:	keySha,
-		Value:	valueSha,
+		Value:	shaValue[:],
 	}, nil
 }

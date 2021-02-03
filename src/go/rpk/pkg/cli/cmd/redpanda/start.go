@@ -73,8 +73,6 @@ const (
 	maxIoRequestsFlag	= "max-io-requests"
 	mbindFlag		= "mbind"
 	overprovisionedFlag	= "overprovisioned"
-
-	seedFormat	= "<host>[:<port>]+<id>"
 )
 
 func NewStartCommand(
@@ -249,8 +247,8 @@ func NewStartCommand(
 		"seeds",
 		"s",
 		[]string{},
-		"A list of seed nodes to connect to, in the format "+
-			seedFormat,
+		"A comma-separated list of seed node addresses"+
+			" (<host>[:<port>]) to connect to",
 	)
 	command.Flags().StringVar(
 		&kafkaAddr,
@@ -677,28 +675,9 @@ func parseFlags(flags []string) map[string]string {
 
 func parseSeeds(seeds []string) ([]config.SeedServer, error) {
 	seedServers := []config.SeedServer{}
+	defaultPort := config.Default().Redpanda.RPCServer.Port
 	for _, s := range seeds {
-		addressID := strings.Split(s, "+")
-		if len(addressID) != 2 {
-			return seedServers, fmt.Errorf(
-				"Couldn't parse seed '%s': Format doesn't"+
-					" conform to %s."+
-					" Missing ID.",
-				s,
-				seedFormat,
-			)
-		}
-		id, err := strconv.Atoi(strings.Trim(addressID[1], " "))
-		if err != nil {
-			return seedServers, fmt.Errorf(
-				"Couldn't parse seed '%s': ID must be an int.",
-				s,
-			)
-		}
-		addr, err := parseAddress(
-			addressID[0],
-			config.Default().Redpanda.RPCServer.Port,
-		)
+		addr, err := parseAddress(s, defaultPort)
 		if err != nil {
 			return seedServers, fmt.Errorf(
 				"Couldn't parse seed '%s': %v",
@@ -714,7 +693,7 @@ func parseSeeds(seeds []string) ([]config.SeedServer, error) {
 		}
 		seedServers = append(
 			seedServers,
-			config.SeedServer{Host: *addr, Id: id},
+			config.SeedServer{Host: *addr},
 		)
 	}
 	return seedServers, nil
@@ -763,7 +742,7 @@ func sendEnv(
 	confJSON, err := mgr.ReadAsJSON(conf.ConfigFile)
 	if err != nil {
 		log.Warnf(
-			"Couldn't send latest config at '%s' due to: %s",
+			"Couldn't parse latest config at '%s' due to: %s",
 			conf.ConfigFile,
 			err,
 		)
@@ -778,7 +757,7 @@ func sendEnv(
 	}
 	err = api.SendEnvironment(fs, env, *conf, confJSON)
 	if err != nil {
-		log.Warnf("couldn't send environment data: %v", err)
+		log.Debugf("couldn't send environment data: %v", err)
 	}
 }
 

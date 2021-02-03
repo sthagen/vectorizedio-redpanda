@@ -12,11 +12,14 @@
 #pragma once
 #include "cluster/controller_service.h"
 #include "cluster/errc.h"
+#include "cluster/logger.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/tls_config.h"
 #include "outcome_future_utils.h"
 #include "rpc/connection_cache.h"
+#include "rpc/dns.h"
+#include "rpc/types.h"
 
 #include <seastar/core/sharded.hh>
 
@@ -74,12 +77,21 @@ auto with_client(
   model::node_id id,
   unresolved_address addr,
   config::tls_config tls_config,
+  rpc::clock_type::duration connection_timeout,
   Func&& f) {
     return update_broker_client(
              self, cache, id, std::move(addr), std::move(tls_config))
-      .then([id, self, &cache, f = std::forward<Func>(f)]() mutable {
+      .then([id,
+             self,
+             &cache,
+             f = std::forward<Func>(f),
+             connection_timeout]() mutable {
           return cache.local().with_node_client<Proto, Func>(
-            self, ss::this_shard_id(), id, std::forward<Func>(f));
+            self,
+            ss::this_shard_id(),
+            id,
+            connection_timeout,
+            std::forward<Func>(f));
       });
 }
 
@@ -99,5 +111,58 @@ void log_certificate_reload_event(
   const char* system_name,
   const std::unordered_set<ss::sstring>& updated,
   const std::exception_ptr& eptr);
+
+inline ss::future<ss::shared_ptr<ss::tls::certificate_credentials>>
+maybe_build_reloadable_certificate_credentials(config::tls_config tls_config) {
+    return std::move(tls_config)
+      .get_credentials_builder()
+      .then([](std::optional<ss::tls::credentials_builder> credentials) {
+          if (credentials) {
+              return credentials->build_reloadable_certificate_credentials(
+                [](
+                  const std::unordered_set<ss::sstring>& updated,
+                  const std::exception_ptr& eptr) {
+                    log_certificate_reload_event(
+                      clusterlog, "Client TLS", updated, eptr);
+                });
+          }
+          return ss::make_ready_future<
+            ss::shared_ptr<ss::tls::certificate_credentials>>(nullptr);
+      });
+}
+
+template<typename Proto, typename Func>
+CONCEPT(requires requires(Func&& f, Proto c) { f(c); })
+auto do_with_client_one_shot(
+  unresolved_address addr,
+  config::tls_config tls_config,
+  rpc::clock_type::duration connection_timeout,
+  Func&& f) {
+    using transport_ptr = ss::lw_shared_ptr<rpc::transport>;
+    return maybe_build_reloadable_certificate_credentials(std::move(tls_config))
+      .then([addr = std::move(addr)](
+              ss::shared_ptr<ss::tls::certificate_credentials>&& cert) mutable {
+          return rpc::resolve_dns(std::move(addr))
+            .then([cert = std::move(cert)](ss::socket_address new_addr) {
+                return ss::make_lw_shared<rpc::transport>(
+                  rpc::transport_configuration{
+                    .server_addr = new_addr,
+                    .credentials = cert,
+                    .disable_metrics = rpc::metrics_disabled(true)});
+            });
+      })
+      .then([addr, f = std::forward<Func>(f), connection_timeout](
+              transport_ptr transport) mutable {
+          return transport->connect(connection_timeout)
+            .then([transport, f = std::forward<Func>(f)]() mutable {
+                return ss::futurize_invoke(
+                  std::forward<Func>(f), Proto(*transport));
+            })
+            .finally([transport] {
+                transport->shutdown();
+                return transport->stop().finally([transport] {});
+            });
+      });
+}
 
 } // namespace cluster

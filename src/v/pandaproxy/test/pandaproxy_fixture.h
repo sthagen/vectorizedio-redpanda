@@ -13,9 +13,9 @@
 
 #include "config/configuration.h"
 #include "http/client.h"
-#include "kafka/requests/metadata_request.h"
+#include "kafka/client/client.h"
+#include "kafka/protocol/metadata.h"
 #include "pandaproxy/application.h"
-#include "pandaproxy/client/client.h"
 #include "pandaproxy/configuration.h"
 #include "pandaproxy/proxy.h"
 #include "redpanda/tests/fixture.h"
@@ -39,14 +39,15 @@ public:
     http::client make_client() {
         rpc::base_transport::configuration transport_cfg;
         transport_cfg.server_addr
-          = pandaproxy::shard_local_cfg().pandaproxy_api().resolve().get();
+          = rpc::resolve_dns(pandaproxy::shard_local_cfg().pandaproxy_api())
+              .get();
         return http::client(transport_cfg);
     }
 
 private:
     void configure_proxy() {
         pandaproxy::shard_local_cfg().developer_mode.set_value(true);
-        pandaproxy::client::shard_local_cfg().brokers.set_value(
+        kafka::client::shard_local_cfg().brokers.set_value(
           std::vector<unresolved_address>{
             config::shard_local_cfg().advertised_kafka_api()[0].address});
     }

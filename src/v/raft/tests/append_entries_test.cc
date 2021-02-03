@@ -49,6 +49,30 @@ FIXTURE_TEST(test_replicate_multiple_entries_single_node, raft_test_fixture) {
       "State is consistent after replication");
 };
 
+FIXTURE_TEST(
+  test_replicate_multiple_entries_single_node_relaxed_consistency,
+  raft_test_fixture) {
+    raft_group gr = raft_group(raft::group_id(0), 1);
+    gr.enable_all();
+    for (int i = 0; i < 5; ++i) {
+        bool success = replicate_random_batches(
+                         gr, 5, raft::consistency_level::leader_ack)
+                         .get0();
+        BOOST_REQUIRE(success);
+    }
+
+    validate_logs_replication(gr);
+
+    wait_for(
+      10s,
+      [this, &gr] { return are_all_consumable_offsets_are_the_same(gr); },
+      "State is consistent after replication");
+    auto& n = gr.get_member(model::node_id(0));
+    auto last_visible = n.consensus->last_visible_index();
+    auto lstats = n.log->offsets();
+    BOOST_REQUIRE_EQUAL(last_visible, lstats.dirty_offset);
+};
+
 FIXTURE_TEST(test_replicate_multiple_entries, raft_test_fixture) {
     raft_group gr = raft_group(raft::group_id(0), 3);
     gr.enable_all();
@@ -75,7 +99,14 @@ FIXTURE_TEST(test_replicate_with_expected_term_leader, raft_test_fixture) {
     bool success = replicate_random_batches(
                      term, gr, 5, raft::consistency_level::leader_ack)
                      .get0();
-    BOOST_REQUIRE(success);
+    // check term to make sure there were no leader elections
+    leader_id = wait_for_group_leader(gr);
+    leader_raft = gr.get_member(leader_id).consensus;
+    auto new_term = leader_raft->term();
+    // require call to be successfull only if there was no leader election
+    if (new_term == term) {
+        BOOST_REQUIRE(success);
+    }
 };
 
 FIXTURE_TEST(test_replicate_with_expected_term_quorum, raft_test_fixture) {
@@ -84,10 +115,18 @@ FIXTURE_TEST(test_replicate_with_expected_term_quorum, raft_test_fixture) {
     auto leader_id = wait_for_group_leader(gr);
     auto leader_raft = gr.get_member(leader_id).consensus;
     auto term = leader_raft->term();
+
     bool success = replicate_random_batches(
                      term, gr, 5, raft::consistency_level::quorum_ack)
                      .get0();
-    BOOST_REQUIRE(success);
+    // check term to make sure there were no leader elections
+    leader_id = wait_for_group_leader(gr);
+    leader_raft = gr.get_member(leader_id).consensus;
+    auto new_term = leader_raft->term();
+    // require call to be successfull only if there was no leader election
+    if (new_term == term) {
+        BOOST_REQUIRE(success);
+    }
 };
 
 FIXTURE_TEST(test_replicate_violating_expected_term_leader, raft_test_fixture) {
@@ -99,7 +138,14 @@ FIXTURE_TEST(test_replicate_violating_expected_term_leader, raft_test_fixture) {
     bool success = replicate_random_batches(
                      term, gr, 5, raft::consistency_level::leader_ack)
                      .get0();
-    BOOST_REQUIRE(!success);
+    // check term to make sure there were no leader elections
+    leader_id = wait_for_group_leader(gr);
+    leader_raft = gr.get_member(leader_id).consensus;
+    auto new_term = leader_raft->term();
+    // require call to be successfull only if there was no leadership change
+    if (new_term == term) {
+        BOOST_REQUIRE(success);
+    }
 };
 
 FIXTURE_TEST(test_replicate_violating_expected_term_quorum, raft_test_fixture) {
@@ -660,9 +706,7 @@ FIXTURE_TEST(test_mixed_consisteny_levels, raft_test_fixture) {
         auto lvl = random_generators::get_int(0, 10) > 5
                      ? raft::consistency_level::leader_ack
                      : raft::consistency_level::quorum_ack;
-        success = replicate_random_batches(
-                    gr, 2, raft::consistency_level::leader_ack)
-                    .get0();
+        success = replicate_random_batches(gr, 2, lvl).get0();
         BOOST_REQUIRE(success);
     }
 

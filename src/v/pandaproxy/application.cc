@@ -9,9 +9,10 @@
 
 #include "pandaproxy/application.h"
 
-#include "pandaproxy/client/configuration.h"
+#include "kafka/client/configuration.h"
 #include "pandaproxy/configuration.h"
 #include "platform/stop_signal.h"
+#include "rpc/dns.h"
 #include "ssx/future-util.h"
 #include "syschecks/syschecks.h"
 #include "utils/file_io.h"
@@ -86,7 +87,7 @@ int application::run(int ac, char** av) {
 }
 
 void application::initialize() {
-    if (client::shard_local_cfg().brokers.value().empty()) {
+    if (kafka::client::shard_local_cfg().brokers.value().empty()) {
         throw std::invalid_argument(
           "Pandaproxy requires at least 1 seed broker");
     }
@@ -126,7 +127,7 @@ void application::hydrate_config(
     vlog(_log.info, "Configuration:\n\n{}\n\n", config);
     ss::smp::invoke_on_all([&config] {
         shard_local_cfg().read_yaml(config);
-        client::shard_local_cfg().read_yaml(config);
+        kafka::client::shard_local_cfg().read_yaml(config);
     }).get0();
     vlog(
       _log.info,
@@ -137,7 +138,7 @@ void application::hydrate_config(
         vlog(_log.info, "{}\t- {}", val.str(), item.desc());
     };
     shard_local_cfg().for_each(config_printer);
-    client::shard_local_cfg().for_each(config_printer);
+    kafka::client::shard_local_cfg().for_each(config_printer);
 }
 
 void application::check_environment() {
@@ -179,9 +180,7 @@ void application::configure_admin_server() {
           .get();
     }
 
-    shard_local_cfg()
-      .admin_api()
-      .resolve()
+    rpc::resolve_dns(shard_local_cfg().admin_api())
       .then([this](ss::socket_address addr) mutable {
           return _admin
             .invoke_on_all<ss::future<> (ss::http_server::*)(
@@ -205,8 +204,8 @@ void application::wire_up_services() {
 
     construct_service(
       _proxy,
-      shard_local_cfg().pandaproxy_api().resolve().get0(),
-      client::shard_local_cfg().brokers())
+      rpc::resolve_dns(shard_local_cfg().pandaproxy_api()).get(),
+      kafka::client::shard_local_cfg().brokers())
       .get();
 }
 

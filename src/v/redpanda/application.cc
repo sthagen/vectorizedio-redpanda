@@ -16,7 +16,7 @@
 #include "cluster/service.h"
 #include "config/configuration.h"
 #include "config/seed_server.h"
-#include "kafka/protocol.h"
+#include "kafka/server/protocol.h"
 #include "model/metadata.h"
 #include "platform/stop_signal.h"
 #include "raft/service.h"
@@ -146,7 +146,8 @@ ss::app_template application::setup_app_template() {
 }
 
 void application::hydrate_config(const po::variables_map& cfg) {
-    auto buf = read_fully(cfg["redpanda-cfg"].as<std::string>()).get0();
+    std::filesystem::path cfg_path(cfg["redpanda-cfg"].as<std::string>());
+    auto buf = read_fully(cfg_path).get0();
     // see https://github.com/jbeder/yaml-cpp/issues/765
     auto workaround = ss::uninitialized_string(buf.size_bytes());
     auto in = iobuf::iterator_consumer(buf.cbegin(), buf.cend());
@@ -164,7 +165,7 @@ void application::hydrate_config(const po::variables_map& cfg) {
       [this](const config::base_property& item) {
           std::stringstream val;
           item.print(val);
-          vlog(_log.info, "{}\t- {}", val.str(), item.desc());
+          vlog(_log.debug, "{}\t- {}", val.str(), item.desc());
       });
 }
 
@@ -276,8 +277,8 @@ void application::configure_admin_server() {
     }
 
     with_scheduling_group(_scheduling_groups.admin_sg(), [this] {
-        return config::shard_local_cfg().admin().resolve().then(
-          [this](ss::socket_address addr) mutable {
+        return rpc::resolve_dns(config::shard_local_cfg().admin())
+          .then([this](ss::socket_address addr) mutable {
               return _admin
                 .invoke_on_all<ss::future<> (ss::http_server::*)(
                   ss::socket_address)>(&ss::http_server::listen, addr)
@@ -349,10 +350,10 @@ void application::wire_up_services() {
       .get();
 
     if (coproc_enabled()) {
-        auto coproc_supervisor_server_addr = config::shard_local_cfg()
-                                               .coproc_supervisor_server()
-                                               .resolve()
-                                               .get0();
+        auto coproc_supervisor_server_addr
+          = rpc::resolve_dns(
+              config::shard_local_cfg().coproc_supervisor_server())
+              .get0();
         syschecks::systemd_message("Building coproc pacemaker").get();
         construct_service(
           pacemaker, coproc_supervisor_server_addr, std::ref(storage))
@@ -439,7 +440,7 @@ void application::wire_up_services() {
       = ss::server_socket::load_balancing_algorithm::port;
     rpc_cfg.max_service_memory_per_core = memory_groups::rpc_total_memory();
     auto rpc_server_addr
-      = config::shard_local_cfg().rpc_server().resolve().get0();
+      = rpc::resolve_dns(config::shard_local_cfg().rpc_server()).get0();
     rpc_cfg.addrs.emplace_back(rpc_server_addr);
     auto rpc_builder = config::shard_local_cfg()
                          .rpc_server_tls()
@@ -462,9 +463,8 @@ void application::wire_up_services() {
     // coproc rpc
     if (coproc_enabled()) {
         auto coproc_script_manager_server_addr
-          = config::shard_local_cfg()
-              .coproc_script_manager_server()
-              .resolve()
+          = rpc::resolve_dns(
+              config::shard_local_cfg().coproc_script_manager_server())
               .get0();
         rpc::server_configuration cp_rpc_cfg("coproc_rpc");
         cp_rpc_cfg.max_service_memory_per_core
@@ -491,7 +491,8 @@ void application::wire_up_services() {
     rpc::server_configuration kafka_cfg("kafka_rpc");
     kafka_cfg.max_service_memory_per_core = memory_groups::kafka_total_memory();
     for (const auto& ep : config::shard_local_cfg().kafka_api()) {
-        kafka_cfg.addrs.emplace_back(ep.name, ep.address.resolve().get0());
+        kafka_cfg.addrs.emplace_back(
+          ep.name, rpc::resolve_dns(ep.address).get0());
     }
     syschecks::systemd_message("Building TLS credentials for kafka").get();
     auto kafka_builder = config::shard_local_cfg()
@@ -612,6 +613,17 @@ void application::start() {
     _kafka_server.invoke_on_all(&rpc::server::start).get();
     vlog(
       _log.info, "Started Kafka API server listening at {}", conf.kafka_api());
+
+    /// Start client listening for events on the internal coprocessor topic
+    if (coproc_enabled()) {
+        /// Temporarily disable retries for the new client until we create a
+        /// more granular way to configure this per client or per request.
+        kafka::client::shard_local_cfg().retries.set_value(size_t(0));
+        construct_single_service(
+          _wasm_event_listener,
+          config::shard_local_cfg().data_directory.value().path);
+        _wasm_event_listener->start().get();
+    }
 
     vlog(_log.info, "Successfully started Redpanda!");
     syschecks::systemd_notify_ready().get();

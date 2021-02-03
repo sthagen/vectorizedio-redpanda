@@ -286,7 +286,8 @@ private:
     friend replicate_batcher;
     friend event_manager;
     friend append_entries_buffer;
-
+    using update_last_quorum_index
+      = ss::bool_class<struct update_last_quorum_index>;
     // all these private functions assume that we are under exclusive operations
     // via the _op_sem
     void do_step_down();
@@ -318,7 +319,7 @@ private:
       replicate_options);
 
     ss::future<storage::append_result>
-    disk_append(model::record_batch_reader&&);
+    disk_append(model::record_batch_reader&&, update_last_quorum_index);
 
     using success_reply = ss::bool_class<struct successfull_reply_tag>;
 
@@ -507,6 +508,7 @@ private:
      * majority.
      */
     model::offset _last_quorum_replicated_index;
+    consistency_level _last_write_consistency_level;
     offset_monitor _consumable_offset_monitor;
     ss::condition_variable _disk_append;
     append_entries_buffer _append_requests_buffer;

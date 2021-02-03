@@ -14,8 +14,8 @@
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
 #include "json/json.h"
-#include "kafka/errors.h"
-#include "kafka/requests/fetch_request.h"
+#include "kafka/protocol/errors.h"
+#include "kafka/protocol/fetch.h"
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "model/record_batch_reader.h"
@@ -93,8 +93,7 @@ public:
             auto r = std::move(*v.partition_response);
             model::topic_partition_view tpv(v.partition->name, r.id);
             while (r.record_set && !r.record_set->empty()) {
-                kafka::kafka_batch_adapter adapter;
-                r.record_set = adapter.adapt(std::move(*r.record_set));
+                auto adapter = r.record_set->consume_batch();
                 auto rjs = rjson_serialize_impl<model::record>(
                   _fmt, tpv, adapter.batch->base_offset());
 

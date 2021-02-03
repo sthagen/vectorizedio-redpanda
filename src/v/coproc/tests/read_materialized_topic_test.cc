@@ -14,9 +14,9 @@
 #include "coproc/tests/utils/helpers.h"
 #include "coproc/tests/utils/supervisor_test_fixture.h"
 #include "coproc/types.h"
-#include "kafka/client.h"
-#include "kafka/requests/batch_consumer.h"
-#include "kafka/requests/fetch_request.h"
+#include "kafka/client/transport.h"
+#include "kafka/protocol/batch_consumer.h"
+#include "kafka/protocol/fetch.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timeout_clock.h"
@@ -50,7 +50,7 @@ public:
             .server_addr = ss::socket_address(
               ss::net::inet_address("127.0.0.1"), 43118),
             .credentials = nullptr});
-        client.connect().get();
+        client.connect(model::no_timeout).get();
         const auto resp = client
                             .enable_copros(
                               coproc::enable_copros_request{
@@ -181,5 +181,6 @@ FIXTURE_TEST(
       resp.partitions[0].responses[0].error, kafka::error_code::none);
     BOOST_REQUIRE_EQUAL(resp.partitions[0].responses[0].id, pid);
     BOOST_REQUIRE(resp.partitions[0].responses[0].record_set);
-    BOOST_REQUIRE_EQUAL(resp.partitions[0].responses[0].record_set, data);
+    BOOST_REQUIRE_EQUAL(
+      std::move(*resp.partitions[0].responses[0].record_set).release(), data);
 }

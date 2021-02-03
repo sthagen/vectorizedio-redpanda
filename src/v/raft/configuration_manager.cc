@@ -89,6 +89,8 @@ configuration_manager::add(std::vector<offset_configuration> configurations) {
     return _lock.with([this,
                        configurations = std::move(configurations)]() mutable {
         for (auto& co : configurations) {
+            // handling backward compatibility i.e. revisionless configurations
+            co.cfg.maybe_set_initial_revision(_initial_revision);
             vlog(
               _ctxlog.trace,
               "Adding configuration: {}, offset: {}",
@@ -105,6 +107,9 @@ configuration_manager::add(std::vector<offset_configuration> configurations) {
 
 ss::future<>
 configuration_manager::add(model::offset offset, group_configuration cfg) {
+    // handling backward compatibility i.e. revisionless configurations
+    cfg.maybe_set_initial_revision(_initial_revision);
+
     vlog(_ctxlog.trace, "Adding configuration: {}, offset: {}", cfg, offset);
     return _lock.with([this, cfg = std::move(cfg), offset]() mutable {
         auto it = _configurations.find(offset);
@@ -229,7 +234,9 @@ ss::future<> configuration_manager::stop() {
     return ss::now();
 }
 
-ss::future<> configuration_manager::start(bool reset) {
+ss::future<>
+configuration_manager::start(bool reset, model::revision_id initial_revision) {
+    _initial_revision = initial_revision;
     if (reset) {
         return _storage.kvs()
           .remove(
@@ -267,7 +274,12 @@ ss::future<> configuration_manager::start(bool reset) {
                 _highest_known_offset = std::max(_highest_known_offset, offset);
             });
         }
-        return f;
+
+        return f.then([this] {
+            for (auto& [o, cfg] : _configurations) {
+                cfg.maybe_set_initial_revision(_initial_revision);
+            }
+        });
     });
 }
 

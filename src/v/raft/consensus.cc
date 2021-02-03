@@ -24,10 +24,9 @@
 #include "raft/types.h"
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
-#include "utils/state_crc_file.h"
-#include "utils/state_crc_file_errc.h"
 #include "vlog.h"
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/future.hh>
 
@@ -447,7 +446,10 @@ ss::future<result<replicate_result>> consensus::do_replicate(
     // For relaxed consistency, append data to leader disk without flush
     // asynchronous replication is provided by Raft protocol recovery mechanism.
     return _op_lock
-      .with([this, expected_term, rdr = std::move(rdr)]() mutable {
+      .with([this,
+             expected_term,
+             rdr = std::move(rdr),
+             lvl = opts.consistency]() mutable {
           if (!is_leader()) {
               return seastar::make_ready_future<result<replicate_result>>(
                 errc::not_leader);
@@ -457,10 +459,12 @@ ss::future<result<replicate_result>> consensus::do_replicate(
               return seastar::make_ready_future<result<replicate_result>>(
                 errc::not_leader);
           }
-
-          return disk_append(model::make_record_batch_reader<
-                               details::term_assigning_reader>(
-                               std::move(rdr), model::term_id(_term)))
+          _last_write_consistency_level = lvl;
+          return disk_append(
+                   model::make_record_batch_reader<
+                     details::term_assigning_reader>(
+                     std::move(rdr), model::term_id(_term)),
+                   update_last_quorum_index::no)
             .then([this](storage::append_result res) {
                 // only update visibility upper bound if all quorum replicated
                 // entries are committed already
@@ -469,6 +473,7 @@ ss::future<result<replicate_result>> consensus::do_replicate(
                     // bound with last offset appended to the log
                     _visibility_upper_bound_index = std::max(
                       _visibility_upper_bound_index, res.last_offset);
+                    maybe_update_majority_replicated_index();
                 }
                 return result<replicate_result>(
                   replicate_result{.last_offset = res.last_offset});
@@ -747,7 +752,8 @@ ss::future<> consensus::start() {
     return _op_lock.with([this] {
         read_voted_for();
 
-        return _configuration_manager.start(is_initial_state())
+        return _configuration_manager
+          .start(is_initial_state(), _self.revision())
           .then([this] { return hydrate_snapshot(); })
           .then([this] {
               vlog(
@@ -1316,7 +1322,7 @@ consensus::do_append_entries(append_entries_request&& r) {
 
     // success. copy entries for each subsystem
     using offsets_ret = storage::append_result;
-    return disk_append(std::move(r.batches))
+    return disk_append(std::move(r.batches), update_last_quorum_index::no)
       .then([this, m = r.meta, target = r.node_id](offsets_ret ofs) {
           auto f = ss::make_ready_future<>();
           auto last_visible = std::min(ofs.last_offset, m.last_visible_index);
@@ -1632,8 +1638,9 @@ ss::future<> consensus::flush_log() {
     return _log.flush().then([this] { _has_pending_flushes = false; });
 }
 
-ss::future<storage::append_result>
-consensus::disk_append(model::record_batch_reader&& reader) {
+ss::future<storage::append_result> consensus::disk_append(
+  model::record_batch_reader&& reader,
+  update_last_quorum_index should_update_last_quorum_idx) {
     using ret_t = storage::append_result;
     auto cfg = storage::log_append_config{
       // no fsync explicit on a per write, we verify at the end to
@@ -1646,9 +1653,19 @@ consensus::disk_append(model::record_batch_reader&& reader) {
              std::move(reader),
              _log.make_appender(cfg),
              cfg.timeout)
-      .then([this](std::tuple<ret_t, std::vector<offset_configuration>> t) {
-          _disk_append.broadcast();
+      .then([this, should_update_last_quorum_idx](
+              std::tuple<ret_t, std::vector<offset_configuration>> t) {
           auto& [ret, configurations] = t;
+          if (should_update_last_quorum_idx) {
+              /**
+               * We have to update last quorum replicated index before we
+               * trigger read for followers recovery as recovery_stm will have
+               * to deceide if follower flush is required basing on last quorum
+               * replicated index.
+               */
+              _last_quorum_replicated_index = ret.last_offset;
+          }
+          _disk_append.broadcast();
           _has_pending_flushes = true;
           // TODO
           // if we rolled a log segment. write current configuration
@@ -2142,14 +2159,19 @@ consensus::transfer_leadership(std::optional<model::node_id> target) {
 }
 
 ss::future<> consensus::remove_persistent_state() {
-    return _storage.kvs()
-      .remove(storage::kvstore::key_space::consensus, voted_for_key())
-      .then([this] {
-          return _storage.kvs().remove(
-            storage::kvstore::key_space::consensus, last_applied_key());
-      })
-      .then(
-        [this] { return _configuration_manager.remove_persistent_state(); });
+    // voted for
+    co_await _storage.kvs().remove(
+      storage::kvstore::key_space::consensus, voted_for_key());
+    // last applied key
+    co_await _storage.kvs().remove(
+      storage::kvstore::key_space::consensus, last_applied_key());
+    // configuration manager
+    co_await _configuration_manager.remove_persistent_state();
+    // snapshot
+    co_await _snapshot_mgr.remove_snapshot();
+    co_await _snapshot_mgr.remove_partial_snapshots();
+
+    co_return;
 }
 
 void consensus::maybe_update_last_visible_index(model::offset offset) {

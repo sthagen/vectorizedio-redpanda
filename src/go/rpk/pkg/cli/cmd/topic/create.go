@@ -12,7 +12,6 @@ package topic
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/Shopify/sarama"
 	log "github.com/sirupsen/logrus"
@@ -55,11 +54,9 @@ func NewCreateCommand(
 			defer adm.Close()
 			topicName := args[0]
 			topicDetail := &sarama.TopicDetail{
-				NumPartitions:	partitions,
-				ConfigEntries:	configEntries,
-			}
-			if replicas > 0 {
-				topicDetail.ReplicationFactor = replicas
+				NumPartitions:		partitions,
+				ConfigEntries:		configEntries,
+				ReplicationFactor:	replicas,
 			}
 			err = adm.CreateTopic(
 				topicName,
@@ -78,12 +75,13 @@ func NewCreateCommand(
 			}
 			sort.Strings(configList)
 			log.Infof(
-				"Created topic '%s'. Partitions: %d,"+
-					" replicas: %d, configuration:\n%s",
+				`Created topic '%s'.
+You may check its config with
+
+rpk topic describe '%s'
+`,
 				topicName,
-				partitions,
-				replicas,
-				strings.Join(configList, "\n"),
+				topicName,
 			)
 			return nil
 		},

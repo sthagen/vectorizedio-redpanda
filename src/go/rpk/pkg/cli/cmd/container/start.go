@@ -195,10 +195,9 @@ func startCluster(
 			args := []string{
 				"--seeds",
 				fmt.Sprintf(
-					"%s:%d+%d",
+					"%s:%d",
 					seedState.ContainerIP,
 					config.Default().Redpanda.RPCServer.Port,
-					seedID,
 				),
 			}
 			state, err := common.CreateNode(
@@ -246,8 +245,8 @@ func startCluster(
 	}
 	renderClusterInfo(nodes)
 	log.Infof(
-		"\nCluster started! You may use 'rpk api' to interact with" +
-			" the cluster. E.g:\n\nrpk api status\n",
+		"\nCluster started! You may use rpk to interact with it." +
+			" E.g:\n\nrpk cluster info\n",
 	)
 
 	return nil
