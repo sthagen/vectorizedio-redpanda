@@ -15,11 +15,11 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "raft/append_entries_buffer.h"
-#include "raft/configuration.h"
 #include "raft/configuration_manager.h"
 #include "raft/consensus_client_protocol.h"
 #include "raft/event_manager.h"
 #include "raft/follower_stats.h"
+#include "raft/group_configuration.h"
 #include "raft/logger.h"
 #include "raft/mutex_buffer.h"
 #include "raft/prevote_stm.h"
@@ -95,6 +95,9 @@ public:
 
     /// Stop all communications.
     ss::future<> stop();
+
+    /// Stop consensus instance from accepting requests
+    void shutdown_input();
 
     ss::future<vote_reply> vote(vote_request&& r);
     ss::future<append_entries_reply> append_entries(append_entries_request&& r);
@@ -194,6 +197,7 @@ public:
       storage::log_reader_config,
       std::optional<clock_type::time_point> = std::nullopt);
 
+    model::offset get_latest_configuration_offset() const;
     model::offset committed_offset() const { return _commit_index; }
     model::offset last_stable_offset() const;
 

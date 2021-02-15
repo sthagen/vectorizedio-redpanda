@@ -11,12 +11,11 @@
 
 #pragma once
 
-#include "config/configuration.h"
 #include "model/metadata.h"
 #include "outcome.h"
-#include "raft/configuration.h"
 #include "raft/consensus.h"
 #include "raft/consensus_client_protocol.h"
+#include "raft/group_configuration.h"
 #include "raft/types.h"
 #include "rpc/connection_cache.h"
 #include "utils/mutex.h"

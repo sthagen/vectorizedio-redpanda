@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "config/configuration.h"
 #include "coproc/ntp_context.h"
 #include "coproc/supervisor.h"
 #include "coproc/types.h"
@@ -75,7 +74,7 @@ private:
     ss::future<>
       send_request(supervisor_client_protocol, process_batch_request);
 
-    std::optional<storage::log_reader_config>
+    storage::log_reader_config
     get_reader(const ss::lw_shared_ptr<ntp_context>&);
 
     ss::future<std::vector<process_batch_request::data>> read();

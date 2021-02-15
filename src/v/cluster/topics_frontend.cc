@@ -15,6 +15,7 @@
 #include "cluster/errc.h"
 #include "cluster/logger.h"
 #include "cluster/partition_allocator.h"
+#include "cluster/partition_leaders_table.h"
 #include "cluster/types.h"
 #include "model/errc.h"
 #include "model/metadata.h"
@@ -321,6 +322,46 @@ ss::future<std::error_code> topics_frontend::move_partition_replicas(
     move_partition_replicas_cmd cmd(std::move(ntp), std::move(new_replica_set));
 
     return replicate_and_wait(std::move(cmd), tout);
+}
+
+ss::future<std::error_code> topics_frontend::finish_moving_partition_replicas(
+  model::ntp ntp,
+  std::vector<model::broker_shard> new_replica_set,
+  model::timeout_clock::time_point tout) {
+    auto leader = _leaders.local().get_leader(model::controller_ntp);
+
+    // no leader available
+    if (!leader) {
+        return ss::make_ready_future<std::error_code>(
+          errc::no_leader_controller);
+    }
+    // current node is a leader, just replicate
+    if (leader == _self) {
+        finish_moving_partition_replicas_cmd cmd(
+          std::move(ntp), std::move(new_replica_set));
+
+        return replicate_and_wait(std::move(cmd), tout);
+    }
+
+    return _connections.local()
+      .with_node_client<controller_client_protocol>(
+        _self,
+        ss::this_shard_id(),
+        *leader,
+        tout,
+        [ntp = std::move(ntp), replicas = std::move(new_replica_set), tout](
+          controller_client_protocol client) mutable {
+            return client
+              .finish_partition_update(
+                finish_partition_update_request{
+                  .ntp = std::move(ntp),
+                  .new_replica_set = std::move(replicas)},
+                rpc::client_opts(tout))
+              .then(&rpc::get_ctx_data<finish_partition_update_reply>);
+        })
+      .then([](result<finish_partition_update_reply> r) {
+          return r.has_error() ? r.error() : r.value().result;
+      });
 }
 
 } // namespace cluster

@@ -27,7 +27,7 @@
 
 #include <bitset>
 #include <cstdint>
-#include <iostream>
+#include <iosfwd>
 #include <limits>
 #include <numeric>
 #include <variant>
@@ -189,6 +189,7 @@ public:
     const iobuf& value() const { return _value; }
     iobuf release_value() { return std::exchange(_value, {}); }
     iobuf share_value() { return _value.share(0, _value.size_bytes()); }
+    bool has_value() const { return _val_size >= 0; }
 
     const std::vector<record_header>& headers() const { return _headers; }
     std::vector<record_header>& headers() { return _headers; }
@@ -255,6 +256,7 @@ public:
     static constexpr uint16_t compression_mask = 0x7;
     static constexpr uint16_t timestamp_type_mask = 0x8;
     static constexpr uint16_t transactional_mask = 0x10;
+    static constexpr uint16_t control_mask = 0x20;
 
     using type = int16_t;
 
@@ -264,6 +266,8 @@ public:
       : _attributes(v) {}
 
     type value() const { return static_cast<type>(_attributes.to_ulong()); }
+
+    bool is_control() const { return maskable_value() & control_mask; }
 
     bool is_transactional() const {
         return maskable_value() & transactional_mask;
@@ -299,6 +303,8 @@ public:
     void set_timestamp_type(model::timestamp_type t) {
         _attributes.set(3, t == timestamp_type::append_time);
     }
+
+    void set_control_type() { _attributes |= control_mask; }
 
     bool operator==(const record_batch_attributes& other) const {
         return _attributes == other._attributes;

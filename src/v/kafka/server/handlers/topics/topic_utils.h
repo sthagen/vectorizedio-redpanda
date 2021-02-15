@@ -10,8 +10,7 @@
  */
 
 #pragma once
-#include "cluster/metadata_cache.h"
-#include "cluster/types.h"
+#include "cluster/fwd.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/handlers/topics/validators.h"
 #include "model/timeout_clock.h"
@@ -185,5 +184,8 @@ ss::future<std::vector<model::node_id>> wait_for_leaders(
   cluster::metadata_cache&,
   std::vector<cluster::topic_result>,
   model::timeout_clock::time_point);
+
+ss::sstring describe_topic_cleanup_policy(
+  const std::optional<cluster::topic_configuration>&);
 
 } // namespace kafka

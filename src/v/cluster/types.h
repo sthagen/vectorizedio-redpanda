@@ -12,21 +12,18 @@
 #pragma once
 
 #include "cluster/errc.h"
+#include "cluster/fwd.h"
 #include "model/adl_serde.h"
 #include "model/fundamental.h"
-#include "model/metadata.h"
 #include "model/namespace.h"
+#include "model/record_batch_types.h"
 #include "model/timeout_clock.h"
 #include "raft/types.h"
-#include "reflection/adl.h"
-#include "storage/types.h"
+#include "storage/ntp_config.h"
 #include "tristate.h"
 #include "utils/to_string.h"
 
-#include <fmt/ostream.h>
-namespace raft {
-class consensus;
-}
+#include <fmt/format.h>
 
 namespace cluster {
 
@@ -153,6 +150,15 @@ struct create_topics_reply {
     std::vector<topic_result> results;
     std::vector<model::topic_metadata> metadata;
     std::vector<topic_configuration> configs;
+};
+
+struct finish_partition_update_request {
+    model::ntp ntp;
+    std::vector<model::broker_shard> new_replica_set;
+};
+
+struct finish_partition_update_reply {
+    cluster::errc result;
 };
 
 template<typename T>

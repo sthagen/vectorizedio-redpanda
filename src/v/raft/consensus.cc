@@ -13,10 +13,10 @@
 #include "likely.h"
 #include "model/metadata.h"
 #include "prometheus/prometheus_sanitize.h"
-#include "raft/configuration.h"
 #include "raft/consensus_client_protocol.h"
 #include "raft/consensus_utils.h"
 #include "raft/errc.h"
+#include "raft/group_configuration.h"
 #include "raft/logger.h"
 #include "raft/prevote_stm.h"
 #include "raft/recovery_stm.h"
@@ -128,12 +128,18 @@ void consensus::maybe_step_down() {
     });
 }
 
+void consensus::shutdown_input() {
+    if (likely(!_as.abort_requested())) {
+        _vote_timeout.cancel();
+        _as.request_abort();
+        _commit_index_updated.broken();
+        _disk_append.broken();
+    }
+}
+
 ss::future<> consensus::stop() {
     vlog(_ctxlog.info, "Stopping");
-    _vote_timeout.cancel();
-    _as.request_abort();
-    _commit_index_updated.broken();
-    _disk_append.broken();
+    shutdown_input();
 
     return _event_manager.stop()
       .then([this] { return _append_requests_buffer.stop(); })
@@ -2252,4 +2258,7 @@ voter_priority consensus::get_node_priority(vnode rni) const {
       (brokers.size() - idx) * (voter_priority::max() / brokers.size()));
 }
 
+model::offset consensus::get_latest_configuration_offset() const {
+    return _configuration_manager.get_latest_offset();
+}
 } // namespace raft

@@ -1,3 +1,12 @@
+// Copyright 2021 Vectorized, Inc.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.md
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0
+
 package labels_test
 
 import (
@@ -33,7 +42,7 @@ func TestLabels(t *testing.T) {
 		{"empty inherited labels", testCluster, map[string]string{
 			"app.kubernetes.io/name":	"redpanda",
 			"app.kubernetes.io/instance":	"testcluster",
-			"app.kubernetes.io/component":	"database",
+			"app.kubernetes.io/component":	"redpanda",
 			"app.kubernetes.io/part-of":	"redpanda",
 			"app.kubernetes.io/managed-by":	"redpanda-operator",
 		},
@@ -41,7 +50,7 @@ func TestLabels(t *testing.T) {
 		{"some inherited labels", withPartOfDefined, map[string]string{
 			"app.kubernetes.io/name":	"redpanda",
 			"app.kubernetes.io/instance":	"testcluster",
-			"app.kubernetes.io/component":	"database",
+			"app.kubernetes.io/component":	"redpanda",
 			"app.kubernetes.io/part-of":	"part-of-something-else",
 			"app.kubernetes.io/managed-by":	"redpanda-operator",
 		},
@@ -50,7 +59,9 @@ func TestLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		actual := labels.ForCluster(tt.pandaCluster)
-		if !reflect.DeepEqual(actual, tt.expected) {
+		// we need to change the type to map here for deepEqual to compare the same types
+		var actualMap map[string]string = actual
+		if !reflect.DeepEqual(actualMap, tt.expected) {
 			t.Errorf("%s: Expecting labels to be %v but got %v", tt.name, tt.expected, actual)
 		}
 	}

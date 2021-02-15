@@ -17,7 +17,6 @@ set(srcs
     partition_allocator_tests.cc
     simple_batch_builder_test.cc
     serialization_rt_test.cc
-    controller_recovery_test.cc
     cluster_utils_tests.cc
     cluster_tests.cc
     metadata_dissemination_test.cc
@@ -27,6 +26,7 @@ set(srcs
     commands_serialization_test.cc
     topic_table_test.cc
     topic_updates_dispatcher_test.cc
+    controller_backend_test.cc
     configuration_change_test.cc)
 
 rp_test(
@@ -42,3 +42,12 @@ set_source_files_properties(
     partition_allocator_tests.cc
     allocation_bench.cc
   PROPERTIES SKIP_UNITY_BUILD_INCLUSION 1)
+  
+rp_test(
+  UNIT_TEST
+  BINARY_NAME partition_moving_test
+  SOURCES partition_moving_test.cc
+  LIBRARIES v::seastar_testing_main v::application v::storage_test_utils
+  DEFINITIONS SEASTAR_TESTING_MAIN
+  ARGS "-- -c 1"
+)

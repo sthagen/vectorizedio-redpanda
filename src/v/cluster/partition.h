@@ -15,8 +15,8 @@
 #include "cluster/types.h"
 #include "model/metadata.h"
 #include "model/record_batch_reader.h"
-#include "raft/configuration.h"
 #include "raft/consensus.h"
+#include "raft/group_configuration.h"
 #include "raft/id_allocator_stm.h"
 #include "raft/log_eviction_stm.h"
 #include "raft/types.h"
@@ -116,7 +116,11 @@ public:
     partition_probe& probe() { return _probe; }
 
     model::revision_id get_revision_id() const {
-        return _raft->log_config().get_revision();
+        return _raft->config().revision_id();
+    }
+
+    model::offset get_latest_configuration_offset() const {
+        return _raft->get_latest_configuration_offset();
     }
 
     std::unique_ptr<raft::id_allocator_stm>& id_allocator_stm() {

@@ -18,24 +18,25 @@ import (
 
 	"github.com/go-logr/logr"
 	redpandav1alpha1 "github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
+	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/labels"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/resources"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
-	errNonexistentLastObservesState = errors.New("expecting to have statefulset LastObservedState set but is nil")
+	errNonexistentLastObservesState = errors.New("expecting to have statefulset LastObservedState set but it's nil")
 )
 
 // ClusterReconciler reconciles a Cluster object
 type ClusterReconciler struct {
 	client.Client
-	Log	logr.Logger
-	Scheme	*runtime.Scheme
+	Log				logr.Logger
+	Scheme				*runtime.Scheme
+	polymorphicAdvertisedAPI	bool
 }
 
 //+kubebuilder:rbac:groups=redpanda.vectorized.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
@@ -71,27 +72,25 @@ func (r *ClusterReconciler) Reconcile(
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	sts := resources.NewStatefulSet(r.Client, &redpandaCluster, r.Scheme)
+	sts := resources.NewStatefulSet(r.Client, &redpandaCluster, r.Scheme, log)
+	svc := resources.NewService(r.Client, &redpandaCluster, r.Scheme, log)
 	toApply := []resources.Resource{
-		resources.NewService(r.Client, &redpandaCluster, r.Scheme),
-		resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme),
+		svc,
+		resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme, svc, r.polymorphicAdvertisedAPI, log),
 		sts,
 	}
 
 	for _, res := range toApply {
 		err := res.Ensure(ctx)
 		if err != nil {
-			log.Error(err, "Failed to reconcile resource",
-				"Namespace", redpandaCluster.Namespace,
-				"Name", redpandaCluster.Name,
-				"Kind", res.Kind())
+			log.Error(err, "Failed to reconcile resource")
 		}
 	}
 
 	var observedPods corev1.PodList
 
 	err := r.List(ctx, &observedPods, &client.ListOptions{
-		LabelSelector:	labels.SelectorFromSet(redpandaCluster.Labels),
+		LabelSelector:	labels.ForCluster(&redpandaCluster).AsClientSelector(),
 		Namespace:	redpandaCluster.Namespace,
 	})
 	if err != nil {
@@ -103,7 +102,7 @@ func (r *ClusterReconciler) Reconcile(
 	observedNodes := make([]string, 0, len(observedPods.Items))
 	// nolint:gocritic // the copies are necessary for further redpandacluster updates
 	for _, item := range observedPods.Items {
-		observedNodes = append(observedNodes, item.Name)
+		observedNodes = append(observedNodes, fmt.Sprintf("%s.%s", item.Name, svc.HeadlessServiceFQDN()))
 	}
 
 	if !reflect.DeepEqual(observedNodes, redpandaCluster.Status.Nodes) {
@@ -115,7 +114,7 @@ func (r *ClusterReconciler) Reconcile(
 		}
 	}
 
-	if sts.LastObservedState != nil {
+	if sts.LastObservedState == nil {
 		return ctrl.Result{}, errNonexistentLastObservesState
 	}
 
@@ -129,6 +128,14 @@ func (r *ClusterReconciler) Reconcile(
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// WithPolymorphicAdvertisedAPI sets up the feature flag for polymorphic advertised API
+func (r *ClusterReconciler) WithPolymorphicAdvertisedAPI(
+	polymorphicAdvertisedAPI bool,
+) *ClusterReconciler {
+	r.polymorphicAdvertisedAPI = polymorphicAdvertisedAPI
+	return r
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -10,9 +10,8 @@
  */
 
 #pragma once
-#include "cluster/cluster_utils.h"
-#include "cluster/partition_manager.h"
-#include "config/configuration.h"
+#include "cluster/fwd.h"
+#include "kafka/protocol/delete_groups.h"
 #include "kafka/protocol/describe_groups.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/heartbeat.h"
@@ -32,12 +31,12 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
 #include <cluster/partition_manager.h>
 
 namespace kafka {
 
-struct recovery_batch_consumer;
+struct recovery_batch_consumer_state;
 
 /*
  * \brief Manages the Kafka group lifecycle.
@@ -113,11 +112,8 @@ public:
     group_manager(
       ss::sharded<raft::group_manager>& gm,
       ss::sharded<cluster::partition_manager>& pm,
-      config::configuration& conf)
-      : _gm(gm)
-      , _pm(pm)
-      , _conf(conf)
-      , _self(cluster::make_self_broker(config::shard_local_cfg())) {}
+      ss::sharded<cluster::topic_table>&,
+      config::configuration& conf);
 
     ss::future<> start();
     ss::future<> stop();
@@ -150,6 +146,9 @@ public:
 
     described_group describe_group(const model::ntp&, const kafka::group_id&);
 
+    ss::future<std::vector<deletable_group_result>>
+      delete_groups(std::vector<std::pair<model::ntp, group_id>>);
+
 public:
     error_code validate_group_status(
       const model::ntp& ntp, const group_id& group, api_key api);
@@ -180,20 +179,26 @@ private:
           , partition(std::move(p)) {}
     };
 
-    absl::flat_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>>
+    absl::node_hash_map<model::ntp, ss::lw_shared_ptr<attached_partition>>
       _partitions;
 
     cluster::notification_id_type _leader_notify_handle;
+    cluster::notification_id_type _topic_table_notify_handle;
 
     void handle_leader_change(
       ss::lw_shared_ptr<cluster::partition>, std::optional<model::node_id>);
+
+    void handle_topic_delta(const std::vector<cluster::topic_table_delta>&);
+
+    ss::future<> cleanup_removed_topic_partitions(
+      const std::vector<model::topic_partition>&);
 
     ss::future<> handle_partition_leader_change(
       ss::lw_shared_ptr<attached_partition>,
       std::optional<model::node_id> leader_id);
 
     ss::future<> recover_partition(
-      ss ::lw_shared_ptr<cluster::partition>, recovery_batch_consumer);
+      ss ::lw_shared_ptr<cluster::partition>, recovery_batch_consumer_state);
 
     ss::future<> inject_noop(
       ss::lw_shared_ptr<cluster::partition> p,
@@ -201,8 +206,9 @@ private:
 
     ss::sharded<raft::group_manager>& _gm;
     ss::sharded<cluster::partition_manager>& _pm;
+    ss::sharded<cluster::topic_table>& _topic_table;
     config::configuration& _conf;
-    absl::flat_hash_map<group_id, group_ptr> _groups;
+    absl::node_hash_map<group_id, group_ptr> _groups;
     model::broker _self;
 };
 
@@ -284,32 +290,34 @@ namespace kafka {
  * This batch consumer is used during partition recovery to read, index, and
  * deduplicate both group and commit metadata snapshots.
  */
+struct recovery_batch_consumer_state {
+    absl::node_hash_map<kafka::group_id, group_log_group_metadata>
+      loaded_groups;
+
+    absl::flat_hash_set<kafka::group_id> removed_groups;
+
+    absl::node_hash_map<
+      group_log_offset_key,
+      std::pair<model::offset, group_log_offset_metadata>>
+      loaded_offsets;
+};
+
 struct recovery_batch_consumer {
-    recovery_batch_consumer(ss::abort_source* as)
+    explicit recovery_batch_consumer(ss::abort_source& as)
       : as(as) {}
 
     ss::future<ss::stop_iteration> operator()(model::record_batch batch);
 
     ss::future<> handle_record(model::record);
-    ss::future<> handle_group_metadata(iobuf key_buf, iobuf val_buf);
-    ss::future<> handle_offset_metadata(iobuf key_buf, iobuf val_buf);
+    ss::future<> handle_group_metadata(iobuf, std::optional<iobuf>);
+    ss::future<> handle_offset_metadata(iobuf, std::optional<iobuf>);
 
-    recovery_batch_consumer end_of_stream() { return std::move(*this); }
+    recovery_batch_consumer_state end_of_stream() { return std::move(st); }
 
+    recovery_batch_consumer_state st;
     model::offset batch_base_offset;
 
-    absl::flat_hash_map<kafka::group_id, group_log_group_metadata>
-      loaded_groups;
-
-    absl::flat_hash_set<kafka::group_id> removed_groups;
-
-    absl::flat_hash_map<
-      group_log_offset_key,
-      std::pair<model::offset, group_log_offset_metadata>>
-      loaded_offsets;
-
-    // this is invalid after end_of_stream() is invoked
-    ss::abort_source* as;
+    ss::abort_source& as;
 };
 
 } // namespace kafka

@@ -13,8 +13,9 @@ package resources
 import (
 	"context"
 	"fmt"
-	"strings"
+	"strconv"
 
+	"github.com/go-logr/logr"
 	redpandav1alpha1 "github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/labels"
 	appsv1 "k8s.io/api/apps/v1"
@@ -37,6 +38,7 @@ type StatefulSetResource struct {
 	k8sclient.Client
 	scheme		*runtime.Scheme
 	pandaCluster	*redpandav1alpha1.Cluster
+	logger		logr.Logger
 
 	LastObservedState	*appsv1.StatefulSet
 }
@@ -46,9 +48,10 @@ func NewStatefulSet(
 	client k8sclient.Client,
 	pandaCluster *redpandav1alpha1.Cluster,
 	scheme *runtime.Scheme,
+	logger logr.Logger,
 ) *StatefulSetResource {
 	return &StatefulSetResource{
-		client, scheme, pandaCluster, nil,
+		client, scheme, pandaCluster, logger.WithValues("Kind", statefulSetKind()), nil,
 	}
 }
 
@@ -62,6 +65,8 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 	}
 
 	if errors.IsNotFound(err) {
+		r.logger.Info(fmt.Sprintf("StatefulSet %s does not exist, going to create one", r.Key().Name))
+
 		obj, err := r.Obj()
 		if err != nil {
 			return err
@@ -76,7 +81,9 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 	r.LastObservedState = &sts
 
 	// Ensure StatefulSet #replicas equals cluster requirement.
-	if sts.Spec.Replicas != r.pandaCluster.Spec.Replicas {
+	if sts.Spec.Replicas != nil && r.pandaCluster.Spec.Replicas != nil && *sts.Spec.Replicas != *r.pandaCluster.Spec.Replicas {
+		r.logger.Info(fmt.Sprintf("StatefulSet %s has replicas set to %d but need %d. Going to update", r.Key().Name, *sts.Spec.Replicas, *r.pandaCluster.Spec.Replicas))
+
 		sts.Spec.Replicas = r.pandaCluster.Spec.Replicas
 		if err := r.Update(ctx, &sts); err != nil {
 			return fmt.Errorf("failed to update StatefulSet: %w", err)
@@ -96,16 +103,18 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 		memory = resource.MustParse("2Gi")
 	}
 
+	var clusterLabels = labels.ForCluster(r.pandaCluster)
+
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:	r.Key().Namespace,
 			Name:		r.Key().Name,
-			Labels:		labels.ForCluster(r.pandaCluster),
+			Labels:		clusterLabels,
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:		pointer.Int32Ptr(1),
 			PodManagementPolicy:	appsv1.ParallelPodManagement,
-			Selector:		metav1.SetAsLabelSelector(r.pandaCluster.Labels),
+			Selector:		clusterLabels.AsAPISelector(),
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},
@@ -114,7 +123,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:		r.pandaCluster.Name,
 					Namespace:	r.pandaCluster.Namespace,
-					Labels:		r.pandaCluster.Labels,
+					Labels:		clusterLabels.AsAPISelector().MatchLabels,
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{
@@ -172,11 +181,17 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 							Args: []string{
 								"--check=false",
 								"--smp 1",
-								"--memory " + strings.ReplaceAll(memory.String(), "Gi", "G"),
+								"--memory " + strconv.FormatInt(memory.Value(), 10),
 								"start",
 								"--",
 								"--default-log-level=debug",
 								"--reserve-memory 0M",
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name:	"REDPANDA_ENVIRONMENT",
+									Value:	"kubernetes",
+								},
 							},
 							Ports: []corev1.ContainerPort{
 								{
@@ -212,7 +227,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 						PodAntiAffinity: &corev1.PodAntiAffinity{
 							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
 								{
-									LabelSelector:	metav1.SetAsLabelSelector(r.pandaCluster.Labels),
+									LabelSelector:	clusterLabels.AsAPISelector(),
 									Namespaces:	[]string{r.pandaCluster.Namespace},
 									TopologyKey:	corev1.LabelHostname},
 							},
@@ -220,7 +235,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 								{
 									Weight:	100,
 									PodAffinityTerm: corev1.PodAffinityTerm{
-										LabelSelector:	metav1.SetAsLabelSelector(r.pandaCluster.Labels),
+										LabelSelector:	clusterLabels.AsAPISelector(),
 										Namespaces:	[]string{r.pandaCluster.Namespace},
 										TopologyKey:	corev1.LabelHostname,
 									},
@@ -233,7 +248,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 							MaxSkew:		1,
 							TopologyKey:		corev1.LabelZoneFailureDomainStable,
 							WhenUnsatisfiable:	corev1.ScheduleAnyway,
-							LabelSelector:		metav1.SetAsLabelSelector(r.pandaCluster.Labels),
+							LabelSelector:		clusterLabels.AsAPISelector(),
 						},
 					},
 				},
@@ -243,7 +258,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:	r.pandaCluster.Namespace,
 						Name:		"datadir",
-						Labels:		r.pandaCluster.Labels,
+						Labels:		clusterLabels,
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:	[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -274,6 +289,10 @@ func (r *StatefulSetResource) Key() types.NamespacedName {
 
 // Kind returns v1.StatefulSet kind
 func (r *StatefulSetResource) Kind() string {
+	return statefulSetKind()
+}
+
+func statefulSetKind() string {
 	var statefulSet appsv1.StatefulSet
 	return statefulSet.Kind
 }

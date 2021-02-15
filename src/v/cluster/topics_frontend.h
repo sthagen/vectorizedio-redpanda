@@ -11,11 +11,8 @@
 
 #pragma once
 
-#include "cluster/commands.h"
 #include "cluster/controller_stm.h"
-#include "cluster/partition_allocator.h"
-#include "cluster/partition_leaders_table.h"
-#include "cluster/types.h"
+#include "cluster/fwd.h"
 #include "model/metadata.h"
 #include "model/record.h"
 #include "model/timeout_clock.h"
@@ -50,6 +47,11 @@ public:
       std::vector<topic_configuration>, model::timeout_clock::duration);
 
     ss::future<std::error_code> move_partition_replicas(
+      model::ntp,
+      std::vector<model::broker_shard>,
+      model::timeout_clock::time_point);
+
+    ss::future<std::error_code> finish_moving_partition_replicas(
       model::ntp,
       std::vector<model::broker_shard>,
       model::timeout_clock::time_point);

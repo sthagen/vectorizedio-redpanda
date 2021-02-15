@@ -10,6 +10,7 @@
 #include "kafka/server/handlers/topics/topic_utils.h"
 
 #include "cluster/errc.h"
+#include "cluster/metadata_cache.h"
 #include "kafka/protocol/errors.h"
 
 namespace kafka {
@@ -50,6 +51,40 @@ ss::future<std::vector<model::node_id>> wait_for_leaders(
     }
 
     return seastar::when_all_succeed(futures.begin(), futures.end());
+}
+
+ss::sstring describe_topic_cleanup_policy(
+  const std::optional<cluster::topic_configuration>& topic_config) {
+    ss::sstring cleanup_policy;
+
+    if (topic_config->cleanup_policy_bitflags) {
+        auto compaction = (topic_config->cleanup_policy_bitflags.value()
+                           & model::cleanup_policy_bitflags::compaction)
+                          == model::cleanup_policy_bitflags::compaction;
+        auto deletion = (topic_config->cleanup_policy_bitflags.value()
+                         & model::cleanup_policy_bitflags::deletion)
+                        == model::cleanup_policy_bitflags::deletion;
+
+        if (compaction) {
+            cleanup_policy = "compact";
+        }
+
+        if (deletion) {
+            if (cleanup_policy.empty()) {
+                cleanup_policy = "delete";
+            } else {
+                cleanup_policy = fmt::format("{},delete", cleanup_policy);
+            }
+        }
+    }
+
+    // optional cleanup policy case. report kafka default. it doesn't
+    // appear that there is an unset value case.
+    if (cleanup_policy.empty()) {
+        cleanup_policy = "delete";
+    }
+
+    return cleanup_policy;
 }
 
 } // namespace kafka

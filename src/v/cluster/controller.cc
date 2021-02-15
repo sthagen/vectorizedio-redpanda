@@ -10,15 +10,25 @@
 #include "cluster/controller.h"
 
 #include "cluster/cluster_utils.h"
-#include "cluster/controller_stm.h"
+#include "cluster/controller_backend.h"
+#include "cluster/controller_service.h"
 #include "cluster/logger.h"
+#include "cluster/members_manager.h"
+#include "cluster/members_table.h"
+#include "cluster/metadata_dissemination_service.h"
+#include "cluster/partition_leaders_table.h"
+#include "cluster/partition_manager.h"
 #include "cluster/raft0_utils.h"
+#include "cluster/shard_table.h"
+#include "cluster/topic_table.h"
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
+#include "config/configuration.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
 
 #include <seastar/core/thread.hh>
+#include <seastar/util/later.hh>
 
 namespace cluster {
 
@@ -71,21 +81,22 @@ ss::future<> controller::start() {
             std::ref(_tp_updates_dispatcher));
       })
       .then([this] {
-          return _backend.start(
-            std::ref(_tp_state),
-            std::ref(_shard_table),
-            std::ref(_partition_manager),
-            std::ref(_members_table),
-            std::ref(_partition_leaders),
-            std::ref(_as));
-      })
-      .then([this] {
           return _tp_frontend.start(
             _raft0->self().id(),
             std::ref(_stm),
             std::ref(_connections),
             std::ref(_partition_allocator),
             std::ref(_partition_leaders),
+            std::ref(_as));
+      })
+      .then([this] {
+          return _backend.start(
+            std::ref(_tp_state),
+            std::ref(_shard_table),
+            std::ref(_partition_manager),
+            std::ref(_members_table),
+            std::ref(_partition_leaders),
+            std::ref(_tp_frontend),
             std::ref(_as));
       })
       .then([this] {
@@ -105,17 +116,29 @@ ss::future<> controller::start() {
       .then(
         [this] { return _backend.invoke_on_all(&controller_backend::start); });
 }
+
+ss::future<> controller::shutdown_input() {
+    _raft0->shutdown_input();
+    return _as.invoke_on_all(&ss::abort_source::request_abort);
+}
+
 ss::future<> controller::stop() {
-    return _as.invoke_on_all(&ss::abort_source::request_abort)
-      .then([this] { return _stm.stop(); })
-      .then([this] { return _members_manager.stop(); })
-      .then([this] { return _tp_frontend.stop(); })
-      .then([this] { return _backend.stop(); })
-      .then([this] { return _tp_state.stop(); })
-      .then([this] { return _partition_allocator.stop(); })
-      .then([this] { return _partition_leaders.stop(); })
-      .then([this] { return _members_table.stop(); })
-      .then([this] { return _as.stop(); });
+    auto f = ss::now();
+    if (!_as.local().abort_requested()) {
+        f = shutdown_input();
+    }
+
+    return f.then([this] {
+        return _backend.stop()
+          .then([this] { return _tp_frontend.stop(); })
+          .then([this] { return _stm.stop(); })
+          .then([this] { return _tp_state.stop(); })
+          .then([this] { return _members_manager.stop(); })
+          .then([this] { return _partition_allocator.stop(); })
+          .then([this] { return _partition_leaders.stop(); })
+          .then([this] { return _members_table.stop(); })
+          .then([this] { return _as.stop(); });
+    });
 }
 
 } // namespace cluster

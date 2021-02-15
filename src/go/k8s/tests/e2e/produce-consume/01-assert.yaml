@@ -2,5 +2,21 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: cluster-sample
+spec:
+  template:
+    spec:
+      containers:
+        - name: redpanda
+          env:
+            - name: REDPANDA_ENVIRONMENT
+              value: kubernetes
+          args:
+          - --check=false
+          - --smp 1
+          - --memory 104857600
+          - start
+          - --
+          - --default-log-level=debug
+          - --reserve-memory 0M
 status:
   readyReplicas: 1
