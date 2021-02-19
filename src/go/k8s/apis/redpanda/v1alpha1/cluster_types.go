@@ -46,6 +46,9 @@ type ClusterStatus struct {
 	// Nodes of the provisioned redpanda nodes
 	// +optional
 	Nodes	[]string	`json:"nodes,omitempty"`
+	// Indicates cluster is upgrading
+	// +optional
+	Upgrading	bool	`json:"upgrading"`
 }
 
 //+kubebuilder:object:root=true
@@ -71,12 +74,10 @@ type ClusterList struct {
 
 // RedpandaConfig is the definition of the main configuration
 type RedpandaConfig struct {
-	RPCServer		SocketAddress	`json:"rpcServer,omitempty"`
-	AdvertisedRPCAPI	SocketAddress	`json:"advertisedRpcApi,omitempty"`
-	KafkaAPI		SocketAddress	`json:"kafkaApi,omitempty"`
-	AdvertisedKafkaAPI	SocketAddress	`json:"advertisedKafkaApi,omitempty"`
-	AdminAPI		SocketAddress	`json:"admin,omitempty"`
-	DeveloperMode		bool		`json:"developerMode,omitempty"`
+	RPCServer	SocketAddress	`json:"rpcServer,omitempty"`
+	KafkaAPI	SocketAddress	`json:"kafkaApi,omitempty"`
+	AdminAPI	SocketAddress	`json:"admin,omitempty"`
+	DeveloperMode	bool		`json:"developerMode,omitempty"`
 }
 
 // SocketAddress provide the way to configure the port

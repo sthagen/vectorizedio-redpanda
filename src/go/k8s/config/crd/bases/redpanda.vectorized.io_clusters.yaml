@@ -45,18 +45,6 @@ spec:
                       port:
                         type: integer
                     type: object
-                  advertisedKafkaApi:
-                    description: SocketAddress provide the way to configure the port
-                    properties:
-                      port:
-                        type: integer
-                    type: object
-                  advertisedRpcApi:
-                    description: SocketAddress provide the way to configure the port
-                    properties:
-                      port:
-                        type: integer
-                    type: object
                   developerMode:
                     type: boolean
                   kafkaApi:
@@ -126,6 +114,9 @@ spec:
                 description: Replicas show how many nodes are working in the cluster
                 format: int32
                 type: integer
+              upgrading:
+                description: Indicates cluster is upgrading
+                type: boolean
             type: object
         type: object
     served: true

@@ -13,6 +13,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 
 	"github.com/go-logr/logr"
@@ -32,12 +33,18 @@ import (
 
 var _ Resource = &StatefulSetResource{}
 
+const (
+	redpandaContainerName		= "redpanda"
+	configuratorContainerName	= "redpanda-configurator"
+)
+
 // StatefulSetResource is part of the reconciliation of redpanda.vectorized.io CRD
 // focusing on the management of redpanda cluster
 type StatefulSetResource struct {
 	k8sclient.Client
 	scheme		*runtime.Scheme
 	pandaCluster	*redpandav1alpha1.Cluster
+	svc		*ServiceResource
 	logger		logr.Logger
 
 	LastObservedState	*appsv1.StatefulSet
@@ -48,10 +55,11 @@ func NewStatefulSet(
 	client k8sclient.Client,
 	pandaCluster *redpandav1alpha1.Cluster,
 	scheme *runtime.Scheme,
+	svc *ServiceResource,
 	logger logr.Logger,
 ) *StatefulSetResource {
 	return &StatefulSetResource{
-		client, scheme, pandaCluster, logger.WithValues("Kind", statefulSetKind()), nil,
+		client, scheme, pandaCluster, svc, logger.WithValues("Kind", statefulSetKind()), nil,
 	}
 }
 
@@ -80,17 +88,57 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 
 	r.LastObservedState = &sts
 
-	// Ensure StatefulSet #replicas equals cluster requirement.
-	if sts.Spec.Replicas != nil && r.pandaCluster.Spec.Replicas != nil && *sts.Spec.Replicas != *r.pandaCluster.Spec.Replicas {
-		r.logger.Info(fmt.Sprintf("StatefulSet %s has replicas set to %d but need %d. Going to update", r.Key().Name, *sts.Spec.Replicas, *r.pandaCluster.Spec.Replicas))
-
-		sts.Spec.Replicas = r.pandaCluster.Spec.Replicas
+	updated := update(&sts, r.pandaCluster, r.logger)
+	if updated {
 		if err := r.Update(ctx, &sts); err != nil {
 			return fmt.Errorf("failed to update StatefulSet: %w", err)
 		}
 	}
 
+	if err := r.updateStsImage(ctx, &sts); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// update ensures StatefulSet #replicas and resources equals cluster requirements.
+func update(
+	sts *appsv1.StatefulSet,
+	pandaCluster *redpandav1alpha1.Cluster,
+	logger logr.Logger,
+) (updated bool) {
+	return updateReplicasIfNeeded(sts, pandaCluster, logger) || updateResourcesIfNeeded(sts, pandaCluster, logger)
+}
+
+func updateResourcesIfNeeded(
+	sts *appsv1.StatefulSet,
+	pandaCluster *redpandav1alpha1.Cluster,
+	logger logr.Logger,
+) (updated bool) {
+	if !reflect.DeepEqual(sts.Spec.Template.Spec.Containers[0].Resources, pandaCluster.Spec.Resources) {
+		logger.Info(fmt.Sprintf("StatefulSet %s resources will be updated to %v", sts.Name, pandaCluster.Spec.Resources))
+		sts.Spec.Template.Spec.Containers[0].Resources = pandaCluster.Spec.Resources
+
+		return true
+	}
+
+	return false
+}
+
+func updateReplicasIfNeeded(
+	sts *appsv1.StatefulSet,
+	pandaCluster *redpandav1alpha1.Cluster,
+	logger logr.Logger,
+) (updated bool) {
+	if sts.Spec.Replicas != nil && pandaCluster.Spec.Replicas != nil && *sts.Spec.Replicas != *pandaCluster.Spec.Replicas {
+		logger.Info(fmt.Sprintf("StatefulSet %s has replicas set to %d but need %d. Going to update", sts.Name, *sts.Spec.Replicas, *pandaCluster.Spec.Replicas))
+		sts.Spec.Replicas = pandaCluster.Spec.Replicas
+
+		return true
+	}
+
+	return false
 }
 
 // Obj returns resource managed client.Object
@@ -112,7 +160,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 			Labels:		clusterLabels,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas:		pointer.Int32Ptr(1),
+			Replicas:		r.pandaCluster.Spec.Replicas,
 			PodManagementPolicy:	appsv1.ParallelPodManagement,
 			Selector:		clusterLabels.AsAPISelector(),
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
@@ -158,7 +206,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 					},
 					InitContainers: []corev1.Container{
 						{
-							Name:		"redpanda-configurator",
+							Name:		configuratorContainerName,
 							Image:		r.pandaCluster.Spec.Image + ":" + r.pandaCluster.Spec.Version,
 							Command:	[]string{"/bin/sh", "-c"},
 							Args:		[]string{configuratorPath},
@@ -176,7 +224,7 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 					},
 					Containers: []corev1.Container{
 						{
-							Name:	"redpanda",
+							Name:	redpandaContainerName,
 							Image:	r.pandaCluster.Spec.Image + ":" + r.pandaCluster.Spec.Version,
 							Args: []string{
 								"--check=false",

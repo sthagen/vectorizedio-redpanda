@@ -1,18 +1,18 @@
 apiVersion: redpanda.vectorized.io/v1alpha1
 kind: Cluster
 metadata:
-  name: scale-up-cluster
+  name: update-image-cluster
 spec:
   image: "vectorized/redpanda"
-  version: "latest"
-  replicas: 1
+  version: "v21.2.1"
+  replicas: 2
   resources:
     requests:
       cpu: 1
-      memory: 100M
+      memory: 2Gi
     limits:
       cpu: 1
-      memory: 100M
+      memory: 2Gi
   configuration:
     rpcServer:
       port: 33145
