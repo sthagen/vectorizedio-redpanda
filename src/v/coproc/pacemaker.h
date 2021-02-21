@@ -17,7 +17,7 @@
 #include "coproc/script_context.h"
 #include "coproc/types.h"
 #include "rpc/reconnect_transport.h"
-#include "storage/api.h"
+#include "storage/fwd.h"
 #include "storage/snapshot.h"
 
 #include <seastar/core/sharded.hh>
@@ -99,7 +99,10 @@ private:
         offset_flush_fiber_state()
           : duration(
             config::shard_local_cfg().coproc_offset_flush_interval_ms())
-          , snap(offsets_snapshot_path(), ss::default_priority_class()) {}
+          , snap(
+              offsets_snapshot_path(),
+              storage::snapshot_manager::default_snapshot_filename,
+              ss::default_priority_class()) {}
     };
 
 private:

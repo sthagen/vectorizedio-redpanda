@@ -12,6 +12,7 @@
 #include "coproc/ntp_context.h"
 #include "coproc/offset_storage_utils.h"
 #include "model/namespace.h"
+#include "storage/api.h"
 #include "storage/snapshot.h"
 #include "test_utils/fixture.h"
 
@@ -26,7 +27,10 @@ public:
     offset_keeper_fixture()
       : _base_dir(make_base_dir())
       , _api(make_api())
-      , _snap(_base_dir, ss::default_priority_class()) {
+      , _snap(
+          _base_dir,
+          storage::snapshot_manager::default_snapshot_filename,
+          ss::default_priority_class()) {
         _api.start().get();
     }
 

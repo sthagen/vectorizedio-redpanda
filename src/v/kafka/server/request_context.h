@@ -11,6 +11,7 @@
 
 #pragma once
 #include "bytes/iobuf.h"
+#include "kafka/protocol/fwd.h"
 #include "kafka/protocol/request_reader.h"
 #include "kafka/server/connection_context.h"
 #include "kafka/server/fetch_session_cache.h"
@@ -103,6 +104,10 @@ public:
 
     cluster::id_allocator_frontend& id_allocator_frontend() const {
         return _conn->server().id_allocator_frontend();
+    }
+
+    bool is_idempotence_enabled() {
+        return _conn->server().is_idempotence_enabled();
     }
 
     int32_t throttle_delay_ms() const {

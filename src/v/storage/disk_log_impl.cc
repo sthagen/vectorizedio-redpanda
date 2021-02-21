@@ -15,10 +15,12 @@
 #include "model/timeout_clock.h"
 #include "reflection/adl.h"
 #include "storage/disk_log_appender.h"
+#include "storage/kvstore.h"
 #include "storage/log_manager.h"
 #include "storage/logger.h"
 #include "storage/offset_assignment.h"
 #include "storage/offset_to_filepos_consumer.h"
+#include "storage/segment.h"
 #include "storage/segment_set.h"
 #include "storage/segment_utils.h"
 #include "storage/types.h"
@@ -259,8 +261,13 @@ ss::future<> disk_log_impl::do_compact(compaction_config cfg) {
       });
     if (segit != _segs.end()) {
         auto seg = *segit;
-        return storage::internal::self_compact_segment(seg, cfg, _probe)
-          .finally([seg] { seg->mark_as_finished_self_compaction(); });
+        auto f = _stm_manager->ensure_snapshot_exists(
+          seg->offsets().committed_offset);
+
+        return f.then([this, seg, cfg]() {
+            return storage::internal::self_compact_segment(seg, cfg, _probe)
+              .finally([seg] { seg->mark_as_finished_self_compaction(); });
+        });
     }
 
     if (auto range = find_compaction_range(); range) {
@@ -560,6 +567,7 @@ ss::future<> disk_log_impl::new_segment(
                 }
                 _segs.add(std::move(h));
                 _probe.segment_created();
+                return _stm_manager->make_snapshot();
             });
       });
 }
