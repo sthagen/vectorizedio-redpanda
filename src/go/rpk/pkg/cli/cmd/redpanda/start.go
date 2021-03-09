@@ -39,69 +39,92 @@ import (
 )
 
 type prestartConfig struct {
-	tuneEnabled	bool
-	checkEnabled	bool
+	tuneEnabled  bool
+	checkEnabled bool
 }
 
 type seastarFlags struct {
-	memory			string
-	lockMemory		bool
-	reserveMemory		string
-	hugepages		string
-	cpuSet			string
-	ioPropertiesFile	string
-	ioProperties		string
-	smp			int
-	threadAffinity		bool
-	numIoQueues		int
-	maxIoRequests		int
-	mbind			bool
-	overprovisioned		bool
+	memory           string
+	lockMemory       bool
+	reserveMemory    string
+	hugepages        string
+	cpuSet           string
+	ioPropertiesFile string
+	ioProperties     string
+	smp              int
+	threadAffinity   bool
+	numIoQueues      int
+	maxIoRequests    int
+	mbind            bool
+	overprovisioned  bool
 }
 
 const (
-	memoryFlag		= "memory"
-	lockMemoryFlag		= "lock-memory"
-	reserveMemoryFlag	= "reserve-memory"
-	hugepagesFlag		= "hugepages"
-	cpuSetFlag		= "cpuset"
-	ioPropertiesFileFlag	= "io-properties-file"
-	ioPropertiesFlag	= "io-properties"
-	wellKnownIOFlag		= "well-known-io"
-	smpFlag			= "smp"
-	threadAffinityFlag	= "thread-affinity"
-	numIoQueuesFlag		= "num-io-queues"
-	maxIoRequestsFlag	= "max-io-requests"
-	mbindFlag		= "mbind"
-	overprovisionedFlag	= "overprovisioned"
+	configFlag           = "config"
+	memoryFlag           = "memory"
+	lockMemoryFlag       = "lock-memory"
+	reserveMemoryFlag    = "reserve-memory"
+	hugepagesFlag        = "hugepages"
+	cpuSetFlag           = "cpuset"
+	ioPropertiesFileFlag = "io-properties-file"
+	ioPropertiesFlag     = "io-properties"
+	wellKnownIOFlag      = "well-known-io"
+	smpFlag              = "smp"
+	threadAffinityFlag   = "thread-affinity"
+	numIoQueuesFlag      = "num-io-queues"
+	maxIoRequestsFlag    = "max-io-requests"
+	mbindFlag            = "mbind"
+	overprovisionedFlag  = "overprovisioned"
+	nodeIDFlag           = "node-id"
 )
+
+func updateConfigWithFlags(conf *config.Config, flags *pflag.FlagSet) {
+	if flags.Changed(configFlag) {
+		conf.ConfigFile, _ = flags.GetString(configFlag)
+	}
+	if flags.Changed(lockMemoryFlag) {
+		conf.Rpk.EnableMemoryLocking, _ = flags.GetBool(lockMemoryFlag)
+	}
+	if flags.Changed(wellKnownIOFlag) {
+		conf.Rpk.WellKnownIo, _ = flags.GetString(wellKnownIOFlag)
+	}
+	if flags.Changed(overprovisionedFlag) {
+		conf.Rpk.Overprovisioned, _ = flags.GetBool(overprovisionedFlag)
+	}
+	if flags.Changed(nodeIDFlag) {
+		conf.Redpanda.Id, _ = flags.GetInt(nodeIDFlag)
+	}
+}
 
 func NewStartCommand(
 	fs afero.Fs, mgr config.Manager, launcher rp.Launcher,
 ) *cobra.Command {
 	prestartCfg := prestartConfig{}
 	var (
-		configFile	string
-		nodeID		uint
-		seeds		[]string
-		kafkaAddr	[]string
-		rpcAddr		string
-		advertisedKafka	[]string
-		advertisedRPC	string
-		installDirFlag	string
-		timeout		time.Duration
-		wellKnownIo	string
+		configFile      string
+		nodeID          int
+		seeds           []string
+		kafkaAddr       []string
+		rpcAddr         string
+		advertisedKafka []string
+		advertisedRPC   string
+		installDirFlag  string
+		timeout         time.Duration
+		wellKnownIo     string
 	)
 	sFlags := seastarFlags{}
 
 	command := &cobra.Command{
-		Use:	"start",
-		Short:	"Start redpanda",
+		Use:   "start",
+		Short: "Start redpanda",
 		RunE: func(ccmd *cobra.Command, args []string) error {
 			conf, err := mgr.FindOrGenerate(configFile)
 			if err != nil {
 				return err
 			}
+
+			updateConfigWithFlags(conf, ccmd.Flags())
+
 			env := api.EnvironmentPayload{}
 			if len(seeds) == 0 {
 				// If --seeds wasn't passed, fall back to the
@@ -235,20 +258,18 @@ func NewStartCommand(
 	}
 	command.Flags().StringVar(
 		&configFile,
-		"config",
+		configFlag,
 		"",
 		"Redpanda config file, if not set the file will be searched for"+
 			" in the default locations",
 	)
-	mgr.BindFlag("config_file", command.Flags().Lookup("config"))
-	command.Flags().UintVar(
+	command.Flags().IntVar(
 		&nodeID,
-		"node-id",
+		nodeIDFlag,
 		0,
 		"The node ID. Must be an integer and must be unique"+
 			" within a cluster",
 	)
-	mgr.BindFlag("redpanda.node_id", command.Flags().Lookup("node-id"))
 	command.Flags().StringSliceVarP(
 		&seeds,
 		"seeds",
@@ -286,7 +307,6 @@ func NewStartCommand(
 			"if not specified redpanda will use all available memory")
 	command.Flags().BoolVar(&sFlags.lockMemory,
 		lockMemoryFlag, false, "If set, will prevent redpanda from swapping")
-	mgr.BindFlag("rpk.enable_memory_locking", command.Flags().Lookup(lockMemoryFlag))
 	command.Flags().StringVar(&sFlags.cpuSet, cpuSetFlag, "",
 		"Set of CPUs for redpanda to use in cpuset(7) format, "+
 			"if not specified redpanda will use all available CPUs")
@@ -321,15 +341,13 @@ func NewStartCommand(
 		wellKnownIOFlag,
 		"",
 		"The cloud vendor and VM type, in the format <vendor>:<vm type>:<storage type>")
-	mgr.BindFlag("rpk.well_known_io", command.Flags().Lookup(wellKnownIOFlag))
 	command.Flags().BoolVar(&sFlags.mbind, mbindFlag, true, "enable mbind")
 	command.Flags().BoolVar(
 		&sFlags.overprovisioned,
 		overprovisionedFlag,
-		true,
+		false,
 		"Enable overprovisioning",
 	)
-	mgr.BindFlag("rpk.overprovisioned", command.Flags().Lookup(overprovisionedFlag))
 	command.Flags().DurationVar(
 		&timeout,
 		"timeout",
@@ -347,19 +365,19 @@ func NewStartCommand(
 
 func flagsMap(sFlags seastarFlags) map[string]interface{} {
 	return map[string]interface{}{
-		memoryFlag:		sFlags.memory,
-		lockMemoryFlag:		sFlags.lockMemory,
-		reserveMemoryFlag:	sFlags.reserveMemory,
-		ioPropertiesFileFlag:	sFlags.ioPropertiesFile,
-		ioPropertiesFlag:	sFlags.ioProperties,
-		cpuSetFlag:		sFlags.cpuSet,
-		smpFlag:		sFlags.smp,
-		hugepagesFlag:		sFlags.hugepages,
-		threadAffinityFlag:	sFlags.threadAffinity,
-		numIoQueuesFlag:	sFlags.numIoQueues,
-		maxIoRequestsFlag:	sFlags.maxIoRequests,
-		mbindFlag:		sFlags.mbind,
-		overprovisionedFlag:	sFlags.overprovisioned,
+		memoryFlag:           sFlags.memory,
+		lockMemoryFlag:       sFlags.lockMemory,
+		reserveMemoryFlag:    sFlags.reserveMemory,
+		ioPropertiesFileFlag: sFlags.ioPropertiesFile,
+		ioPropertiesFlag:     sFlags.ioProperties,
+		cpuSetFlag:           sFlags.cpuSet,
+		smpFlag:              sFlags.smp,
+		hugepagesFlag:        sFlags.hugepages,
+		threadAffinityFlag:   sFlags.threadAffinity,
+		numIoQueuesFlag:      sFlags.numIoQueues,
+		maxIoRequestsFlag:    sFlags.maxIoRequests,
+		mbindFlag:            sFlags.mbind,
+		overprovisionedFlag:  sFlags.overprovisioned,
 	}
 }
 
@@ -394,9 +412,6 @@ func prestart(
 func buildRedpandaFlags(
 	fs afero.Fs, conf *config.Config, sFlags seastarFlags, flags *pflag.FlagSet,
 ) (*rp.RedpandaArgs, error) {
-	if flags.Changed(wellKnownIOFlag) {
-		conf.Rpk.WellKnownIo, _ = flags.GetString(wellKnownIOFlag)
-	}
 	wellKnownIOSet := conf.Rpk.WellKnownIo != ""
 	ioPropsSet := flags.Changed(ioPropertiesFileFlag) || flags.Changed(ioPropertiesFlag)
 	if wellKnownIOSet && ioPropsSet {
@@ -455,8 +470,8 @@ func buildRedpandaFlags(
 		finalFlags[n] = fmt.Sprint(v)
 	}
 	return &rp.RedpandaArgs{
-		ConfigFilePath:	conf.ConfigFile,
-		SeastarFlags:	finalFlags,
+		ConfigFilePath: conf.ConfigFile,
+		SeastarFlags:   finalFlags,
 	}, nil
 }
 
@@ -560,9 +575,9 @@ func tuneAll(
 		tuner := tunerFactory.CreateTuner(tunerName, params)
 		supported, reason := tuner.CheckIfSupported()
 		payload := api.TunerPayload{
-			Name:		tunerName,
-			Enabled:	enabled,
-			Supported:	supported,
+			Name:      tunerName,
+			Enabled:   enabled,
+			Supported: supported,
 		}
 		if !enabled {
 			log.Infof("Skipping disabled tuner %s", tunerName)
@@ -611,9 +626,9 @@ func check(
 	}
 	for _, result := range results {
 		payload := api.CheckPayload{
-			Name:		result.Desc,
-			Current:	result.Current,
-			Required:	result.Required,
+			Name:     result.Desc,
+			Current:  result.Current,
+			Required: result.Required,
 		}
 		if result.Err != nil {
 			payload.ErrorMsg = result.Err.Error()
@@ -750,10 +765,10 @@ func parseNamedAddress(
 
 	return &config.NamedSocketAddress{
 		SocketAddress: config.SocketAddress{
-			Address:	hostname,
-			Port:		port,
+			Address: hostname,
+			Port:    port,
 		},
-		Name:	scheme,
+		Name: scheme,
 	}, nil
 }
 

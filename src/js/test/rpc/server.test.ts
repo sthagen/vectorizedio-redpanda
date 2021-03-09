@@ -10,32 +10,32 @@
 
 import { ProcessBatchServer } from "../../modules/rpc/server";
 import Repository from "../../modules/supervisors/Repository";
-import { SinonSandbox, createSandbox } from "sinon";
-import { SupervisorClient } from "../../modules/rpc/serverAndClients/processBatch";
+import { createSandbox, SinonSandbox } from "sinon";
+import { SupervisorClient } from "../../modules/rpc/serverAndClients/rpcServer";
 import { createRecordBatch } from "../../modules/public";
-import { Script_ManagerServer as ManagementServer } from "../../modules/rpc/serverAndClients/server";
-import FileManager from "../../modules/supervisors/FileManager";
-import { ProcessBatchRequest } from "../../modules/domain/generatedRpc/generatedClasses";
+import {
+  EnableCoprocessorMetadata,
+  ProcessBatchRequest,
+} from "../../modules/domain/generatedRpc/generatedClasses";
 import { createHandle } from "../testUtilities";
-import { PolicyError, RecordBatch } from "../../modules/public/Coprocessor";
-import assert = require("assert");
+import { PolicyError } from "../../modules/public";
 import * as chokidar from "chokidar";
 import LogService from "../../modules/utilities/Logging";
+import err, {
+  DisableResponseCode,
+  EnableResponseCodes,
+} from "../../modules/rpc/errors";
+import assert = require("assert");
+
 const fs = require("fs");
 
 let sinonInstance: SinonSandbox;
 let server: ProcessBatchServer;
 let client: SupervisorClient;
-let manageServer: ManagementServer;
 
 const createStubs = (sandbox: SinonSandbox) => {
   const watchMock = sandbox.stub(chokidar, "watch");
   watchMock.returns(({ on: sandbox.stub() } as unknown) as chokidar.FSWatcher);
-  const readCoprocessorFolder = sandbox.stub(
-    FileManager.prototype,
-    "readCoprocessorFolder"
-  );
-  readCoprocessorFolder.returns(Promise.resolve());
   const spyFireExceptionServer = sandbox.stub(
     ProcessBatchServer.prototype,
     "fireException"
@@ -48,20 +48,10 @@ const createStubs = (sandbox: SinonSandbox) => {
     Repository.prototype,
     "findByCoprocessor"
   );
-  const spyMoveHandle = sandbox.stub(
-    FileManager.prototype,
-    "moveCoprocessorFile"
-  );
-  const spyDeregister = sandbox.spy(
-    FileManager.prototype,
-    "deregisterCoprocessor"
-  );
   return {
     spyFireExceptionServer,
     spyGetHandles,
     spyFindByCoprocessor,
-    spyMoveHandle,
-    spyDeregister,
     watchMock,
   };
 };
@@ -105,10 +95,7 @@ describe("Server", function () {
         // @ts-ignore
         error: sinonInstance.stub(),
       });
-      manageServer = new ManagementServer();
-      manageServer.disable_copros = () => Promise.resolve({ inputs: [0] });
-      manageServer.listen(43118);
-      server = new ProcessBatchServer("a", "i", "s");
+      server = new ProcessBatchServer();
       server.listen(43000);
       return new Promise<void>((resolve, reject) => {
         return SupervisorClient.create(43000)
@@ -124,7 +111,6 @@ describe("Server", function () {
       client.close();
       sinonInstance.restore();
       await server.closeConnection();
-      await manageServer.closeConnection();
     });
 
     it(
@@ -211,71 +197,6 @@ describe("Server", function () {
         });
     });
 
-    it(
-      "if there is an error, should skip the Request, if ErrorPolicy is " +
-        "SkipOnFailure",
-      function (done) {
-        const { spyGetHandles, spyDeregister } = createStubs(sinonInstance);
-        const badApplyCoprocessor = (record: RecordBatch) =>
-          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-          // @ts-ignore
-          record.bad.attribute;
-
-        spyGetHandles.returns([
-          createHandle({
-            apply: badApplyCoprocessor,
-            policyError: PolicyError.SkipOnFailure,
-            inputTopics: ["topic"],
-          }),
-        ]);
-
-        client
-          .process_batch(createProcessBatchRequest([BigInt(1)]))
-          .then((res) => {
-            assert(!spyDeregister.called);
-            assert.deepStrictEqual(res.result, []);
-            done();
-          });
-      }
-    );
-
-    it(
-      "if there is an error, should deregister the Coprocessor, if " +
-        "ErrorPolicy is Deregister",
-      function (done) {
-        const {
-          spyGetHandles,
-          spyDeregister,
-          spyMoveHandle,
-          spyFindByCoprocessor,
-        } = createStubs(sinonInstance);
-        const badApplyCoprocessor = (record: RecordBatch) =>
-          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-          // @ts-ignore
-          record.bad.attribute;
-        const handle = createHandle({
-          apply: badApplyCoprocessor,
-          policyError: PolicyError.Deregister,
-          inputTopics: ["topic"],
-        });
-        spyMoveHandle.returns(Promise.resolve(handle));
-        spyFindByCoprocessor.returns(handle);
-        spyGetHandles.returns([handle]);
-
-        client
-          .process_batch(createProcessBatchRequest([BigInt(1)]))
-          .then((res) => {
-            assert(spyDeregister.called);
-            assert(spyGetHandles.called);
-            assert(spyFindByCoprocessor.called);
-            assert(spyMoveHandle.called);
-            assert(spyMoveHandle.calledWith(handle));
-            assert.deepStrictEqual(res.result, []);
-            done();
-          });
-      }
-    );
-
     it("should apply coprocessors to multiple record batches", function () {
       const { spyGetHandles } = createStubs(sinonInstance);
       // transform coprocessor function
@@ -345,26 +266,6 @@ describe("Server", function () {
       });
     });
 
-    it("should close logger if there is a fatal exception", (done) => {
-      const fsStub = sinonInstance.stub(fs, "writeFile").returns(null);
-      sinonInstance.stub(LogService, "getPath").returns("a");
-      const close = sinonInstance.stub(LogService, "close");
-      close.returns(Promise.resolve());
-      new ProcessBatchServer("a", "a", "a");
-      // waiting for firing exception
-      setTimeout(() => {
-        assert(close.called);
-        assert(fsStub.called);
-        // validate FileManager exception, this exception happens when it tries
-        // to read unexciting folder
-        assert.strictEqual(
-          fsStub.firstCall.args[1],
-          "Error: ENOENT: no such file or directory, scandir 'a'"
-        );
-        done();
-      }, 10);
-    });
-
     it("should server process 100 requests", function () {
       const { spyGetHandles } = createStubs(sinonInstance);
       // transform coprocessor function
@@ -420,5 +321,392 @@ describe("Server", function () {
         });
       });
     });
+
+    it("should enable coprocessor", () => {
+      const server = new ProcessBatchServer();
+      server.loadCoprocFromString = () => [
+        createHandle().coprocessor,
+        undefined,
+      ];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .enable_coprocessors({
+            coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+          })
+          .then((response) => {
+            response.responses.forEach((responseItem) => {
+              assert.strictEqual(
+                responseItem.enableResponseCode,
+                EnableResponseCodes.success
+              );
+              assert.strictEqual(
+                responseItem.scriptMetadata.id,
+                createHandle().coprocessor.globalId
+              );
+              const metaDataExpected: EnableCoprocessorMetadata = {
+                id: createHandle().coprocessor.globalId,
+                inputTopic: createHandle().coprocessor.inputTopics.map(
+                  (topic) => ({
+                    topic,
+                    ingestion_policy: 2,
+                  })
+                ),
+              };
+              assert.deepStrictEqual(
+                responseItem.scriptMetadata,
+                metaDataExpected
+              );
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it(
+      "shouldn't enable coprocessor if the coprocessor doesn't " +
+        "have topics",
+      () => {
+        const server = new ProcessBatchServer();
+        const coprocessor = createHandle().coprocessor;
+        coprocessor.inputTopics = [];
+        server.loadCoprocFromString = () => [coprocessor, undefined];
+        server.listen(8080);
+        return SupervisorClient.create(8080).then((client) => {
+          client
+            .enable_coprocessors({
+              coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+            })
+            .then((response) => {
+              response.responses.forEach((responseItem) => {
+                assert.strictEqual(
+                  responseItem.enableResponseCode,
+                  EnableResponseCodes.scriptContainsNoTopics
+                );
+                assert.strictEqual(
+                  responseItem.scriptMetadata.id,
+                  createHandle().coprocessor.globalId
+                );
+                const metaDataExpected: EnableCoprocessorMetadata = {
+                  id: createHandle().coprocessor.globalId,
+                  inputTopic: [],
+                };
+                assert.deepStrictEqual(
+                  responseItem.scriptMetadata,
+                  metaDataExpected
+                );
+              });
+            })
+            .finally(() => {
+              client.close();
+              server.closeConnection();
+            });
+        });
+      }
+    );
+
+    it("shouldn't enable coprocessor if the coprocessor has invalid topics", () => {
+      const server = new ProcessBatchServer();
+      const coprocessor = createHandle().coprocessor;
+      coprocessor.inputTopics = ["topic."];
+      server.loadCoprocFromString = (_, _2) => [coprocessor, undefined];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .enable_coprocessors({
+            coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+          })
+          .then((response) => {
+            response.responses.forEach((responseItem) => {
+              assert.strictEqual(
+                responseItem.enableResponseCode,
+                EnableResponseCodes.scriptContainsInvalidTopic
+              );
+              assert.strictEqual(
+                responseItem.scriptMetadata.id,
+                createHandle().coprocessor.globalId
+              );
+              const metaDataExpected: EnableCoprocessorMetadata = {
+                id: createHandle().coprocessor.globalId,
+                inputTopic: [],
+              };
+              assert.deepStrictEqual(
+                responseItem.scriptMetadata,
+                metaDataExpected
+              );
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it("shouldn't enable coprocessor if the coprocessor has js errors", () => {
+      const server = new ProcessBatchServer();
+      server.loadCoprocFromString = (_, _2) => [
+        undefined,
+        err.createResponseInternalError({
+          id: BigInt(1),
+          source_code: Buffer.from(""),
+        }),
+      ];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .enable_coprocessors({
+            coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+          })
+          .then((response) => {
+            response.responses.forEach((responseItem) => {
+              assert.strictEqual(
+                responseItem.enableResponseCode,
+                EnableResponseCodes.internalError
+              );
+              assert.strictEqual(
+                responseItem.scriptMetadata.id,
+                createHandle().coprocessor.globalId
+              );
+              const metaDataExpected: EnableCoprocessorMetadata = {
+                id: createHandle().coprocessor.globalId,
+                inputTopic: [],
+              };
+              assert.deepStrictEqual(
+                responseItem.scriptMetadata,
+                metaDataExpected
+              );
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it("should disable coprocessor", () => {
+      const server = new ProcessBatchServer();
+      const coprocessor = createHandle().coprocessor;
+      server.loadCoprocFromString = () => [coprocessor, undefined];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .enable_coprocessors({
+            coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+          })
+          .then((response) => {
+            response.responses.forEach((responseItem) => {
+              assert.strictEqual(
+                responseItem.enableResponseCode,
+                EnableResponseCodes.success
+              );
+            });
+          })
+          .then(() =>
+            client.disable_coprocessors({ ids: [coprocessor.globalId] })
+          )
+          .then((disableResponse) => {
+            disableResponse.responses.forEach((response) => {
+              assert.strictEqual(
+                response.disableResponseCode,
+                DisableResponseCode.success
+              );
+              assert.strictEqual(response.id, coprocessor.globalId);
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it("shouldn't disable a coprocessor if this given id doesn't exist", () => {
+      const server = new ProcessBatchServer();
+      const coprocessor = createHandle().coprocessor;
+      server.loadCoprocFromString = () => [coprocessor, undefined];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .disable_coprocessors({ ids: [coprocessor.globalId] })
+          .then((disableResponse) => {
+            disableResponse.responses.forEach((response) => {
+              assert.strictEqual(
+                response.disableResponseCode,
+                DisableResponseCode.scriptDoesNotExist
+              );
+              assert.strictEqual(response.id, coprocessor.globalId);
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it("should disable all coprocessor", () => {
+      const server = new ProcessBatchServer();
+      const coprocessor = createHandle().coprocessor;
+      server.loadCoprocFromString = () => [coprocessor, undefined];
+      server.listen(8080);
+      return SupervisorClient.create(8080).then((client) => {
+        client
+          .enable_coprocessors({
+            coprocessors: [{ id: BigInt(1), source_code: Buffer.from("") }],
+          })
+          .then((response) => {
+            response.responses.forEach((responseItem) => {
+              assert.strictEqual(
+                responseItem.enableResponseCode,
+                EnableResponseCodes.success
+              );
+            });
+          })
+          .then(() => client.disable_all_coprocessors({ empty: 0 }))
+          .then((response) => {
+            response.responses.forEach((response) => {
+              assert.strictEqual(response.id, coprocessor.globalId);
+              assert.strictEqual(
+                response.disableResponseCode,
+                DisableResponseCode.success
+              );
+            });
+          })
+          .finally(() => {
+            client.close();
+            server.closeConnection();
+          });
+      });
+    });
+
+    it(
+      "should disable all coprocessor though there aren't " +
+        "registered coprocessor",
+      () => {
+        const server = new ProcessBatchServer();
+        const coprocessor = createHandle().coprocessor;
+        server.loadCoprocFromString = () => [coprocessor, undefined];
+        server.listen(8080);
+        return SupervisorClient.create(8080).then((client) => {
+          client
+            .disable_all_coprocessors({ empty: 0 })
+            .then((response) => {
+              assert.deepStrictEqual(response.responses, []);
+            })
+            .finally(() => {
+              client.close();
+              server.closeConnection();
+            });
+        });
+      }
+    );
+
+    it(
+      "should response [] in record on request_process_replay if" +
+        "there is a error on coprocessor script, and its policy error is " +
+        "SkipOnFailure",
+      () => {
+        const handle = createHandle();
+        // add unhandle expetion to coprocessor function
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        handle.coprocessor.apply = (record) => record.badAtt.ribute;
+        const repositoryMock = sinonInstance.stub(
+          Repository.prototype,
+          "getHandlesByCoprocessorIds"
+        );
+        repositoryMock.returns([handle]);
+
+        const request: ProcessBatchRequest = {
+          requests: [
+            {
+              coprocessorIds: [handle.coprocessor.globalId],
+              ntp: {
+                topic: handle.coprocessor.inputTopics[0],
+                namespace: "",
+                partition: 1,
+              },
+              recordBatch: [
+                createRecordBatch({
+                  records: [{ value: Buffer.from("string") }],
+                }),
+              ],
+            },
+          ],
+        };
+        const server = new ProcessBatchServer();
+        server.listen(8080);
+        return SupervisorClient.create(8080).then((client) =>
+          client
+            .process_batch(request)
+            .then((results) => {
+              const result = results.result[0];
+              assert.deepStrictEqual(result.resultRecordBatch, []);
+              assert.strictEqual(result.coprocessorId, BigInt(1));
+            })
+            .finally(() => {
+              client.close();
+              server.closeConnection();
+            })
+        );
+      }
+    );
+
+    it(
+      "should response undefined in record on request_process_replay if" +
+        "there is a error on coprocessor script, and its policy error is " +
+        "Deregister",
+      () => {
+        const handle = createHandle();
+        // add unhandle expetion to coprocessor function
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        handle.coprocessor.apply = (record) => record.badAtt.ribute;
+        handle.coprocessor.policyError = PolicyError.Deregister;
+        const repositoryMock = sinonInstance.stub(
+          Repository.prototype,
+          "getHandlesByCoprocessorIds"
+        );
+        repositoryMock.returns([handle]);
+
+        const request: ProcessBatchRequest = {
+          requests: [
+            {
+              coprocessorIds: [handle.coprocessor.globalId],
+              ntp: {
+                topic: handle.coprocessor.inputTopics[0],
+                namespace: "",
+                partition: 1,
+              },
+              recordBatch: [
+                createRecordBatch({
+                  records: [{ value: Buffer.from("string") }],
+                }),
+              ],
+            },
+          ],
+        };
+        const server = new ProcessBatchServer();
+        server.listen(8080);
+        return SupervisorClient.create(8080).then((client) =>
+          client
+            .process_batch(request)
+            .then((results) => {
+              const result = results.result[0];
+              assert.deepStrictEqual(result.resultRecordBatch, undefined);
+              assert.strictEqual(result.coprocessorId, BigInt(1));
+            })
+            .finally(() => {
+              client.close();
+              server.closeConnection();
+            })
+        );
+      }
+    );
   });
 });

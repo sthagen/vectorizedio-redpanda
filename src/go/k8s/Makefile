@@ -1,6 +1,7 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= vectorized/redpanda-operator:latest
+CONFIGURATOR_IMG ?= vectorized/configurator:latest
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
 CRD_OPTIONS ?= "crd:trivialVersions=true,preserveUnknownFields=false"
 
@@ -24,7 +25,7 @@ ENVTEST_ASSETS_DIR=$(shell pwd)/testbin
 test: generate fmt vet manifests
 	mkdir -p ${ENVTEST_ASSETS_DIR}
 	test -f ${ENVTEST_ASSETS_DIR}/setup-envtest.sh || curl -sSLo ${ENVTEST_ASSETS_DIR}/setup-envtest.sh https://raw.githubusercontent.com/kubernetes-sigs/controller-runtime/v0.7.0/hack/setup-envtest.sh
-	source ${ENVTEST_ASSETS_DIR}/setup-envtest.sh; fetch_envtest_tools $(ENVTEST_ASSETS_DIR); setup_envtest_env $(ENVTEST_ASSETS_DIR); go test ./... -coverprofile cover.out
+	source ${ENVTEST_ASSETS_DIR}/setup-envtest.sh; fetch_envtest_tools $(ENVTEST_ASSETS_DIR); setup_envtest_env $(ENVTEST_ASSETS_DIR); go test --race ./... -coverprofile cover.out
 
 # Build manager binary
 manager: generate fmt vet
@@ -78,12 +79,21 @@ docker-build: test
 docker-push:
 	docker push ${IMG}
 
+# Build the docker image
+docker-build-configurator:
+	docker build -f cmd/configurator/Dockerfile -t ${CONFIGURATOR_IMG} ../
+
+# Push the docker image
+docker-push-configurator:
+	docker push ${CONFIGURATOR_IMG}
+
 # Preload controller image to kind cluster
 push-to-kind:
 	kind load docker-image ${IMG}
+	kind load docker-image ${CONFIGURATOR_IMG}
 
 # Execute end to end tests
-e2e-tests: kuttl docker-build
+e2e-tests: kuttl docker-build docker-build-configurator
 	$(KUTTL) test $(TEST_ONLY_FLAG)
 
 # Download controller-gen locally if necessary
@@ -99,7 +109,7 @@ kuttl:
 # Download crlfmt locally if necessary
 CRLFMT = $(shell pwd)/bin/crlfmt
 crlfmt:
-	$(call go-get-tool,$(CRLFMT),github.com/cockroachdb/crlfmt@v0.0.0-20200923085322-b9cb16fe9a33)
+	$(call go-get-tool,$(CRLFMT),github.com/cockroachdb/crlfmt@v0.0.0-20210128092314-b3eff0b87c79)
 
 # Download kustomize locally if necessary
 KUSTOMIZE = $(shell pwd)/bin/kustomize

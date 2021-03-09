@@ -34,8 +34,8 @@ var (
 // ClusterReconciler reconciles a Cluster object
 type ClusterReconciler struct {
 	client.Client
-	Log	logr.Logger
-	Scheme	*runtime.Scheme
+	Log    logr.Logger
+	Scheme *runtime.Scheme
 }
 
 //+kubebuilder:rbac:groups=redpanda.vectorized.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
@@ -45,6 +45,8 @@ type ClusterReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;
+//+kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates,verbs=create;get;list;watch;
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -71,11 +73,16 @@ func (r *ClusterReconciler) Reconcile(
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	svc := resources.NewService(r.Client, &redpandaCluster, r.Scheme, log)
-	sts := resources.NewStatefulSet(r.Client, &redpandaCluster, r.Scheme, svc.HeadlessServiceFQDN(), svc.Key().Name, log)
+	svc := resources.NewHeadlessService(r.Client, &redpandaCluster, r.Scheme, log)
+	issuer := resources.NewIssuer(r.Client, &redpandaCluster, r.Scheme, log)
+	cert := resources.NewCertificate(r.Client, &redpandaCluster, r.Scheme, issuer, svc.HeadlessServiceFQDN(), log)
+	sts := resources.NewStatefulSet(r.Client, &redpandaCluster, r.Scheme, svc.HeadlessServiceFQDN(), svc.Key().Name, cert.SecretKey(), log)
 	toApply := []resources.Resource{
 		svc,
+		resources.NewNodePortService(r.Client, &redpandaCluster, r.Scheme, log),
 		resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme, svc.HeadlessServiceFQDN(), log),
+		issuer,
+		cert,
 		sts,
 	}
 
@@ -96,8 +103,8 @@ func (r *ClusterReconciler) Reconcile(
 	var observedPods corev1.PodList
 
 	err := r.List(ctx, &observedPods, &client.ListOptions{
-		LabelSelector:	labels.ForCluster(&redpandaCluster).AsClientSelector(),
-		Namespace:	redpandaCluster.Namespace,
+		LabelSelector: labels.ForCluster(&redpandaCluster).AsClientSelector(),
+		Namespace:     redpandaCluster.Namespace,
 	})
 	if err != nil {
 		log.Error(err, "Unable to fetch PodList resource")
@@ -141,5 +148,6 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&redpandav1alpha1.Cluster{}).
 		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }

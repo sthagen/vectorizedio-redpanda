@@ -25,7 +25,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
-	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/utils"
 	"gopkg.in/yaml.v2"
@@ -61,13 +60,11 @@ type Manager interface {
 	ReadAsJSON(path string) (string, error)
 	// Generates and writes the node's UUID
 	WriteNodeUUID(conf *Config) error
-	// Binds a flag's value to a configuration key.
-	BindFlag(key string, flag *pflag.Flag) error
 }
 
 type manager struct {
-	fs	afero.Fs
-	v	*viper.Viper
+	fs afero.Fs
+	v  *viper.Viper
 }
 
 func NewManager(fs afero.Fs) Manager {
@@ -378,10 +375,6 @@ func checkAndWrite(fs afero.Fs, v *viper.Viper, path string) error {
 	return nil
 }
 
-func (m *manager) BindFlag(key string, flag *pflag.Flag) error {
-	return m.v.BindPFlag(key, flag)
-}
-
 func recover(fs afero.Fs, backup, path string, err error) error {
 	log.Infof("Recovering the previous confing from %s", backup)
 	recErr := utils.CopyFile(fs, backup, path)
@@ -396,11 +389,11 @@ func recover(fs afero.Fs, backup, path string, err error) error {
 func unmarshal(v *viper.Viper) (*Config, error) {
 	result := &Config{}
 	decoderConfig := mapstructure.DecoderConfig{
-		Result:	result,
+		Result: result,
 		// Sometimes viper will save int values as strings (i.e.
 		// through BindPFlag) so we have to allow mapstructure
 		// to cast them.
-		WeaklyTypedInput:	true,
+		WeaklyTypedInput: true,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			v21_1_4MapToNamedSocketAddressSlice,
 		),
