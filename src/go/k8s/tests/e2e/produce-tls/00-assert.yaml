@@ -10,7 +10,7 @@ status:
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: cluster-tls 
+  name: cluster-tls-selfsigned-issuer
 status:
   conditions:
     - reason: IsReady
@@ -20,9 +20,32 @@ status:
 ---
 
 apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cluster-tls-root-issuer
+status:
+  conditions:
+    - reason: KeyPairVerified
+      status: "True"
+      type: Ready
+---
+
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: cluster-tls
+  name: cluster-tls-root-certificate
+status:
+  conditions:
+    - reason: Ready
+      status: "True"
+      type: Ready
+
+---
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-tls-redpanda
 status:
   conditions:
     - reason: Ready

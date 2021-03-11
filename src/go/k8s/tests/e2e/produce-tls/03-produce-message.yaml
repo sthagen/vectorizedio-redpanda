@@ -9,7 +9,10 @@ spec:
         - name: tlscert
           secret:
             defaultMode: 420
-            secretName: cluster-tls
+            secretName: cluster-tls-redpanda
+            items: # TODO should we explicitly limit visibility to ca.crt?
+            - key: ca.crt
+              path: ca.crt
         - name: rpkconfig
           configMap:
             name: rpk-config

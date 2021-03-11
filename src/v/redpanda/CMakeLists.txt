@@ -28,6 +28,8 @@ v_cc_library(
     v::syschecks
     v::kafka
     v::coproc
+    v::pandaproxy
+    v::archival
   )
 
 add_executable(redpanda

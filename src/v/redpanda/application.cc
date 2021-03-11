@@ -9,6 +9,8 @@
 
 #include "redpanda/application.h"
 
+#include "archival/ntp_archiver_service.h"
+#include "archival/service.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
@@ -18,6 +20,7 @@
 #include "cluster/service.h"
 #include "config/configuration.h"
 #include "config/seed_server.h"
+#include "kafka/client/configuration.h"
 #include "kafka/security/scram_algorithm.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
 #include "kafka/server/group_manager.h"
@@ -25,6 +28,8 @@
 #include "kafka/server/protocol.h"
 #include "kafka/server/quota_manager.h"
 #include "model/metadata.h"
+#include "pandaproxy/configuration.h"
+#include "pandaproxy/proxy.h"
 #include "platform/stop_signal.h"
 #include "raft/service.h"
 #include "redpanda/admin/api-doc/config.json.h"
@@ -42,6 +47,7 @@
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/http/api_docs.hh>
 #include <seastar/http/exception.hh>
@@ -109,7 +115,10 @@ int application::run(int ac, char** av) {
     });
 }
 
-void application::initialize(std::optional<scheduling_groups> groups) {
+void application::initialize(
+  std::optional<YAML::Node> proxy_cfg,
+  std::optional<YAML::Node> proxy_client_cfg,
+  std::optional<scheduling_groups> groups) {
     if (config::shard_local_cfg().enable_pid_file()) {
         syschecks::pidfile_create(config::shard_local_cfg().pidfile_path());
     }
@@ -126,6 +135,14 @@ void application::initialize(std::optional<scheduling_groups> groups) {
     _scheduling_groups.create_groups().get();
     _deferred.emplace_back(
       [this] { _scheduling_groups.destroy_groups().get(); });
+
+    if (proxy_cfg) {
+        _proxy_config.emplace(*proxy_cfg);
+    }
+
+    if (proxy_client_cfg) {
+        _proxy_client_config.emplace(*proxy_client_cfg);
+    }
 }
 
 void application::setup_metrics() {
@@ -174,28 +191,41 @@ void application::hydrate_config(const po::variables_map& cfg) {
     in.consume_to(buf.size_bytes(), workaround.begin());
     const YAML::Node config = YAML::Load(workaround);
     vlog(_log.info, "Configuration:\n\n{}\n\n", config);
-    ss::smp::invoke_on_all([&config] {
-        config::shard_local_cfg().read_yaml(config);
-    }).get0();
     vlog(
       _log.info,
-      "Use `rpk config set redpanda.<cfg> <value>` to change values "
+      "Use `rpk config set <cfg> <value>` to change values "
       "below:");
-    config::shard_local_cfg().for_each(
-      [this](const config::base_property& item) {
-          std::stringstream val;
-          item.print(val);
-          vlog(_log.debug, "{}\t- {}", val.str(), item.desc());
-      });
+    auto config_printer = [this](std::string_view service) {
+        return [this, service](const config::base_property& item) {
+            std::stringstream val;
+            item.print(val);
+            vlog(_log.info, "{}.{}\t- {}", service, val.str(), item.desc());
+        };
+    };
+    _redpanda_enabled = config["redpanda"];
+    if (_redpanda_enabled) {
+        ss::smp::invoke_on_all([&config] {
+            config::shard_local_cfg().read_yaml(config);
+        }).get0();
+        config::shard_local_cfg().for_each(config_printer("redpanda"));
+    }
+    if (config["pandaproxy"]) {
+        _proxy_config.emplace(config["pandaproxy"]);
+        _proxy_client_config.emplace(config["pandaproxy_client"]);
+        _proxy_config->for_each(config_printer("pandaproxy"));
+        _proxy_client_config->for_each(config_printer("pandaproxy_client"));
+    }
 }
 
 void application::check_environment() {
     syschecks::systemd_message("checking environment (CPU, Mem)").get();
     syschecks::cpu();
     syschecks::memory(config::shard_local_cfg().developer_mode());
-    storage::directories::initialize(
-      config::shard_local_cfg().data_directory().as_sstring())
-      .get();
+    if (_redpanda_enabled) {
+        storage::directories::initialize(
+          config::shard_local_cfg().data_directory().as_sstring())
+          .get();
+    }
 }
 
 /**
@@ -355,6 +385,17 @@ static storage::log_config manager_config_from_global_config() {
 
 // add additional services in here
 void application::wire_up_services() {
+    if (_redpanda_enabled) {
+        wire_up_redpanda_services();
+    }
+    if (_proxy_config) {
+        construct_service(
+          _proxy, to_yaml(*_proxy_config), to_yaml(*_proxy_client_config))
+          .get();
+    }
+}
+
+void application::wire_up_redpanda_services() {
     ss::smp::invoke_on_all([] {
         return storage::internal::chunks().start();
     }).get();
@@ -366,6 +407,7 @@ void application::wire_up_services() {
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing storage services").get();
+
     construct_service(
       storage,
       kvstore_config_from_global_config(),
@@ -452,6 +494,26 @@ void application::wire_up_services() {
       std::ref(_raft_connection_cache))
       .get();
 
+    if (archival_storage_enabled()) {
+        syschecks::systemd_message("Starting archival scheduler").get();
+        ss::sharded<archival::configuration> configs;
+        configs.start().get();
+        configs
+          .invoke_on_all([](archival::configuration& c) {
+              return archival::scheduler_service::get_archival_service_config()
+                .then(
+                  [&c](archival::configuration cfg) { c = std::move(cfg); });
+          })
+          .get();
+        construct_service(
+          archival_scheduler,
+          std::ref(storage),
+          std::ref(partition_manager),
+          std::ref(controller->get_topics_state()),
+          std::ref(configs))
+          .get();
+        configs.stop().get();
+    }
     // group membership
     syschecks::systemd_message("Creating partition manager").get();
     construct_service(
@@ -552,7 +614,44 @@ void application::wire_up_services() {
       .get();
 }
 
+ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
+    return _proxy.invoke_on_all(
+      [name{std::move(name)}, val{std::move(val)}](pandaproxy::proxy& p) {
+          p.config().get(name).set_value(val);
+      });
+}
+
+bool application::archival_storage_enabled() {
+    const auto& cfg = config::shard_local_cfg();
+    return cfg.developer_mode() && cfg.archival_storage_enabled();
+}
+
+ss::future<>
+application::set_proxy_client_config(ss::sstring name, std::any val) {
+    return _proxy.invoke_on_all(
+      [name{std::move(name)}, val{std::move(val)}](pandaproxy::proxy& p) {
+          p.client_config().get(name).set_value(val);
+      });
+}
+
 void application::start() {
+    if (_redpanda_enabled) {
+        start_redpanda();
+    }
+
+    if (_proxy_config) {
+        _proxy.invoke_on_all(&pandaproxy::proxy::start).get();
+        vlog(
+          _log.info,
+          "Started Pandaproxy listening at {}",
+          _proxy_config->pandaproxy_api());
+    }
+
+    vlog(_log.info, "Successfully started Redpanda!");
+    syschecks::systemd_notify_ready().get();
+}
+
+void application::start_redpanda() {
     syschecks::systemd_message("Staring storage services").get();
     storage.invoke_on_all(&storage::api::start).get();
 
@@ -615,6 +714,14 @@ void application::start() {
     _rpc.invoke_on_all(&rpc::server::start).get();
     vlog(_log.info, "Started RPC server listening at {}", conf.rpc_server());
 
+    if (archival_storage_enabled()) {
+        syschecks::systemd_message("Starting archival storage").get();
+        archival_scheduler
+          .invoke_on_all(
+            [](archival::scheduler_service& svc) { return svc.start(); })
+          .get();
+    }
+
     quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();
 
     // Kafka API
@@ -644,9 +751,6 @@ void application::start() {
         _wasm_event_listener->start().get();
         pacemaker.invoke_on_all(&coproc::pacemaker::start).get();
     }
-
-    vlog(_log.info, "Successfully started Redpanda!");
-    syschecks::systemd_notify_ready().get();
 }
 
 void application::admin_register_raft_routes(ss::http_server& server) {
