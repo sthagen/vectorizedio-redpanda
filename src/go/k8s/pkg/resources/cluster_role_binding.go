@@ -136,11 +136,6 @@ func (r *ClusterRoleBindingResource) Key() types.NamespacedName {
 	return types.NamespacedName{Name: "redpanda-init-configurator", Namespace: ""}
 }
 
-// Kind returns v1.ClusterRoleBinding kind
-func (r *ClusterRoleBindingResource) Kind() string {
-	return clusterRoleBindingKind()
-}
-
 // RemoveSubject removes ServiceAccount from the ClusterRoleBinding subject list
 func (r *ClusterRoleBindingResource) RemoveSubject(
 	ctx context.Context, cluster types.NamespacedName,
@@ -148,6 +143,10 @@ func (r *ClusterRoleBindingResource) RemoveSubject(
 	var crb v1.ClusterRoleBinding
 
 	err := r.Get(ctx, r.Key(), &crb)
+	if errors.IsNotFound(err) {
+		// if CRB does not exist, there is nothing to remove
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("error while fetching ClusterRoleBinding resource: %w", err)
 	}

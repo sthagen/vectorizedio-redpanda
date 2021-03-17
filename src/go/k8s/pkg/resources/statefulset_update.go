@@ -12,7 +12,6 @@ package resources
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"reflect"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/go-logr/logr"
-	cmetav1 "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,7 +26,7 @@ import (
 
 const requeueDuration = time.Second * 10
 
-// updateStsImage handles image changes in the redpanda cluster CR by triggering
+// runPartitionedUpdate handles image changes in the redpanda cluster CR by triggering
 // a rolling update (using partitions) against the statefulset underneath the CR.
 // The partitioned rolling update allows us to verify the ith pod in a custom manner
 // before proceeding to the next pod.
@@ -45,32 +43,17 @@ const requeueDuration = time.Second * 10
 // verify the previously updated pod and requeue as necessary. Currently, the
 // verification checks the pod has started listening in its Kafka API port and may be
 // extended.
-func (r *StatefulSetResource) updateStsImage(
+func (r *StatefulSetResource) runPartitionedUpdate(
 	ctx context.Context, sts *appsv1.StatefulSet,
 ) error {
-	upgrading := r.pandaCluster.Status.Upgrading
+	newImage := r.pandaCluster.FullImageName()
 
-	rpContainer, err := findContainer(sts.Spec.Template.Spec.Containers, redpandaContainerName)
-	if err != nil {
+	if err := r.updateUpgradingStatus(ctx, true); err != nil {
 		return err
 	}
 
-	newImage := r.pandaCluster.FullImageName()
-	if rpContainer.Image == newImage && !upgrading {
-		return nil
-	}
-
-	if rpContainer.Image != newImage {
-		r.logger.Info("Starting cluster image update", "cluster image", newImage, "container image", rpContainer.Image)
-
-		// Mark cluster as being upgraded.
-		if err := r.updateUpgradingStatus(ctx, true); err != nil {
-			return err
-		}
-	}
-
-	if upgrading {
-		r.logger.Info("Continuing cluster image update", "cluster image", newImage)
+	if r.pandaCluster.Status.Upgrading {
+		r.logger.Info("Continuing cluster partitioned update", "cluster image", newImage)
 	}
 
 	podSpec := &sts.Spec.Template.Spec
@@ -88,6 +71,21 @@ func (r *StatefulSetResource) updateStsImage(
 	}
 
 	return nil
+}
+
+// shouldUsePartitionedUpdate returns true if changes on the CR require partitioned update
+func (r *StatefulSetResource) shouldUsePartitionedUpdate(
+	sts *appsv1.StatefulSet,
+) (bool, error) {
+	upgrading := r.pandaCluster.Status.Upgrading
+
+	rpContainer, err := findContainer(sts.Spec.Template.Spec.Containers, redpandaContainerName)
+	if err != nil {
+		return false, err
+	}
+
+	newImage := r.pandaCluster.FullImageName()
+	return rpContainer.Image != newImage || upgrading, nil
 }
 
 func (r *StatefulSetResource) updateUpgradingStatus(
@@ -133,7 +131,7 @@ func (r *StatefulSetResource) partitionUpdateImage(
 				Msg: fmt.Sprintf("redpanda on pod (ordinal: %d) not ready", ordinal)}
 		}
 
-		if err := r.rollingUpdatePartition(ctx, sts, ordinal); err != nil {
+		if err := r.rollingUpdatePartition(ctx, ordinal, sts); err != nil {
 			return err
 		}
 
@@ -183,23 +181,13 @@ func (r *StatefulSetResource) queryRedpandaForTopicMembers(
 
 	tlsConfig := tls.Config{MinVersion: tls.VersionTLS12} // TLS12 is min version allowed by gosec.
 	if r.pandaCluster.Spec.Configuration.TLS.KafkaAPIEnabled {
-		// Retrieve secret containing the certificates
-		certSecret, err := r.getCertSecret(ctx)
-		if err != nil {
+		// For simplicity, we skip broker verification until per-listener
+		// TLS is available in Redpanda. This client calls the internal listener.
+		tlsConfig.InsecureSkipVerify = true
+
+		if err := r.populateTLSConfigCert(ctx, &tlsConfig); err != nil {
 			return err
 		}
-
-		// Add root CA
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(certSecret.Data[cmetav1.TLSCAKey])
-		tlsConfig.RootCAs = caCertPool
-
-		// Populate crypto/TLS configuration
-		cert, err := tls.X509KeyPair(certSecret.Data[corev1.TLSCertKey], certSecret.Data[corev1.TLSPrivateKeyKey])
-		if err != nil {
-			return err
-		}
-		tlsConfig.Certificates = []tls.Certificate{cert}
 
 		conf.Net.TLS.Enable = true
 		conf.Net.TLS.Config = &tlsConfig
@@ -214,23 +202,29 @@ func (r *StatefulSetResource) queryRedpandaForTopicMembers(
 	return consumer.Close()
 }
 
-func (r *StatefulSetResource) getCertSecret(
-	ctx context.Context,
-) (*corev1.Secret, error) {
-	var certSecret corev1.Secret
-	if r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth && r.internalClientCertSecretKey != nil {
-		// client auth is required
-		err := r.Get(ctx, *r.internalClientCertSecretKey, &certSecret)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		err := r.Get(ctx, r.redpandaCertSecretKey, &certSecret)
-		if err != nil {
-			return nil, err
-		}
+// Populates crypto/TLS configuration for certificate used by the operator
+// during its client authentication.
+func (r *StatefulSetResource) populateTLSConfigCert(
+	ctx context.Context, tlsConfig *tls.Config,
+) error {
+	if !r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth {
+		return nil
 	}
-	return &certSecret, nil
+
+	var certSecret corev1.Secret
+	err := r.Get(ctx, r.internalClientCertSecretKey, &certSecret)
+	if err != nil {
+		return err
+	}
+
+	cert, err := tls.X509KeyPair(certSecret.Data[corev1.TLSCertKey], certSecret.Data[corev1.TLSPrivateKeyKey])
+	if err != nil {
+		return err
+	}
+
+	tlsConfig.Certificates = []tls.Certificate{cert}
+
+	return nil
 }
 
 func (r *StatefulSetResource) podImageIdenticalToClusterImage(
@@ -266,14 +260,19 @@ func (r *StatefulSetResource) podImageIdenticalToClusterImage(
 }
 
 func (r *StatefulSetResource) rollingUpdatePartition(
-	ctx context.Context, sts *appsv1.StatefulSet, ordinal int32,
+	ctx context.Context, ordinal int32, sts *appsv1.StatefulSet,
 ) error {
 	r.logger.Info("Call update on statefulset", "ordinal", ordinal)
 
-	sts.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{
+	modified, err := r.obj()
+	if err != nil {
+		return err
+	}
+	modifiedSts := modified.(*appsv1.StatefulSet)
+	modifiedSts.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{
 		Partition: &ordinal,
 	}
-	if err := r.Update(ctx, sts); err != nil {
+	if err := Update(ctx, sts, modifiedSts, r.Client, r.logger); err != nil {
 		return fmt.Errorf("failed to update StatefulSet (ordinal %d): %w", ordinal, err)
 	}
 

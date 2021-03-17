@@ -14,15 +14,14 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strconv"
 
 	"github.com/go-logr/logr"
+	cmetav1 "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	redpandav1alpha1 "github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/labels"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +47,9 @@ const (
 	configDestinationDir = "/etc/redpanda"
 	configSourceDir      = "/mnt/operator"
 	configFile           = "redpanda.yaml"
+
+	datadirName            = "datadir"
+	defaultDatadirCapacity = "100Gi"
 )
 
 // StatefulSetResource is part of the reconciliation of redpanda.vectorized.io CRD
@@ -61,7 +63,7 @@ type StatefulSetResource struct {
 	nodePortName                types.NamespacedName
 	nodePortSvc                 corev1.Service
 	redpandaCertSecretKey       types.NamespacedName
-	internalClientCertSecretKey *types.NamespacedName
+	internalClientCertSecretKey types.NamespacedName
 	serviceAccountName          string
 	configuratorTag             string
 	logger                      logr.Logger
@@ -78,7 +80,7 @@ func NewStatefulSet(
 	serviceName string,
 	nodePortName types.NamespacedName,
 	redpandaCertSecretKey types.NamespacedName,
-	internalClientCertSecretKey *types.NamespacedName,
+	internalClientCertSecretKey types.NamespacedName,
 	serviceAccountName string,
 	configuratorTag string,
 	logger logr.Logger,
@@ -115,88 +117,88 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 		}
 	}
 
-	err := r.Get(ctx, r.Key(), &sts)
-	if err != nil && !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("error while fetching StatefulSet resource: %w", err)
+	obj, err := r.obj()
+	if err != nil {
+		return fmt.Errorf("unable to construct StatefulSet object: %w", err)
+	}
+	created, err := CreateIfNotExists(ctx, r, obj, r.logger)
+	if err != nil {
+		return err
 	}
 
-	if k8serrors.IsNotFound(err) {
-		r.logger.Info(fmt.Sprintf("StatefulSet %s does not exist, going to create one", r.Key().Name))
-
-		obj, err := r.Obj()
-		if err != nil {
-			return fmt.Errorf("unable to construct StatefulSet object: %w", err)
-		}
-
-		if err = r.Create(ctx, obj); err != nil {
-			return fmt.Errorf("unable to create StatefulSet resource: %w", err)
-		}
-		r.LastObservedState = obj.(*appsv1.StatefulSet)
-
-		return nil
+	err = r.Get(ctx, r.Key(), &sts)
+	if err != nil {
+		return fmt.Errorf("error while fetching StatefulSet resource: %w", err)
 	}
 
 	r.LastObservedState = &sts
 
-	updated := update(&sts, r.pandaCluster, r.logger)
-	if updated {
-		if err := r.Update(ctx, &sts); err != nil {
-			return fmt.Errorf("failed to update StatefulSet replicas or resources: %w", err)
-		}
+	if created {
+		// we don't need to update since we've just created the resource
+		return nil
 	}
-
-	if err := r.updateStsImage(ctx, &sts); err != nil {
-		return fmt.Errorf("failed to update StatefulSet image: %w", err)
+	partitioned, err := r.shouldUsePartitionedUpdate(&sts)
+	if err != nil {
+		return err
+	}
+	if partitioned {
+		r.logger.Info(fmt.Sprintf("Going to run partitioned update on resource %s", r.Key().Name))
+		if err := r.runPartitionedUpdate(ctx, &sts); err != nil {
+			return fmt.Errorf("failed to run partitioned update: %w", err)
+		}
+	} else {
+		modified, err := r.obj()
+		if err != nil {
+			return err
+		}
+		err = Update(ctx, &sts, modified, r.Client, r.logger)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-// update ensures StatefulSet #replicas and resources equals cluster requirements.
-func update(
-	sts *appsv1.StatefulSet,
-	pandaCluster *redpandav1alpha1.Cluster,
-	logger logr.Logger,
-) (updated bool) {
-	return updateReplicasIfNeeded(sts, pandaCluster, logger) || updateResourcesIfNeeded(sts, pandaCluster, logger)
-}
-
-func updateResourcesIfNeeded(
-	sts *appsv1.StatefulSet,
-	pandaCluster *redpandav1alpha1.Cluster,
-	logger logr.Logger,
-) (updated bool) {
-	if !reflect.DeepEqual(sts.Spec.Template.Spec.Containers[0].Resources, pandaCluster.Spec.Resources) {
-		logger.Info(fmt.Sprintf("StatefulSet %s resources will be updated to %v", sts.Name, pandaCluster.Spec.Resources))
-		sts.Spec.Template.Spec.Containers[0].Resources = pandaCluster.Spec.Resources
-
-		return true
+func preparePVCResource(
+	name, namespace string,
+	storage redpandav1alpha1.StorageSpec,
+	clusterLabels labels.CommonLabels,
+) corev1.PersistentVolumeClaim {
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels:    clusterLabels,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(defaultDatadirCapacity),
+				},
+			},
+		},
 	}
 
-	return false
-}
-
-func updateReplicasIfNeeded(
-	sts *appsv1.StatefulSet,
-	pandaCluster *redpandav1alpha1.Cluster,
-	logger logr.Logger,
-) (updated bool) {
-	if sts.Spec.Replicas != nil && pandaCluster.Spec.Replicas != nil && *sts.Spec.Replicas != *pandaCluster.Spec.Replicas {
-		logger.Info(fmt.Sprintf("StatefulSet %s has replicas set to %d but need %d. Going to update", sts.Name, *sts.Spec.Replicas, *pandaCluster.Spec.Replicas))
-		sts.Spec.Replicas = pandaCluster.Spec.Replicas
-
-		return true
+	if storage.Capacity.Value() != 0 {
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = storage.Capacity
 	}
 
-	return false
+	if len(storage.StorageClassName) > 0 {
+		pvc.Spec.StorageClassName = &storage.StorageClassName
+	}
+	return pvc
 }
 
-// Obj returns resource managed client.Object
-// nolint:funlen // The complexity of Obj function will be address in the next version TODO
-func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
+// obj returns resource managed client.Object
+// nolint:funlen // The complexity of obj function will be address in the next version TODO
+func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 	var configMapDefaultMode int32 = 0754
 
 	var clusterLabels = labels.ForCluster(r.pandaCluster)
+
+	pvc := preparePVCResource(datadirName, r.pandaCluster.Namespace, r.pandaCluster.Spec.Storage, clusterLabels)
 
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -223,12 +225,12 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 					SecurityContext: &corev1.PodSecurityContext{
 						FSGroup: pointer.Int64Ptr(fsGroup),
 					},
-					Volumes: []corev1.Volume{
+					Volumes: append([]corev1.Volume{
 						{
-							Name: "datadir",
+							Name: datadirName,
 							VolumeSource: corev1.VolumeSource{
 								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "datadir",
+									ClaimName: datadirName,
 								},
 							},
 						},
@@ -249,11 +251,11 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
-					},
+					}, r.secretVolumes()...),
 					InitContainers: []corev1.Container{
 						{
 							Name:            configuratorContainerName,
-							Image:           configuratorContainerImage,
+							Image:           configuratorContainerImage + ":" + r.configuratorTag,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{
@@ -372,16 +374,16 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 								Limits:   r.pandaCluster.Spec.Resources.Limits,
 								Requests: r.pandaCluster.Spec.Resources.Requests,
 							},
-							VolumeMounts: []corev1.VolumeMount{
+							VolumeMounts: append([]corev1.VolumeMount{
 								{
-									Name:      "datadir",
+									Name:      datadirName,
 									MountPath: dataDirectory,
 								},
 								{
 									Name:      "config-dir",
 									MountPath: configDestinationDir,
 								},
-							},
+							}, r.secretVolumeMounts()...),
 						},
 					},
 					Affinity: &corev1.Affinity{
@@ -415,38 +417,9 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: r.pandaCluster.Namespace,
-						Name:      "datadir",
-						Labels:    clusterLabels,
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								"storage": resource.MustParse("100Gi"),
-							},
-						},
-					},
-				},
+				pvc,
 			},
 		},
-	}
-
-	if r.pandaCluster.Spec.Configuration.TLS.KafkaAPIEnabled {
-		ss.Spec.Template.Spec.Containers[0].VolumeMounts = append(ss.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-			Name:      "tlscert",
-			MountPath: tlsDir,
-		})
-		ss.Spec.Template.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, corev1.Volume{
-			Name: "tlscert",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: r.redpandaCertSecretKey.Name,
-				},
-			},
-		})
 	}
 
 	err := controllerutil.SetControllerReference(r.pandaCluster, ss, r.scheme)
@@ -455,6 +428,68 @@ func (r *StatefulSetResource) Obj() (k8sclient.Object, error) {
 	}
 
 	return ss, nil
+}
+
+func (r *StatefulSetResource) secretVolumeMounts() []corev1.VolumeMount {
+	var mounts []corev1.VolumeMount
+	if r.pandaCluster.Spec.Configuration.TLS.KafkaAPIEnabled {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "tlscert",
+			MountPath: tlsDir,
+		})
+	}
+	if r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "tlsca",
+			MountPath: tlsDirCA,
+		})
+	}
+	return mounts
+}
+
+func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
+	var vols []corev1.Volume
+
+	// When TLS is enabled, Redpanda needs a keypair certificate.
+	if r.pandaCluster.Spec.Configuration.TLS.KafkaAPIEnabled {
+		vols = append(vols, corev1.Volume{
+			Name: "tlscert",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.redpandaCertSecretKey.Name,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  corev1.TLSPrivateKeyKey,
+							Path: corev1.TLSPrivateKeyKey,
+						},
+						{
+							Key:  corev1.TLSCertKey,
+							Path: corev1.TLSCertKey,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	// When TLS client authentication is enabled, Redpanda needs the client's CA certificate.
+	if r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth {
+		vols = append(vols, corev1.Volume{
+			Name: "tlsca",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.internalClientCertSecretKey.Name,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  cmetav1.TLSCAKey,
+							Path: cmetav1.TLSCAKey,
+						},
+					},
+				},
+			},
+		})
+	}
+	return vols
 }
 
 func (r *StatefulSetResource) getNodePort() string {
@@ -475,11 +510,6 @@ func (r *StatefulSetResource) getServiceAccountName() string {
 // For reference please visit types.NamespacedName docs in k8s.io/apimachinery
 func (r *StatefulSetResource) Key() types.NamespacedName {
 	return types.NamespacedName{Name: r.pandaCluster.Name, Namespace: r.pandaCluster.Namespace}
-}
-
-// Kind returns v1.StatefulSet kind
-func (r *StatefulSetResource) Kind() string {
-	return statefulSetKind()
 }
 
 func (r *StatefulSetResource) portsConfiguration() string {

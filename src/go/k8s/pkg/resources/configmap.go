@@ -31,7 +31,8 @@ const (
 	baseSuffix    = "-base"
 	dataDirectory = "/var/lib/redpanda/data"
 
-	tlsDir = "/etc/tls/certs"
+	tlsDir   = "/etc/tls/certs"
+	tlsDirCA = "/etc/tls/certs/ca"
 )
 
 var _ Resource = &ConfigMapResource{}
@@ -66,11 +67,16 @@ func NewConfigMap(
 
 // Ensure will manage kubernetes v1.ConfigMap for redpanda.vectorized.io CR
 func (r *ConfigMapResource) Ensure(ctx context.Context) error {
-	return GetOrCreate(ctx, r, &corev1.ConfigMap{}, "ConfigMap", r.logger)
+	obj, err := r.obj()
+	if err != nil {
+		return fmt.Errorf("unable to construct object: %w", err)
+	}
+	_, err = CreateIfNotExists(ctx, r, obj, r.logger)
+	return err
 }
 
-// Obj returns resource managed client.Object
-func (r *ConfigMapResource) Obj() (k8sclient.Object, error) {
+// obj returns resource managed client.Object
+func (r *ConfigMapResource) obj() (k8sclient.Object, error) {
 	cfgBytes, err := yaml.Marshal(r.createConfiguration())
 	if err != nil {
 		return nil, err
@@ -124,9 +130,11 @@ func (r *ConfigMapResource) createConfiguration() *config.Config {
 		cr.KafkaApiTLS = config.ServerTLS{
 			KeyFile:           fmt.Sprintf("%s/%s", tlsDir, corev1.TLSPrivateKeyKey), // tls.key
 			CertFile:          fmt.Sprintf("%s/%s", tlsDir, corev1.TLSCertKey),       // tls.crt
-			TruststoreFile:    fmt.Sprintf("%s/%s", tlsDir, cmetav1.TLSCAKey),
 			Enabled:           true,
 			RequireClientAuth: r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth,
+		}
+		if r.pandaCluster.Spec.Configuration.TLS.RequireClientAuth {
+			cr.KafkaApiTLS.TruststoreFile = fmt.Sprintf("%s/%s", tlsDirCA, cmetav1.TLSCAKey)
 		}
 	}
 
@@ -161,11 +169,6 @@ func (r *ConfigMapResource) Key() types.NamespacedName {
 // ConfigMapKey provides config map name that derived from redpanda.vectorized.io CR
 func ConfigMapKey(pandaCluster *redpandav1alpha1.Cluster) types.NamespacedName {
 	return types.NamespacedName{Name: pandaCluster.Name + baseSuffix, Namespace: pandaCluster.Namespace}
-}
-
-// Kind returns v1.ConfigMap kind
-func (r *ConfigMapResource) Kind() string {
-	return configMapKind()
 }
 
 func configMapKind() string {

@@ -16,13 +16,17 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
+	"github.com/vectorizedio/redpanda/src/go/k8s/controllers/redpanda"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/pointer"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 var _ = Describe("RedPandaCluster controller", func() {
@@ -244,16 +248,62 @@ var _ = Describe("RedPandaCluster controller", func() {
 
 			var defaultMode int32 = 420
 			Expect(sts.Spec.Template.Spec.Containers[0].VolumeMounts).Should(
-				ContainElement(corev1.VolumeMount{Name: "tlscert", MountPath: "/etc/tls/certs"}))
+				ContainElements(
+					corev1.VolumeMount{Name: "tlscert", MountPath: "/etc/tls/certs"},
+					corev1.VolumeMount{Name: "tlsca", MountPath: "/etc/tls/certs/ca"},
+				))
 			Expect(sts.Spec.Template.Spec.Volumes).Should(
-				ContainElement(
+				ContainElements(
 					corev1.Volume{
 						Name: "tlscert",
-						VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-							SecretName:  "redpanda-test-tls-redpanda",
-							DefaultMode: &defaultMode,
-						}},
-					}))
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{
+								SecretName: "redpanda-test-tls-redpanda",
+								Items: []corev1.KeyToPath{
+									{
+										Key:  "tls.key",
+										Path: "tls.key",
+									},
+									{
+										Key:  "tls.crt",
+										Path: "tls.crt",
+									},
+								},
+								DefaultMode: &defaultMode,
+							}}},
+					corev1.Volume{
+						Name: "tlsca",
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{
+								SecretName: "redpanda-test-tls-operator-client",
+								Items: []corev1.KeyToPath{
+									{
+										Key:  "ca.crt",
+										Path: "ca.crt",
+									},
+								},
+								DefaultMode: &defaultMode,
+							}}}))
+		})
+	})
+
+	Context("Calling reconcile", func() {
+		It("Should not throw error on non-existing CRB and cluster", func() {
+			// this test is started with fake client that was not initialized,
+			// so neither redpanda Cluster object or CRB or any other object
+			// exists. This verifies that these situations are handled
+			// gracefully and without error
+			r := &redpanda.ClusterReconciler{
+				Client: fake.NewClientBuilder().Build(),
+				Log:    ctrl.Log,
+				Scheme: scheme.Scheme,
+			}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+				Namespace: "default",
+				Name:      "nonexisting",
+			}})
+			Expect(err).To(Succeed())
+
 		})
 	})
 })

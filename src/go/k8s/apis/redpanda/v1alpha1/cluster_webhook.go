@@ -10,8 +10,6 @@
 package v1alpha1
 
 import (
-	"reflect"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +60,8 @@ func (r *Cluster) ValidateCreate() error {
 
 	allErrs = append(allErrs, r.validateMemory()...)
 
+	allErrs = append(allErrs, r.validateTLS()...)
+
 	if len(allErrs) == 0 {
 		return nil
 	}
@@ -83,16 +83,12 @@ func (r *Cluster) ValidateUpdate(old runtime.Object) error {
 				r.Spec.Replicas,
 				"scaling down is not supported"))
 	}
-	if !reflect.DeepEqual(r.Spec.Configuration, oldCluster.Spec.Configuration) {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec").Child("configuration"),
-				r.Spec.Configuration,
-				"updating configuration is not supported"))
-	}
 
 	allErrs = append(allErrs, r.checkCollidingPorts()...)
 
 	allErrs = append(allErrs, r.validateMemory()...)
+
+	allErrs = append(allErrs, r.validateTLS()...)
 
 	if len(allErrs) == 0 {
 		return nil
@@ -118,6 +114,18 @@ func (r *Cluster) validateMemory() field.ErrorList {
 				field.NewPath("spec").Child("resources").Child("limits").Child("memory"),
 				r.Spec.Resources.Limits.Memory(),
 				"need minimum of 1GB + 1MB of memory per node"))
+	}
+	return allErrs
+}
+
+func (r *Cluster) validateTLS() field.ErrorList {
+	var allErrs field.ErrorList
+	if r.Spec.Configuration.TLS.RequireClientAuth && !r.Spec.Configuration.TLS.KafkaAPIEnabled {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("tls").Child("requireclientauth"),
+				r.Spec.Configuration.TLS.RequireClientAuth,
+				"KafkaAPIEnabled has to be set to true for RequireClientAuth to be allowed to be true"))
 	}
 	return allErrs
 }
