@@ -29,6 +29,9 @@ namespace cluster {
 
 static constexpr model::record_batch_type controller_record_batch_type{3};
 static constexpr model::record_batch_type id_allocator_stm_batch_type{8};
+static constexpr model::record_batch_type tx_prepare_batch_type{9};
+static constexpr model::record_batch_type tx_fence_batch_type{10};
+static constexpr model::record_batch_type tm_update_batch_type{11};
 using consensus_ptr = ss::lw_shared_ptr<raft::consensus>;
 using broker_ptr = ss::lw_shared_ptr<model::broker>;
 
@@ -40,6 +43,56 @@ struct allocate_id_reply {
     int64_t id;
     errc ec;
 };
+
+enum class tx_errc {
+    none = 0,
+    leader_not_found,
+    shard_not_found,
+    partition_not_found,
+    stm_not_found,
+    partition_not_exists,
+    timeout,
+    conflict,
+    fenced,
+    stale,
+};
+struct tx_errc_category final : public std::error_category {
+    const char* name() const noexcept final { return "cluster::tx_errc"; }
+
+    std::string message(int c) const final {
+        switch (static_cast<tx_errc>(c)) {
+        case tx_errc::stale:
+            return "Stale";
+        case tx_errc::fenced:
+            return "Fenced";
+        case tx_errc::conflict:
+            return "Conflict";
+        case tx_errc::none:
+            return "None";
+        case tx_errc::leader_not_found:
+            return "Leader not found";
+        case tx_errc::shard_not_found:
+            return "Shard not found";
+        case tx_errc::partition_not_found:
+            return "Partition not found";
+        case tx_errc::stm_not_found:
+            return "Stm not found";
+        case tx_errc::partition_not_exists:
+            return "Partition not exists";
+        case tx_errc::timeout:
+            return "Timeout";
+        default:
+            return "cluster::tx_errc::unknown";
+        }
+    }
+};
+inline const std::error_category& tx_error_category() noexcept {
+    static tx_errc_category e;
+    return e;
+}
+inline std::error_code make_error_code(tx_errc e) noexcept {
+    return std::error_code(static_cast<int>(e), tx_error_category());
+}
 
 /// Join request sent by node to join raft-0
 struct join_request {
@@ -80,6 +133,63 @@ struct partition_assignment {
     friend std::ostream& operator<<(std::ostream&, const partition_assignment&);
 };
 
+/**
+ * Structure holding topic properties overrides, empty values will be replaced
+ * with defaults
+ */
+struct topic_properties {
+    std::optional<model::compression> compression;
+    std::optional<model::cleanup_policy_bitflags> cleanup_policy_bitflags;
+    std::optional<model::compaction_strategy> compaction_strategy;
+    std::optional<model::timestamp_type> timestamp_type;
+    std::optional<size_t> segment_size;
+    tristate<size_t> retention_bytes;
+    tristate<std::chrono::milliseconds> retention_duration;
+
+    bool is_compacted() const;
+    bool has_overrides() const;
+
+    storage::ntp_config::default_overrides get_ntp_cfg_overrides() const;
+
+    friend std::ostream& operator<<(std::ostream&, const topic_properties&);
+};
+
+enum incremental_update_operation : int8_t { none, set, remove };
+template<typename T>
+struct property_update {
+    T value;
+    incremental_update_operation op = incremental_update_operation::none;
+};
+
+template<typename T>
+struct property_update<tristate<T>> {
+    tristate<T> value = tristate<T>(std::nullopt);
+    incremental_update_operation op = incremental_update_operation::none;
+};
+
+struct incremental_topic_updates {
+    property_update<std::optional<model::compression>> compression;
+    property_update<std::optional<model::cleanup_policy_bitflags>>
+      cleanup_policy_bitflags;
+    property_update<std::optional<model::compaction_strategy>>
+      compaction_strategy;
+    property_update<std::optional<model::timestamp_type>> timestamp_type;
+    property_update<std::optional<size_t>> segment_size;
+    property_update<tristate<size_t>> retention_bytes;
+    property_update<tristate<std::chrono::milliseconds>> retention_duration;
+};
+
+/**
+ * Struct representing single topic properties update
+ */
+struct topic_properties_update {
+    explicit topic_properties_update(model::topic_namespace tp_ns)
+      : tp_ns(std::move(tp_ns)) {}
+
+    model::topic_namespace tp_ns;
+    incremental_topic_updates properties;
+};
+
 // Structure holding topic configuration, optionals will be replaced by broker
 // defaults
 struct topic_configuration {
@@ -102,20 +212,7 @@ struct topic_configuration {
     // using signed integer because Kafka protocol defines it as signed int
     int16_t replication_factor;
 
-    std::optional<model::compression> compression;
-    std::optional<model::cleanup_policy_bitflags> cleanup_policy_bitflags;
-    std::optional<model::compaction_strategy> compaction_strategy;
-    std::optional<model::timestamp_type> timestamp_type;
-    std::optional<size_t> segment_size;
-
-    // Tristate fields
-    // Mapped according to the following policy:
-    //
-    // Kafka topic configuration value: -1 -> tristate disabled
-    // Kafka topic configuration value: preset -> tristate with value
-    // Kafka topic configuration value: not set -> tristate with std::nullopt
-    tristate<size_t> retention_bytes;
-    tristate<std::chrono::milliseconds> retention_duration;
+    topic_properties properties;
 
     friend std::ostream& operator<<(std::ostream&, const topic_configuration&);
 };
@@ -159,6 +256,14 @@ struct finish_partition_update_request {
 
 struct finish_partition_update_reply {
     cluster::errc result;
+};
+
+struct update_topic_properties_request {
+    std::vector<topic_properties_update> updates;
+};
+
+struct update_topic_properties_reply {
+    std::vector<topic_result> results;
 };
 
 template<typename T>
@@ -208,6 +313,10 @@ private:
 };
 
 } // namespace cluster
+namespace std {
+template<>
+struct is_error_code_enum<cluster::tx_errc> : true_type {};
+} // namespace std
 
 namespace reflection {
 
@@ -268,6 +377,12 @@ template<>
 struct adl<cluster::configuration_invariants> {
     void to(iobuf&, cluster::configuration_invariants&&);
     cluster::configuration_invariants from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::topic_properties_update> {
+    void to(iobuf&, cluster::topic_properties_update&&);
+    cluster::topic_properties_update from(iobuf_parser&);
 };
 
 } // namespace reflection

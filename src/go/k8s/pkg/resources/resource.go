@@ -65,21 +65,26 @@ func Update(
 	c client.Client,
 	logger logr.Logger,
 ) error {
-	patchResult, err := patch.DefaultPatchMaker.Calculate(current, modified)
+	metaAccessor := meta.NewAccessor()
+	currentVersion, err := metaAccessor.ResourceVersion(current)
+	if err != nil {
+		return err
+	}
+	err = metaAccessor.SetResourceVersion(modified, currentVersion)
+	if err != nil {
+		return err
+	}
+
+	opts := []patch.CalculateOption{
+		patch.IgnoreStatusFields(),
+		patch.IgnoreVolumeClaimTemplateTypeMetaAndStatus(),
+	}
+	patchResult, err := patch.DefaultPatchMaker.Calculate(current, modified, opts...)
 	if err != nil {
 		return err
 	}
 	if !patchResult.IsEmpty() {
 		// need to set current version first otherwise the request would get rejected
-		metaAccessor := meta.NewAccessor()
-		currentVersion, err := metaAccessor.ResourceVersion(current)
-		if err != nil {
-			return err
-		}
-		err = metaAccessor.SetResourceVersion(modified, currentVersion)
-		if err != nil {
-			return err
-		}
 		logger.Info(fmt.Sprintf("StatefulSet changed, updating %s. Diff: %v", modified.GetName(), string(patchResult.Patch)))
 		if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(modified); err != nil {
 			return err

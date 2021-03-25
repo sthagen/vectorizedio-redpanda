@@ -123,11 +123,15 @@ operator<<(std::ostream& o, const model::topic_namespace_view& tp_ns) {
 }
 
 std::ostream& operator<<(std::ostream& os, timestamp_type ts) {
+    /**
+     * We need to use specific string representations of timestamp_type as this
+     * is related with protocol correctness
+     */
     switch (ts) {
     case timestamp_type::append_time:
-        return os << "{append_time}";
+        return os << "LogAppendTime";
     case timestamp_type::create_time:
-        return os << "{create_time}";
+        return os << "CreateTime";
     }
     return os << "{unknown timestamp:" << static_cast<int>(ts) << "}";
 }
@@ -154,6 +158,11 @@ std::ostream& operator<<(std::ostream& o, const record& r) {
         o << h;
     }
     return o << "]}";
+}
+
+std::ostream& operator<<(std::ostream& o, const producer_identity& pid) {
+    fmt::print(o, "{{producer_identity: id={}, epoch={}}}", pid.id, pid.epoch);
+    return o;
 }
 
 std::ostream&

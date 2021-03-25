@@ -106,7 +106,7 @@ func NewStatefulSet(
 func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 	var sts appsv1.StatefulSet
 
-	if r.pandaCluster.Spec.ExternalConnectivity {
+	if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
 		err := r.Get(ctx, r.nodePortName, &r.nodePortSvc)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve node port service %s: %w", r.nodePortName, err)
@@ -165,6 +165,8 @@ func preparePVCResource(
 	storage redpandav1alpha1.StorageSpec,
 	clusterLabels labels.CommonLabels,
 ) corev1.PersistentVolumeClaim {
+	fileSystemMode := corev1.PersistentVolumeFilesystem
+
 	pvc := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
@@ -178,6 +180,7 @@ func preparePVCResource(
 					corev1.ResourceStorage: resource.MustParse(defaultDatadirCapacity),
 				},
 			},
+			VolumeMode: &fileSystemMode,
 		},
 	}
 
@@ -199,6 +202,8 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 	var clusterLabels = labels.ForCluster(r.pandaCluster)
 
 	pvc := preparePVCResource(datadirName, r.pandaCluster.Namespace, r.pandaCluster.Spec.Storage, clusterLabels)
+	tolerations := r.pandaCluster.Spec.Tolerations
+	nodeSelector := r.pandaCluster.Spec.NodeSelector
 
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -289,7 +294,11 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								},
 								{
 									Name:  "EXTERNAL_CONNECTIVITY",
-									Value: strconv.FormatBool(r.pandaCluster.Spec.ExternalConnectivity),
+									Value: strconv.FormatBool(r.pandaCluster.Spec.ExternalConnectivity.Enabled),
+								},
+								{
+									Name:  "EXTERNAL_CONNECTIVITY_SUBDOMAIN",
+									Value: r.pandaCluster.Spec.ExternalConnectivity.Subdomain,
 								},
 								{
 									Name:  "HOST_PORT",
@@ -386,6 +395,8 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 							}, r.secretVolumeMounts()...),
 						},
 					},
+					Tolerations:  tolerations,
+					NodeSelector: nodeSelector,
 					Affinity: &corev1.Affinity{
 						PodAntiAffinity: &corev1.PodAntiAffinity{
 							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -493,14 +504,14 @@ func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 }
 
 func (r *StatefulSetResource) getNodePort() string {
-	if r.pandaCluster.Spec.ExternalConnectivity {
+	if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
 		return strconv.FormatInt(int64(r.nodePortSvc.Spec.Ports[0].NodePort), 10)
 	}
 	return ""
 }
 
 func (r *StatefulSetResource) getServiceAccountName() string {
-	if r.pandaCluster.Spec.ExternalConnectivity {
+	if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
 		return r.serviceAccountName
 	}
 	return ""
@@ -522,7 +533,7 @@ func (r *StatefulSetResource) portsConfiguration() string {
 }
 
 func (r *StatefulSetResource) getPorts() []corev1.ContainerPort {
-	if r.pandaCluster.Spec.ExternalConnectivity &&
+	if r.pandaCluster.Spec.ExternalConnectivity.Enabled &&
 		len(r.nodePortSvc.Spec.Ports) > 0 {
 		return []corev1.ContainerPort{
 			{

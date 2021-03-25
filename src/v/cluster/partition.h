@@ -13,7 +13,7 @@
 
 #include "cluster/id_allocator_stm.h"
 #include "cluster/partition_probe.h"
-#include "cluster/seq_stm.h"
+#include "cluster/rm_stm.h"
 #include "cluster/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -99,6 +99,10 @@ public:
         return raft::details::next_offset(_raft->last_visible_index());
     }
 
+    model::offset dirty_offset() const {
+        return _raft->log().offsets().dirty_offset;
+    }
+
     const model::ntp& ntp() const { return _raft->ntp(); }
 
     ss::future<std::optional<storage::timequery_result>>
@@ -135,6 +139,11 @@ public:
         return _id_allocator_stm;
     }
 
+    ss::shared_ptr<cluster::rm_stm>& rm_stm() { return _rm_stm; }
+
+    size_t size_bytes() const { return _raft->log().size_bytes(); }
+    ss::future<> update_configuration(topic_properties);
+
 private:
     friend partition_manager;
 
@@ -144,7 +153,7 @@ private:
     consensus_ptr _raft;
     ss::lw_shared_ptr<raft::log_eviction_stm> _nop_stm;
     ss::lw_shared_ptr<cluster::id_allocator_stm> _id_allocator_stm;
-    ss::shared_ptr<seq_stm> _seq_stm;
+    ss::shared_ptr<cluster::rm_stm> _rm_stm;
     ss::abort_source _as;
     partition_probe _probe;
 

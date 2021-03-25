@@ -51,7 +51,8 @@ using request_types = make_request_types<
   incremental_alter_configs_handler,
   init_producer_id_handler,
   delete_groups_handler,
-  describe_acls_handler>;
+  describe_acls_handler,
+  describe_log_dirs_handler>;
 
 template<typename RequestType>
 static auto make_api() {
@@ -104,7 +105,7 @@ api_versions_response api_versions_handler::handle_raw(request_context& ctx) {
 }
 
 ss::future<response_ptr>
-api_versions_handler::handle(request_context&& ctx, ss::smp_service_group) {
+api_versions_handler::handle(request_context ctx, ss::smp_service_group) {
     auto response = handle_raw(ctx);
     return ctx.respond(std::move(response));
 }

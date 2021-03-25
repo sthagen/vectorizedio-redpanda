@@ -13,6 +13,7 @@
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
+#include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/request_context.h"
 #include "kafka/server/response.h"
 #include "model/fundamental.h"
@@ -35,11 +36,11 @@ namespace kafka {
 template<typename T>
 static void add_config(
   describe_configs_result& result,
-  const char* name,
+  std::string_view name,
   T value,
   describe_configs_source source) {
     result.configs.push_back(describe_configs_resource_result{
-      .name = name,
+      .name = ss::sstring(name),
       .value = fmt::format("{}", value),
       .config_source = source,
     });
@@ -119,9 +120,33 @@ static void report_broker_config(describe_configs_result& result) {
       describe_configs_source::static_broker_config);
 }
 
+int64_t describe_retention_duration(
+  tristate<std::chrono::milliseconds>& overrides,
+  std::optional<std::chrono::milliseconds> def) {
+    if (overrides.is_disabled()) {
+        return -1;
+    }
+    if (overrides.has_value()) {
+        return overrides.value().count();
+    }
+
+    return def ? def->count() : -1;
+}
+int64_t describe_retention_bytes(
+  tristate<size_t>& overrides, std::optional<size_t> def) {
+    if (overrides.is_disabled()) {
+        return -1;
+    }
+    if (overrides.has_value()) {
+        return overrides.value();
+    }
+
+    return def.value_or(-1);
+}
+
 template<>
 ss::future<response_ptr> describe_configs_handler::handle(
-  request_context&& ctx, [[maybe_unused]] ss::smp_service_group ssg) {
+  request_context ctx, [[maybe_unused]] ss::smp_service_group ssg) {
     describe_configs_request request;
     request.decode(ctx.reader(), ctx.header().version);
     klog.trace("Handling request {}", request);
@@ -169,8 +194,50 @@ ss::future<response_ptr> describe_configs_handler::handle(
 
             add_config(
               result,
-              "cleanup.policy",
-              describe_topic_cleanup_policy(topic_config),
+              topic_property_cleanup_policy,
+              describe_topic_cleanup_policy(
+                topic_config,
+                ctx.metadata_cache().get_default_cleanup_policy_bitflags()),
+              describe_configs_source::topic);
+
+            add_config(
+              result,
+              topic_property_compression,
+              topic_config->properties.compression.value_or(
+                ctx.metadata_cache().get_default_compression()),
+              describe_configs_source::topic);
+
+            add_config(
+              result,
+              topic_property_segment_size,
+              topic_config->properties.segment_size.value_or(
+                topic_config->properties.is_compacted()
+                  ? ctx.metadata_cache()
+                      .get_default_compacted_topic_segment_size()
+                  : ctx.metadata_cache().get_default_segment_size()),
+              describe_configs_source::topic);
+
+            add_config(
+              result,
+              topic_property_retention_duration,
+              describe_retention_duration(
+                topic_config->properties.retention_duration,
+                ctx.metadata_cache().get_default_retention_duration()),
+              describe_configs_source::topic);
+
+            add_config(
+              result,
+              topic_property_retention_bytes,
+              describe_retention_bytes(
+                topic_config->properties.retention_bytes,
+                ctx.metadata_cache().get_default_retention_bytes()),
+              describe_configs_source::topic);
+
+            add_config(
+              result,
+              topic_property_timestamp_type,
+              topic_config->properties.timestamp_type.value_or(
+                ctx.metadata_cache().get_default_timestamp_type()),
               describe_configs_source::topic);
 
             break;

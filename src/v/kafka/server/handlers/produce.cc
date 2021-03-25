@@ -35,6 +35,7 @@
 #include <boost/container_hash/extensions.hpp>
 #include <fmt/ostream.h>
 
+#include <chrono>
 #include <string_view>
 
 namespace kafka {
@@ -330,10 +331,8 @@ static ss::future<produce_response::partition> produce_topic_partition(
       model::topic_namespace_view(model::kafka_namespace, topic.name));
 
     if (timestamp_type == model::timestamp_type::append_time) {
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-          ss::lowres_clock::now().time_since_epoch());
         batch.set_max_timestamp(
-          model::timestamp_type::append_time, model::timestamp(now.count()));
+          model::timestamp_type::append_time, model::timestamp::now());
     }
 
     const auto& hdr = batch.header();
@@ -444,7 +443,7 @@ produce_topics(produce_ctx& octx) {
 
 template<>
 ss::future<response_ptr>
-produce_handler::handle(request_context&& ctx, ss::smp_service_group ssg) {
+produce_handler::handle(request_context ctx, ss::smp_service_group ssg) {
     produce_request request(ctx);
 
     /*

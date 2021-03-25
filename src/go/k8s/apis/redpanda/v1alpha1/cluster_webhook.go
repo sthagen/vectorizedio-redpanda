@@ -127,6 +127,13 @@ func (r *Cluster) validateTLS() field.ErrorList {
 				r.Spec.Configuration.TLS.RequireClientAuth,
 				"KafkaAPIEnabled has to be set to true for RequireClientAuth to be allowed to be true"))
 	}
+	if r.Spec.Configuration.TLS.IssuerRef != nil && r.Spec.Configuration.TLS.NodeSecretRef != nil {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("tls").Child("nodeSecretRef"),
+				r.Spec.Configuration.TLS.NodeSecretRef,
+				"Cannot provide both IssuerRef and NodeSecretRef"))
+	}
 	return allErrs
 }
 
@@ -162,14 +169,14 @@ func (r *Cluster) checkCollidingPorts() field.ErrorList {
 				"admin port collide with Spec.Configuration.RPCServer.Port"))
 	}
 
-	if r.Spec.ExternalConnectivity && r.Spec.Configuration.KafkaAPI.Port+1 == r.Spec.Configuration.RPCServer.Port {
+	if r.Spec.ExternalConnectivity.Enabled && r.Spec.Configuration.KafkaAPI.Port+1 == r.Spec.Configuration.RPCServer.Port {
 		allErrs = append(allErrs,
 			field.Invalid(field.NewPath("spec").Child("configuration", "rpcServer", "port"),
 				r.Spec.Configuration.RPCServer.Port,
 				"rpc port collide with external Kafka API that is not visible in the Cluster CR"))
 	}
 
-	if r.Spec.ExternalConnectivity && r.Spec.Configuration.KafkaAPI.Port+1 == r.Spec.Configuration.AdminAPI.Port {
+	if r.Spec.ExternalConnectivity.Enabled && r.Spec.Configuration.KafkaAPI.Port+1 == r.Spec.Configuration.AdminAPI.Port {
 		allErrs = append(allErrs,
 			field.Invalid(field.NewPath("spec").Child("configuration", "admin", "port"),
 				r.Spec.Configuration.AdminAPI.Port,

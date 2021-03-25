@@ -55,7 +55,7 @@ handle_ntp(request_context& ctx, std::optional<model::ntp> ntp) {
                    + config::shard_local_cfg().wait_for_leader_timeout_ms();
 
     return ctx.metadata_cache()
-      .get_leader(std::move(*ntp), timeout)
+      .get_leader(*ntp, timeout)
       .then(
         [&ctx](model::node_id leader) { return handle_leader(ctx, leader); })
       .handle_exception([&ctx]([[maybe_unused]] std::exception_ptr e) {
@@ -91,7 +91,7 @@ create_topic(request_context& ctx, cluster::topic_configuration topic) {
 
 template<>
 ss::future<response_ptr> find_coordinator_handler::handle(
-  request_context&& ctx, [[maybe_unused]] ss::smp_service_group g) {
+  request_context ctx, [[maybe_unused]] ss::smp_service_group g) {
     find_coordinator_request request;
     request.decode(ctx.reader(), ctx.header().version);
 
@@ -122,7 +122,7 @@ ss::future<response_ptr> find_coordinator_handler::handle(
             config::shard_local_cfg().group_topic_partitions(),
             config::shard_local_cfg().default_topic_replication()};
 
-          topic.cleanup_policy_bitflags
+          topic.properties.cleanup_policy_bitflags
             = model::cleanup_policy_bitflags::compaction;
 
           return create_topic(ctx, std::move(topic))

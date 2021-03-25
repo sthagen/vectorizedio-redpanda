@@ -790,6 +790,139 @@ rpk:
 `,
 		},
 		{
+			name: "shall write config with admin tls configuration",
+			conf: func() *Config {
+				c := getValidConfig()
+				c.Redpanda.AdminApiTLS = ServerTLS{
+					KeyFile:           "/etc/certs/admin/cert.key",
+					TruststoreFile:    "/etc/certs/admin/ca.crt",
+					CertFile:          "/etc/certs/admin/cert.crt",
+					Enabled:           true,
+					RequireClientAuth: true,
+				}
+				return c
+			},
+			wantErr: false,
+			expected: `config_file: /etc/redpanda/redpanda.yaml
+redpanda:
+  admin:
+    address: 0.0.0.0
+    port: 9644
+  admin_api_tls:
+    cert_file: /etc/certs/admin/cert.crt
+    enabled: true
+    key_file: /etc/certs/admin/cert.key
+    require_client_auth: true
+    truststore_file: /etc/certs/admin/ca.crt
+  data_directory: /var/lib/redpanda/data
+  developer_mode: false
+  kafka_api:
+  - address: 0.0.0.0
+    port: 9092
+  node_id: 0
+  rpc_server:
+    address: 0.0.0.0
+    port: 33145
+  seed_servers:
+  - host:
+      address: 127.0.0.1
+      port: 33145
+  - host:
+      address: 127.0.0.1
+      port: 33146
+rpk:
+  coredump_dir: /var/lib/redpanda/coredumps
+  enable_memory_locking: true
+  enable_usage_stats: true
+  overprovisioned: false
+  tune_aio_events: true
+  tune_clocksource: true
+  tune_coredump: true
+  tune_cpu: true
+  tune_disk_irq: true
+  tune_disk_nomerges: true
+  tune_disk_scheduler: true
+  tune_disk_write_cache: true
+  tune_fstrim: true
+  tune_network: true
+  tune_swappiness: true
+  tune_transparent_hugepages: true
+  well_known_io: vendor:vm:storage
+`,
+		},
+		{
+			name: "shall write config with archival configuration",
+			conf: func() *Config {
+				c := getValidConfig()
+				enabled := true
+				access := "access"
+				bucket := "bucket"
+				region := "region"
+				secret := "secret"
+				interval := 20000
+				conns := 4
+				endpoint := "http"
+				c.Redpanda.ArchivalStorageEnabled = &enabled
+				c.Redpanda.ArchivalStorageS3AccessKey = &access
+				c.Redpanda.ArchivalStorageS3Bucket = &bucket
+				c.Redpanda.ArchivalStorageS3Region = &region
+				c.Redpanda.ArchivalStorageS3SecretKey = &secret
+				c.Redpanda.ArchivalStorageReconciliationIntervalMs = &interval
+				c.Redpanda.ArchivalStorageMaxConnections = &conns
+				c.Redpanda.ArchivalStorageApiEndpoint = &endpoint
+				return c
+			},
+			wantErr: false,
+			expected: `config_file: /etc/redpanda/redpanda.yaml
+redpanda:
+  admin:
+    address: 0.0.0.0
+    port: 9644
+  archival_storage_api_endpoint: http
+  archival_storage_enabled: true
+  archival_storage_max_connections: 4
+  archival_storage_reconciliation_interval_ms: 20000
+  archival_storage_s3_access_key: access
+  archival_storage_s3_bucket: bucket
+  archival_storage_s3_region: region
+  archival_storage_s3_secret_key: secret
+  data_directory: /var/lib/redpanda/data
+  developer_mode: false
+  kafka_api:
+  - address: 0.0.0.0
+    port: 9092
+  node_id: 0
+  rpc_server:
+    address: 0.0.0.0
+    port: 33145
+  seed_servers:
+  - host:
+      address: 127.0.0.1
+      port: 33145
+  - host:
+      address: 127.0.0.1
+      port: 33146
+rpk:
+  coredump_dir: /var/lib/redpanda/coredumps
+  enable_memory_locking: true
+  enable_usage_stats: true
+  overprovisioned: false
+  tune_aio_events: true
+  tune_clocksource: true
+  tune_coredump: true
+  tune_cpu: true
+  tune_disk_irq: true
+  tune_disk_nomerges: true
+  tune_disk_scheduler: true
+  tune_disk_write_cache: true
+  tune_fstrim: true
+  tune_network: true
+  tune_swappiness: true
+  tune_transparent_hugepages: true
+  well_known_io: vendor:vm:storage
+`,
+		},
+		{
 			name: "should update an existing config with single kafka_api & advertised_kafka_api obj to a list",
 			existingConf: `config_file: /etc/redpanda/redpanda.yaml
 redpanda:

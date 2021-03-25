@@ -12,6 +12,7 @@ package v1alpha1_test
 import (
 	"testing"
 
+	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,10 @@ func TestValidateUpdate(t *testing.T) {
 					corev1.ResourceMemory: resource.MustParse("1Gi"),
 				},
 			},
-			ExternalConnectivity: false,
+			ExternalConnectivity: v1alpha1.ExternalConnectivityConfig{
+				Enabled:   false,
+				Subdomain: "",
+			},
 		},
 	}
 
@@ -52,6 +56,13 @@ func TestValidateUpdate(t *testing.T) {
 		TLS: v1alpha1.TLSConfig{
 			RequireClientAuth: true,
 			KafkaAPIEnabled:   false,
+			IssuerRef: &cmmeta.ObjectReference{
+				Name: "test",
+			},
+			NodeSecretRef: &corev1.ObjectReference{
+				Name:      "name",
+				Namespace: "default",
+			},
 		},
 	}
 
@@ -66,6 +77,7 @@ func TestValidateUpdate(t *testing.T) {
 		field.NewPath("spec").Child("replicas").String(),
 		field.NewPath("spec").Child("resources").Child("limits").Child("memory").String(),
 		field.NewPath("spec").Child("configuration").Child("tls").Child("requireclientauth").String(),
+		field.NewPath("spec").Child("configuration").Child("tls").Child("nodeSecretRef").String(),
 	}
 	for _, ef := range expectedFields {
 		found := false
@@ -101,7 +113,10 @@ func TestValidateUpdate_NoError(t *testing.T) {
 					corev1.ResourceMemory: resource.MustParse("2Gi"),
 				},
 			},
-			ExternalConnectivity: false,
+			ExternalConnectivity: v1alpha1.ExternalConnectivityConfig{
+				Enabled:   false,
+				Subdomain: "",
+			},
 		},
 	}
 
@@ -138,7 +153,7 @@ func TestValidateUpdate_NoError(t *testing.T) {
 
 	t.Run("collision in the port when external connectivity is enabled", func(t *testing.T) {
 		updatePort := redpandaCluster.DeepCopy()
-		updatePort.Spec.ExternalConnectivity = true
+		updatePort.Spec.ExternalConnectivity.Enabled = true
 		updatePort.Spec.Configuration.KafkaAPI.Port = 200
 		updatePort.Spec.Configuration.AdminAPI.Port = 201
 		updatePort.Spec.Configuration.RPCServer.Port = 300
@@ -149,7 +164,7 @@ func TestValidateUpdate_NoError(t *testing.T) {
 
 	t.Run("collision in the port when external connectivity is enabled", func(t *testing.T) {
 		updatePort := redpandaCluster.DeepCopy()
-		updatePort.Spec.ExternalConnectivity = true
+		updatePort.Spec.ExternalConnectivity.Enabled = true
 		updatePort.Spec.Configuration.KafkaAPI.Port = 200
 		updatePort.Spec.Configuration.AdminAPI.Port = 300
 		updatePort.Spec.Configuration.RPCServer.Port = 201
@@ -185,7 +200,10 @@ func TestCreation(t *testing.T) {
 					corev1.ResourceMemory: resource.MustParse("2G"),
 				},
 			},
-			ExternalConnectivity: false,
+			ExternalConnectivity: v1alpha1.ExternalConnectivityConfig{
+				Enabled:   false,
+				Subdomain: "",
+			},
 		},
 	}
 
@@ -209,7 +227,7 @@ func TestCreation(t *testing.T) {
 
 	t.Run("collision in the port when external connectivity is enabled", func(t *testing.T) {
 		newPort := redpandaCluster.DeepCopy()
-		newPort.Spec.ExternalConnectivity = true
+		newPort.Spec.ExternalConnectivity.Enabled = true
 		newPort.Spec.Configuration.KafkaAPI.Port = 200
 		newPort.Spec.Configuration.AdminAPI.Port = 201
 		newPort.Spec.Configuration.RPCServer.Port = 300
@@ -220,7 +238,7 @@ func TestCreation(t *testing.T) {
 
 	t.Run("collision in the port when external connectivity is enabled", func(t *testing.T) {
 		newPort := redpandaCluster.DeepCopy()
-		newPort.Spec.ExternalConnectivity = true
+		newPort.Spec.ExternalConnectivity.Enabled = true
 		newPort.Spec.Configuration.KafkaAPI.Port = 200
 		newPort.Spec.Configuration.AdminAPI.Port = 300
 		newPort.Spec.Configuration.RPCServer.Port = 201

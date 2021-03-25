@@ -26,6 +26,7 @@
 #include <boost/range/numeric.hpp>
 
 #include <bitset>
+#include <compare>
 #include <cstdint>
 #include <iosfwd>
 #include <limits>
@@ -309,6 +310,8 @@ public:
 
     void set_control_type() { _attributes |= control_mask; }
 
+    void set_transactional_type() { _attributes |= transactional_mask; }
+
     bool operator==(const record_batch_attributes& other) const {
         return _attributes == other._attributes;
     }
@@ -382,6 +385,9 @@ struct record_batch_header {
     int32_t base_sequence{0};
     int32_t record_count{0};
 
+    bool contains(model::offset offset) const {
+        return base_offset <= offset && offset <= last_offset();
+    }
     /// context object with opaque environment data
     context ctx;
 
@@ -410,17 +416,20 @@ struct record_batch_header {
     friend std::ostream& operator<<(std::ostream&, const record_batch_header&);
 };
 
+using tx_seq = named_type<int64_t, struct tm_tx_seq>;
+
 struct producer_identity {
     int64_t id{-1};
     int16_t epoch{0};
 
-    // https://en.cppreference.com/w/cpp/language/default_comparisons
-    bool operator==(const producer_identity&) const = default;
+    auto operator<=>(const producer_identity&) const = default;
 
     template<typename H>
     friend H AbslHashValue(H h, const producer_identity& pid) {
         return H::combine(std::move(h), pid.id, pid.epoch);
     }
+
+    friend std::ostream& operator<<(std::ostream&, const producer_identity&);
 };
 
 struct batch_identity {
@@ -438,12 +447,18 @@ struct batch_identity {
             producer_identity{.id = hdr.producer_id, .epoch = hdr.producer_epoch},
           .first_seq = hdr.base_sequence,
           .last_seq = increment_sequence(
-            hdr.base_sequence, hdr.last_offset_delta)};
+            hdr.base_sequence, hdr.last_offset_delta),
+          .record_count = hdr.record_count,
+          .max_timestamp = hdr.max_timestamp,
+          .is_transactional = hdr.attrs.is_transactional()};
     }
 
     producer_identity pid;
     int32_t first_seq{0};
     int32_t last_seq{0};
+    int32_t record_count;
+    timestamp max_timestamp;
+    bool is_transactional{false};
 
     bool has_idempotent() { return pid.id >= 0; }
 };
@@ -548,8 +563,7 @@ public:
     record_batch_header& header() { return _header; }
 
     bool contains(model::offset offset) const {
-        return _header.base_offset() <= offset
-               && offset <= _header.last_offset();
+        return _header.contains(offset);
     }
 
     bool operator==(const record_batch& other) const {

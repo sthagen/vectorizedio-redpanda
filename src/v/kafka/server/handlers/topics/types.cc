@@ -16,7 +16,6 @@
 #include "model/timestamp.h"
 #include "units.h"
 
-#include <absl/container/flat_hash_map.h>
 #include <bits/stdint-intn.h>
 #include <bits/stdint-uintn.h>
 
@@ -30,9 +29,8 @@
 
 namespace kafka {
 
-absl::flat_hash_map<ss::sstring, ss::sstring>
-config_map(const std::vector<createable_topic_config>& config) {
-    absl::flat_hash_map<ss::sstring, ss::sstring> ret;
+config_map_t config_map(const std::vector<createable_topic_config>& config) {
+    config_map_t ret;
     ret.reserve(config.size());
     for (const auto& c : config) {
         if (c.value) {
@@ -44,9 +42,8 @@ config_map(const std::vector<createable_topic_config>& config) {
 
 // Either parse configuration or return nullopt
 template<typename T>
-static std::optional<T> get_config_value(
-  const absl::flat_hash_map<ss::sstring, ss::sstring>& config,
-  const ss::sstring& key) {
+static std::optional<T>
+get_config_value(const config_map_t& config, std::string_view key) {
     if (auto it = config.find(key); it != config.end()) {
         return boost::lexical_cast<T>(it->second);
     }
@@ -61,12 +58,15 @@ static std::optional<T> get_config_value(
 // value present           =>  tristate.has_value() == true;
 
 template<typename T>
-static tristate<T> get_tristate_value(
-  const absl::flat_hash_map<ss::sstring, ss::sstring>& config,
-  const ss::sstring& key) {
+static tristate<T>
+get_tristate_value(const config_map_t& config, std::string_view key) {
     auto v = get_config_value<int64_t>(config, key);
-    // diabled case
-    if (v && *v <= 0) {
+    // no value set
+    if (!v) {
+        return tristate<T>(std::nullopt);
+    }
+    // disabled case
+    if (v <= 0) {
         return tristate<T>{};
     }
     return tristate<T>(std::make_optional<T>(*v));
@@ -78,21 +78,23 @@ cluster::topic_configuration to_cluster_type(const creatable_topic& t) {
 
     auto config_entries = config_map(t.configs);
     // Parse topic configuration
-    cfg.compression = get_config_value<model::compression>(
-      config_entries, "compression.type");
-    cfg.cleanup_policy_bitflags
+    cfg.properties.compression = get_config_value<model::compression>(
+      config_entries, topic_property_compression);
+    cfg.properties.cleanup_policy_bitflags
       = get_config_value<model::cleanup_policy_bitflags>(
-        config_entries, "cleanup.policy");
-    cfg.timestamp_type = get_config_value<model::timestamp_type>(
-      config_entries, "message.timestamp.type");
-    cfg.segment_size = get_config_value<size_t>(
-      config_entries, "segment.bytes");
-    cfg.compaction_strategy = get_config_value<model::compaction_strategy>(
-      config_entries, "compaction.strategy");
-    cfg.retention_bytes = get_tristate_value<size_t>(
-      config_entries, "retention.bytes");
-    cfg.retention_duration = get_tristate_value<std::chrono::milliseconds>(
-      config_entries, "retention.ms");
+        config_entries, topic_property_cleanup_policy);
+    cfg.properties.timestamp_type = get_config_value<model::timestamp_type>(
+      config_entries, topic_property_timestamp_type);
+    cfg.properties.segment_size = get_config_value<size_t>(
+      config_entries, topic_property_segment_size);
+    cfg.properties.compaction_strategy
+      = get_config_value<model::compaction_strategy>(
+        config_entries, topic_property_compaction_strategy);
+    cfg.properties.retention_bytes = get_tristate_value<size_t>(
+      config_entries, topic_property_retention_bytes);
+    cfg.properties.retention_duration
+      = get_tristate_value<std::chrono::milliseconds>(
+        config_entries, topic_property_retention_duration);
 
     return cfg;
 }
