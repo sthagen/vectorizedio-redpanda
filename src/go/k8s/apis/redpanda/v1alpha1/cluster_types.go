@@ -48,6 +48,38 @@ type ClusterSpec struct {
 	ExternalConnectivity ExternalConnectivityConfig `json:"externalConnectivity,omitempty"`
 	// Storage spec for cluster
 	Storage StorageSpec `json:"storage,omitempty"`
+	// Cloud storage configuration for cluster
+	CloudStorage CloudStorageConfig `json:"cloudStorage,omitempty"`
+}
+
+// CloudStorageConfig configures the Data Archiving feature in Redpanda
+// https://vectorized.io/docs/data-archiving
+type CloudStorageConfig struct {
+	// Enables data archiving feature
+	Enabled bool `json:"enabled"`
+	// Cloud storage access key
+	AccessKey string `json:"accessKey,omitempty"`
+	// Reference to (Kubernetes) Secret containing the cloud storage secret key.
+	// SecretKeyRef must contain the name and namespace of the Secret.
+	// The Secret must contain a data entry of the form:
+	// data[<SecretKeyRef.Name>] = <secret key>
+	SecretKeyRef corev1.ObjectReference `json:"secretKeyRef,omitempty"`
+	// Cloud storage region
+	Region string `json:"region,omitempty"`
+	// Cloud storage bucket
+	Bucket string `json:"bucket,omitempty"`
+	// Reconciliation period (default - 10s)
+	ReconcilicationIntervalMs int `json:"reconciliationIntervalMs,omitempty"`
+	// Number of simultaneous uploads per shard (default - 20)
+	MaxConnections int `json:"maxConnections,omitempty"`
+	// Disable TLS (can be used in tests)
+	DisableTLS bool `json:"disableTLS,omitempty"`
+	// Path to certificate that should be used to validate server certificate
+	Trustfile string `json:"trustfile,omitempty"`
+	// API endpoint for data storage
+	APIEndpoint string `json:"apiEndpoint,omitempty"`
+	// Used to override TLS port (443)
+	APIEndpointPort int `json:"apiEndpointPort,omitempty"`
 }
 
 // StorageSpec defines the storage specification of the Cluster
@@ -134,9 +166,15 @@ type RedpandaConfig struct {
 	TLS           TLSConfig     `json:"tls,omitempty"`
 }
 
-// TLSConfig configures TLS for redpanda
+// TLSConfig configures TLS for redpanda APIs
+type TLSConfig struct {
+	// Configuration of TLS for Kafka API
+	KafkaAPI KafkaAPITLS `json:"kafkaApi,omitempty"`
+}
+
+// KafkaAPITLS configures TLS for redpanda Kafka API
 //
-// If KafkaAPIEnabled is set to true, one-way TLS verification is enabled.
+// If Enabled is set to true, one-way TLS verification is enabled.
 // In that case, a key pair ('tls.crt', 'tls.key') and CA certificate 'ca.crt'
 // are generated and stored in a Secret with the same name and namespace as the
 // Redpanda cluster. 'ca.crt', must be used by a client as a trustore when
@@ -156,8 +194,8 @@ type RedpandaConfig struct {
 // retrieved from the Secret named '<redpanda-cluster-name>-user-client'.
 //
 // All TLS secrets are stored in the same namespace as the Redpanda cluster.
-type TLSConfig struct {
-	KafkaAPIEnabled bool `json:"kafkaApiEnabled,omitempty"`
+type KafkaAPITLS struct {
+	Enabled bool `json:"enabled,omitempty"`
 	// References cert-manager Issuer or ClusterIssuer. When provided, this
 	// issuer will be used to issue node certificates.
 	// Typically you want to provide the issuer when a generated self-signed one

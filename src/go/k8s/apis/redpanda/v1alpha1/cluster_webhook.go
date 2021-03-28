@@ -62,6 +62,8 @@ func (r *Cluster) ValidateCreate() error {
 
 	allErrs = append(allErrs, r.validateTLS()...)
 
+	allErrs = append(allErrs, r.validateArchivalStorage()...)
+
 	if len(allErrs) == 0 {
 		return nil
 	}
@@ -89,6 +91,8 @@ func (r *Cluster) ValidateUpdate(old runtime.Object) error {
 	allErrs = append(allErrs, r.validateMemory()...)
 
 	allErrs = append(allErrs, r.validateTLS()...)
+
+	allErrs = append(allErrs, r.validateArchivalStorage()...)
 
 	if len(allErrs) == 0 {
 		return nil
@@ -120,19 +124,62 @@ func (r *Cluster) validateMemory() field.ErrorList {
 
 func (r *Cluster) validateTLS() field.ErrorList {
 	var allErrs field.ErrorList
-	if r.Spec.Configuration.TLS.RequireClientAuth && !r.Spec.Configuration.TLS.KafkaAPIEnabled {
+	if r.Spec.Configuration.TLS.KafkaAPI.RequireClientAuth && !r.Spec.Configuration.TLS.KafkaAPI.Enabled {
 		allErrs = append(allErrs,
 			field.Invalid(
 				field.NewPath("spec").Child("configuration").Child("tls").Child("requireclientauth"),
-				r.Spec.Configuration.TLS.RequireClientAuth,
-				"KafkaAPIEnabled has to be set to true for RequireClientAuth to be allowed to be true"))
+				r.Spec.Configuration.TLS.KafkaAPI.RequireClientAuth,
+				"Enabled has to be set to true for RequireClientAuth to be allowed to be true"))
 	}
-	if r.Spec.Configuration.TLS.IssuerRef != nil && r.Spec.Configuration.TLS.NodeSecretRef != nil {
+	if r.Spec.Configuration.TLS.KafkaAPI.IssuerRef != nil && r.Spec.Configuration.TLS.KafkaAPI.NodeSecretRef != nil {
 		allErrs = append(allErrs,
 			field.Invalid(
 				field.NewPath("spec").Child("configuration").Child("tls").Child("nodeSecretRef"),
-				r.Spec.Configuration.TLS.NodeSecretRef,
+				r.Spec.Configuration.TLS.KafkaAPI.NodeSecretRef,
 				"Cannot provide both IssuerRef and NodeSecretRef"))
+	}
+	return allErrs
+}
+
+func (r *Cluster) validateArchivalStorage() field.ErrorList {
+	var allErrs field.ErrorList
+	if !r.Spec.CloudStorage.Enabled {
+		return allErrs
+	}
+	if r.Spec.CloudStorage.AccessKey == "" {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("cloudStorage").Child("accessKey"),
+				r.Spec.CloudStorage.AccessKey,
+				"AccessKey has to be provided for cloud storage to be enabled"))
+	}
+	if r.Spec.CloudStorage.Bucket == "" {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("cloudStorage").Child("bucket"),
+				r.Spec.CloudStorage.Bucket,
+				"Bucket has to be provided for cloud storage to be enabled"))
+	}
+	if r.Spec.CloudStorage.Region == "" {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("cloudStorage").Child("region"),
+				r.Spec.CloudStorage.Region,
+				"Region has to be provided for cloud storage to be enabled"))
+	}
+	if r.Spec.CloudStorage.SecretKeyRef.Name == "" {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("cloudStorage").Child("secretKeyRef").Child("name"),
+				r.Spec.CloudStorage.SecretKeyRef.Name,
+				"SecretKeyRef name has to be provided for cloud storage to be enabled"))
+	}
+	if r.Spec.CloudStorage.SecretKeyRef.Namespace == "" {
+		allErrs = append(allErrs,
+			field.Invalid(
+				field.NewPath("spec").Child("configuration").Child("cloudStorage").Child("secretKeyRef").Child("namespace"),
+				r.Spec.CloudStorage.SecretKeyRef.Namespace,
+				"SecretKeyRef namespace has to be provided for cloud storage to be enabled"))
 	}
 	return allErrs
 }
