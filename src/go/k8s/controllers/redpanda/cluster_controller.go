@@ -118,7 +118,7 @@ func (r *ClusterReconciler) Reconcile(
 	for _, res := range toApply {
 		err := res.Ensure(ctx)
 
-		var e *resources.NeedToReconcileError
+		var e *resources.RequeueAfterError
 		if errors.As(err, &e) {
 			log.Info(e.Error())
 			return ctrl.Result{RequeueAfter: e.RequeueAfter}, nil
@@ -126,6 +126,7 @@ func (r *ClusterReconciler) Reconcile(
 
 		if err != nil {
 			log.Error(err, "Failed to reconcile resource")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -210,7 +211,7 @@ func statusShouldBeUpdated(
 ) bool {
 	return !reflect.DeepEqual(nodesInternal, status.Nodes.Internal) ||
 		!reflect.DeepEqual(nodesExternal, status.Nodes.External) ||
-		status.Replicas == readyReplicas
+		status.Replicas != readyReplicas
 }
 
 // WithConfiguratorTag set the configuratorTag
