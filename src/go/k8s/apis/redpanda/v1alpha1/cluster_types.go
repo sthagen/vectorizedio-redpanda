@@ -132,8 +132,9 @@ type ClusterStatus struct {
 
 // NodesList shows where client can find Redpanda brokers
 type NodesList struct {
-	Internal []string `json:"internal,omitempty"`
-	External []string `json:"external,omitempty"`
+	Internal      []string `json:"internal,omitempty"`
+	External      []string `json:"external,omitempty"`
+	ExternalAdmin []string `json:"externalAdmin,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -166,10 +167,12 @@ type RedpandaConfig struct {
 	TLS           TLSConfig     `json:"tls,omitempty"`
 }
 
-// TLSConfig configures TLS for redpanda APIs
+// TLSConfig configures TLS for Redpanda APIs
 type TLSConfig struct {
 	// Configuration of TLS for Kafka API
 	KafkaAPI KafkaAPITLS `json:"kafkaApi,omitempty"`
+	// Configuration of TLS for Admin API
+	AdminAPI AdminAPITLS `json:"adminApi,omitempty"`
 }
 
 // KafkaAPITLS configures TLS for redpanda Kafka API
@@ -205,9 +208,30 @@ type KafkaAPITLS struct {
 	// If provided, operator uses certificate in this secret instead of
 	// issuing its own node certificate. The secret is expected to provide
 	// the following keys: 'ca.crt', 'tls.key' and 'tls.crt'
+	// If NodeSecretRef points to secret in different namespace, operator will
+	// duplicate the secret to the same namespace as redpanda CRD to be able to
+	// mount it to the nodes
 	NodeSecretRef *corev1.ObjectReference `json:"nodeSecretRef,omitempty"`
 	// Enables two-way verification on the server side. If enabled, all Kafka
 	// API clients are required to have a valid client certificate.
+	RequireClientAuth bool `json:"requireClientAuth,omitempty"`
+}
+
+// AdminAPITLS configures TLS for Redpanda Admin API
+//
+// If Enabled is set to true, one-way TLS verification is enabled.
+// In that case, a key pair ('tls.crt', 'tls.key') and CA certificate 'ca.crt'
+// are generated and stored in a Secret with the same name and namespace as the
+// Redpanda cluster. 'ca.crt' must be used by a client as a truststore when
+// communicating with Redpanda.
+//
+// If RequireClientAuth is set to true, two-way TLS verification is enabled.
+// In that case, a client certificate is generated, which can be retrieved from
+// the Secret named '<redpanda-cluster-name>-admin-api-client'.
+//
+// All TLS secrets are stored in the same namespace as the Redpanda cluster.
+type AdminAPITLS struct {
+	Enabled           bool `json:"enabled,omitempty"`
 	RequireClientAuth bool `json:"requireClientAuth,omitempty"`
 }
 

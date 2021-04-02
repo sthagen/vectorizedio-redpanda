@@ -16,7 +16,6 @@
 #include "cluster/fwd.h"
 #include "coproc/event_listener.h"
 #include "coproc/pacemaker.h"
-#include "kafka/security/credential_store.h"
 #include "pandaproxy/configuration.h"
 #include "pandaproxy/fwd.h"
 #include "raft/group_manager.h"
@@ -25,6 +24,7 @@
 #include "resource_mgmt/smp_groups.h"
 #include "rpc/server.h"
 #include "seastarx.h"
+#include "security/credential_store.h"
 #include "storage/fwd.h"
 
 #include <seastar/core/app-template.hh>
@@ -76,7 +76,6 @@ public:
     smp_groups smp_service_groups;
     ss::sharded<kafka::quota_manager> quota_mgr;
     ss::sharded<cluster::id_allocator_frontend> id_allocator_frontend;
-    ss::sharded<kafka::credential_store> credentials;
     ss::sharded<archival::scheduler_service> archival_scheduler;
 
 private:
@@ -91,6 +90,7 @@ private:
 
     void admin_register_raft_routes(ss::http_server& server);
     void admin_register_kafka_routes(ss::http_server& server);
+    void admin_register_security_routes(ss::http_server& server);
 
     bool coproc_enabled() {
         const auto& cfg = config::shard_local_cfg();

@@ -12,9 +12,13 @@
 #pragma once
 #include "config/config_store.h"
 #include "config/data_directory_path.h"
+#include "config/endpoint_tls_config.h"
 #include "config/seed_server.h"
 #include "config/tls_config.h"
+#include "model/compression.h"
+#include "model/fundamental.h"
 #include "model/metadata.h"
+#include "model/timestamp.h"
 #include "utils/unresolved_address.h"
 
 #include <seastar/net/inet_address.hh>
@@ -23,6 +27,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <cctype>
 #include <chrono>
 
 namespace config {
@@ -53,12 +58,13 @@ struct configuration final : public config_store {
     property<int32_t> node_id;
     property<int32_t> seed_server_meta_topic_partitions;
     property<std::chrono::milliseconds> raft_heartbeat_interval_ms;
+    property<std::chrono::milliseconds> raft_heartbeat_timeout_ms;
     property<std::vector<seed_server>> seed_servers;
     property<int16_t> min_version;
     property<int16_t> max_version;
     // Kafka
     one_or_many_property<model::broker_endpoint> kafka_api;
-    property<tls_config> kafka_api_tls;
+    one_or_many_property<endpoint_tls_config> kafka_api_tls;
     property<bool> use_scheduling_groups;
     property<unresolved_address> admin;
     property<tls_config> admin_api_tls;
@@ -85,6 +91,9 @@ struct configuration final : public config_store {
     property<model::violation_recovery_policy> rm_violation_recovery_policy;
     property<std::chrono::milliseconds> fetch_reads_debounce_timeout;
     property<std::chrono::milliseconds> alter_topic_cfg_timeout_ms;
+    property<model::cleanup_policy_bitflags> log_cleanup_policy;
+    property<model::timestamp_type> log_message_timestamp_type;
+    property<model::compression> log_compression_type;
     // same as transactional.id.expiration.ms in kafka
     property<std::chrono::milliseconds> transactional_id_expiration_ms;
     property<bool> enable_idempotence;
@@ -127,8 +136,6 @@ struct configuration final : public config_store {
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
     property<bool> enable_sasl;
-    property<ss::sstring> static_scram_user;
-    property<ss::sstring> static_scram_pass;
     property<std::chrono::milliseconds>
       controller_backend_housekeeping_interval_ms;
 
@@ -163,6 +170,10 @@ struct configuration final : public config_store {
     // build pidfile path: `<data_directory>/pid.lock`
     std::filesystem::path pidfile_path() const {
         return data_directory().path / "pid.lock";
+    }
+    const one_or_many_property<model::broker_endpoint>&
+    advertised_kafka_api_property() {
+        return _advertised_kafka_api;
     }
 
 private:
@@ -484,4 +495,92 @@ struct convert<model::broker_endpoint> {
     }
 };
 
-}; // namespace YAML
+template<>
+struct convert<model::cleanup_policy_bitflags> {
+    using type = model::cleanup_policy_bitflags;
+    static Node encode(const type& rhs) {
+        Node node;
+
+        auto compaction = (rhs & model::cleanup_policy_bitflags::compaction)
+                          == model::cleanup_policy_bitflags::compaction;
+        auto deletion = (rhs & model::cleanup_policy_bitflags::deletion)
+                        == model::cleanup_policy_bitflags::deletion;
+
+        if (compaction && deletion) {
+            node = "compact,delete";
+
+        } else if (compaction) {
+            node = "compact";
+
+        } else if (deletion) {
+            node = "delete";
+        }
+        return node;
+    }
+    static bool decode(const Node& node, type& rhs) {
+        auto value = node.as<std::string>();
+        // normalize cleanup policy string (remove all whitespaces)
+        std::erase_if(value, isspace);
+        rhs = boost::lexical_cast<type>(value);
+
+        return true;
+    }
+};
+template<>
+struct convert<model::compression> {
+    using type = model::compression;
+    static Node encode(const type& rhs) {
+        Node node;
+        return node = fmt::format("{}", rhs);
+    }
+    static bool decode(const Node& node, type& rhs) {
+        auto value = node.as<std::string>();
+        rhs = boost::lexical_cast<type>(value);
+
+        return true;
+    }
+};
+
+template<>
+struct convert<model::timestamp_type> {
+    using type = model::timestamp_type;
+    static Node encode(const type& rhs) {
+        Node node;
+        return node = fmt::format("{}", rhs);
+    }
+    static bool decode(const Node& node, type& rhs) {
+        auto value = node.as<std::string>();
+        rhs = boost::lexical_cast<type>(value);
+
+        return true;
+    }
+};
+template<>
+struct convert<config::endpoint_tls_config> {
+    using type = config::endpoint_tls_config;
+    static Node encode(const type& rhs) {
+        Node node;
+        node["name"] = rhs.name;
+        node["config"] = rhs.config;
+        return node;
+    }
+
+    static bool decode(const Node& node, type& rhs) {
+        ss::sstring name;
+        if (node["name"]) {
+            name = node["name"].as<ss::sstring>();
+        }
+        config::tls_config tls_cfg;
+        auto res = convert<config::tls_config>{}.decode(node, tls_cfg);
+        if (!res) {
+            return res;
+        }
+        rhs = config::endpoint_tls_config{
+          .name = name,
+          .config = tls_cfg,
+        };
+
+        return true;
+    }
+};
+} // namespace YAML

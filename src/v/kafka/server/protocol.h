@@ -13,9 +13,10 @@
 
 #include "cluster/fwd.h"
 #include "config/configuration.h"
-#include "kafka/security/credential_store.h"
 #include "kafka/server/fwd.h"
 #include "rpc/server.h"
+#include "security/authorizer.h"
+#include "security/credential_store.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
@@ -36,7 +37,9 @@ public:
       ss::sharded<coordinator_ntp_mapper>& coordinator_mapper,
       ss::sharded<fetch_session_cache>&,
       ss::sharded<cluster::id_allocator_frontend>&,
-      ss::sharded<credential_store>&) noexcept;
+      ss::sharded<security::credential_store>&,
+      ss::sharded<security::authorizer>&,
+      ss::sharded<cluster::security_frontend>&) noexcept;
 
     ~protocol() noexcept override = default;
     protocol(const protocol&) = delete;
@@ -73,7 +76,13 @@ public:
     quota_manager& quota_mgr() { return _quota_mgr.local(); }
     bool is_idempotence_enabled() { return _is_idempotence_enabled; }
 
-    credential_store& credentials() { return _credentials.local(); }
+    security::credential_store& credentials() { return _credentials.local(); }
+
+    security::authorizer& authorizer() { return _authorizer.local(); }
+
+    cluster::security_frontend& security_frontend() {
+        return _security_frontend.local();
+    }
 
 private:
     ss::smp_service_group _smp_group;
@@ -87,7 +96,9 @@ private:
     ss::sharded<kafka::fetch_session_cache>& _fetch_session_cache;
     ss::sharded<cluster::id_allocator_frontend>& _id_allocator_frontend;
     bool _is_idempotence_enabled{false};
-    ss::sharded<kafka::credential_store>& _credentials;
+    ss::sharded<security::credential_store>& _credentials;
+    ss::sharded<security::authorizer>& _authorizer;
+    ss::sharded<cluster::security_frontend>& _security_frontend;
 };
 
 } // namespace kafka

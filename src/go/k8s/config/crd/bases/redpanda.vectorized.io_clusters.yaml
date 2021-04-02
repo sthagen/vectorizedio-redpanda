@@ -137,8 +137,16 @@ spec:
                         type: integer
                     type: object
                   tls:
-                    description: TLSConfig configures TLS for redpanda APIs
+                    description: TLSConfig configures TLS for Redpanda APIs
                     properties:
+                      adminApi:
+                        description: Configuration of TLS for Admin API
+                        properties:
+                          enabled:
+                            type: boolean
+                          requireClientAuth:
+                            type: boolean
+                        type: object
                       kafkaApi:
                         description: Configuration of TLS for Kafka API
                         properties:
@@ -168,7 +176,10 @@ spec:
                             description: 'If provided, operator uses certificate in
                               this secret instead of issuing its own node certificate.
                               The secret is expected to provide the following keys:
-                              ''ca.crt'', ''tls.key'' and ''tls.crt'''
+                              ''ca.crt'', ''tls.key'' and ''tls.crt'' If NodeSecretRef
+                              points to secret in different namespace, operator will
+                              duplicate the secret to the same namespace as redpanda
+                              CRD to be able to mount it to the nodes'
                             properties:
                               apiVersion:
                                 description: API version of the referent.
@@ -340,6 +351,10 @@ spec:
                 description: Nodes of the provisioned redpanda nodes
                 properties:
                   external:
+                    items:
+                      type: string
+                    type: array
+                  externalAdmin:
                     items:
                       type: string
                     type: array

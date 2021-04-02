@@ -35,6 +35,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/net/tls.hh>
 #include <seastar/util/defer.hh>
 
 #include <boost/algorithm/string.hpp>
@@ -101,7 +102,11 @@ public:
             std::move(directory),
             1_GiB,
             storage::debug_sanitize_files::yes))
-      , _hbeats(raft_heartbeat_interval, _consensus_client_protocol, self) {}
+      , _hbeats(
+          raft_heartbeat_interval,
+          _consensus_client_protocol,
+          self,
+          raft_heartbeat_interval * 20) {}
 
     ss::lw_shared_ptr<raft::consensus> consensus_for(raft::group_id) {
         return _consensus;
@@ -267,22 +272,25 @@ int main(int args, char** argv, char** env) {
             auto ccd = ss::defer(
               [&connection_cache] { connection_cache.stop().get(); });
             rpc::server_configuration scfg("kvelldb_rpc");
-            scfg.addrs.emplace_back(ss::socket_address(
-              ss::net::inet_address(cfg["ip"].as<ss::sstring>()),
-              cfg["port"].as<uint16_t>()));
             scfg.max_service_memory_per_core
               = ss::memory::stats().total_memory() * .7;
             auto key = cfg["key"].as<ss::sstring>();
             auto cert = cfg["cert"].as<ss::sstring>();
+            ss::shared_ptr<ss::tls::server_credentials> credentials;
             if (key != "" && cert != "") {
                 auto builder = ss::tls::credentials_builder();
                 builder.set_dh_level(ss::tls::dh_params::level::MEDIUM);
                 builder
                   .set_x509_key_file(cert, key, ss::tls::x509_crt_format::PEM)
                   .get();
-                scfg.credentials
+                credentials
                   = builder.build_reloadable_server_credentials().get0();
             }
+            scfg.addrs.emplace_back(
+              ss::socket_address(
+                ss::net::inet_address(cfg["ip"].as<ss::sstring>()),
+                cfg["port"].as<uint16_t>()),
+              credentials);
             auto self_id = cfg["node-id"].as<int32_t>();
             if (cfg.find("peers") != cfg.end()) {
                 initialize_connection_cache_in_thread(
@@ -293,14 +301,14 @@ int main(int args, char** argv, char** env) {
             const ss::sstring workdir = fmt::format(
               "{}/greetings-{}", cfg["workdir"].as<ss::sstring>(), self_id);
             vlog(kvelldblog.info, "Work directory:{}", workdir);
-
+            auto hbeat_interval = std::chrono::milliseconds(
+              cfg["heartbeat-timeout-ms"].as<int32_t>());
             // initialize group_manager
             group_manager
               .start(
                 model::node_id(self_id),
                 workdir,
-                std::chrono::milliseconds(
-                  cfg["heartbeat-timeout-ms"].as<int32_t>()),
+                hbeat_interval,
                 std::ref(connection_cache))
               .get();
             serv.start(scfg).get();
@@ -308,16 +316,18 @@ int main(int args, char** argv, char** env) {
             vlog(kvelldblog.info, "registering service on all cores");
             simple_shard_lookup shard_table;
             serv
-              .invoke_on_all([&shard_table, &group_manager](rpc::server& s) {
-                  auto proto = std::make_unique<rpc::simple_protocol>();
-                  proto->register_service<
-                    raft::service<simple_group_manager, simple_shard_lookup>>(
-                    ss::default_scheduling_group(),
-                    ss::default_smp_service_group(),
-                    group_manager,
-                    shard_table);
-                  s.set_protocol(std::move(proto));
-              })
+              .invoke_on_all(
+                [&shard_table, &group_manager, hbeat_interval](rpc::server& s) {
+                    auto proto = std::make_unique<rpc::simple_protocol>();
+                    proto->register_service<
+                      raft::service<simple_group_manager, simple_shard_lookup>>(
+                      ss::default_scheduling_group(),
+                      ss::default_smp_service_group(),
+                      group_manager,
+                      shard_table,
+                      hbeat_interval);
+                    s.set_protocol(std::move(proto));
+                })
               .get();
             vlog(kvelldblog.info, "Invoking rpc start on all cores");
             serv.invoke_on_all(&rpc::server::start).get();

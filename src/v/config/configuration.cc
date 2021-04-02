@@ -102,6 +102,12 @@ configuration::configuration()
       "Milliseconds for raft leader heartbeats",
       required::no,
       std::chrono::milliseconds(150))
+  , raft_heartbeat_timeout_ms(
+      *this,
+      "raft_heartbeat_timeout_ms",
+      "raft heartbeat RPC timeout",
+      required::no,
+      3s)
   , seed_servers(
       *this,
       "seed_servers",
@@ -125,8 +131,8 @@ configuration::configuration()
       "kafka_api_tls",
       "TLS configuration for Kafka API endpoint",
       required::no,
-      tls_config(),
-      tls_config::validate)
+      {},
+      endpoint_tls_config::validate_many)
   , use_scheduling_groups(
       *this,
       "use_scheduling_groups",
@@ -287,6 +293,24 @@ configuration::configuration()
       "alter configuration requst",
       required::no,
       5s)
+  , log_cleanup_policy(
+      *this,
+      "log_cleanup_policy",
+      "Default topic cleanup policy",
+      required::no,
+      model::cleanup_policy_bitflags::deletion)
+  , log_message_timestamp_type(
+      *this,
+      "log_message_timestamp_type",
+      "Default topic messages timestamp type",
+      required::no,
+      model::timestamp_type::create_time)
+  , log_compression_type(
+      *this,
+      "log_compression_type",
+      "Default topic compression type",
+      required::no,
+      model::compression::producer)
   , transactional_id_expiration_ms(
       *this,
       "transactional_id_expiration_ms",
@@ -509,18 +533,6 @@ configuration::configuration()
       "Enable SASL authentication for Kafka connections.",
       required::no,
       false)
-  , static_scram_user(
-      *this,
-      "static_scram_user",
-      "A SASL SCRAM user for testing",
-      required::no,
-      "")
-  , static_scram_pass(
-      *this,
-      "static_scram_pass",
-      "A SASL SCRAM password for testing",
-      required::no,
-      "")
   , controller_backend_housekeeping_interval_ms(
       *this,
       "controller_backend_housekeeping_interval_ms",

@@ -11,6 +11,7 @@
 
 #pragma once
 #include "bytes/iobuf.h"
+#include "cluster/security_frontend.h"
 #include "kafka/protocol/fwd.h"
 #include "kafka/protocol/request_reader.h"
 #include "kafka/server/connection_context.h"
@@ -143,8 +144,21 @@ public:
     }
 
     const ss::sstring& listener() const { return _conn->listener(); }
-    sasl_server& sasl() { return _conn->sasl(); }
-    credential_store& credentials() { return _conn->server().credentials(); }
+    security::sasl_server& sasl() { return _conn->sasl(); }
+    security::credential_store& credentials() {
+        return _conn->server().credentials();
+    }
+
+    template<typename T>
+    bool authorized(security::acl_operation operation, const T& name) {
+        return _conn->authorized(operation, name);
+    }
+
+    cluster::security_frontend& security_frontend() const {
+        return _conn->server().security_frontend();
+    }
+
+    security::authorizer& authorizer() { return _conn->server().authorizer(); }
 
 private:
     ss::lw_shared_ptr<connection_context> _conn;

@@ -64,6 +64,8 @@ type StatefulSetResource struct {
 	nodePortSvc                 corev1.Service
 	redpandaCertSecretKey       types.NamespacedName
 	internalClientCertSecretKey types.NamespacedName
+	adminCertSecretKey          types.NamespacedName
+	adminAPINodeCertSecretKey   types.NamespacedName
 	serviceAccountName          string
 	configuratorTag             string
 	logger                      logr.Logger
@@ -81,6 +83,8 @@ func NewStatefulSet(
 	nodePortName types.NamespacedName,
 	redpandaCertSecretKey types.NamespacedName,
 	internalClientCertSecretKey types.NamespacedName,
+	adminCertSecretKey types.NamespacedName,
+	adminAPINodeCertSecretKey types.NamespacedName,
 	serviceAccountName string,
 	configuratorTag string,
 	logger logr.Logger,
@@ -95,6 +99,8 @@ func NewStatefulSet(
 		corev1.Service{},
 		redpandaCertSecretKey,
 		internalClientCertSecretKey,
+		adminCertSecretKey,
+		adminAPINodeCertSecretKey,
 		serviceAccountName,
 		configuratorTag,
 		logger.WithValues("Kind", statefulSetKind()),
@@ -112,7 +118,7 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 			return fmt.Errorf("failed to retrieve node port service %s: %w", r.nodePortName, err)
 		}
 
-		if len(r.nodePortSvc.Spec.Ports) != 1 || r.nodePortSvc.Spec.Ports[0].NodePort == 0 {
+		if len(r.nodePortSvc.Spec.Ports) != 2 || r.nodePortSvc.Spec.Ports[0].NodePort == 0 || r.nodePortSvc.Spec.Ports[1].NodePort == 0 {
 			return fmt.Errorf("node port service %s: %w", r.nodePortName, errNodePortMissing)
 		}
 	}
@@ -210,6 +216,10 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 			Name:      r.Key().Name,
 			Labels:    clusterLabels,
 		},
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "StatefulSet",
+			APIVersion: "apps/v1",
+		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:            r.pandaCluster.Spec.Replicas,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
@@ -301,7 +311,7 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								},
 								{
 									Name:  "HOST_PORT",
-									Value: r.getNodePort(),
+									Value: r.getNodePort("kafka"),
 								},
 							},
 							SecurityContext: &corev1.SecurityContext{
@@ -369,10 +379,6 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								},
 							},
 							Ports: append([]corev1.ContainerPort{
-								{
-									Name:          "admin",
-									ContainerPort: int32(r.pandaCluster.Spec.Configuration.AdminAPI.Port),
-								},
 								{
 									Name:          "rpc",
 									ContainerPort: int32(r.pandaCluster.Spec.Configuration.RPCServer.Port),
@@ -454,6 +460,12 @@ func (r *StatefulSetResource) secretVolumeMounts() []corev1.VolumeMount {
 			MountPath: tlsDirCA,
 		})
 	}
+	if r.pandaCluster.Spec.Configuration.TLS.AdminAPI.Enabled {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "tlsadmincert",
+			MountPath: tlsAdminDir,
+		})
+	}
 	return mounts
 }
 
@@ -499,12 +511,43 @@ func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 			},
 		})
 	}
+
+	// When Admin TLS is enabled, Redpanda needs a keypair certificate.
+	if r.pandaCluster.Spec.Configuration.TLS.AdminAPI.Enabled {
+		vols = append(vols, corev1.Volume{
+			Name: "tlsadmincert",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.adminAPINodeCertSecretKey.Name,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  corev1.TLSPrivateKeyKey,
+							Path: corev1.TLSPrivateKeyKey,
+						},
+						{
+							Key:  corev1.TLSCertKey,
+							Path: corev1.TLSCertKey,
+						},
+						{
+							Key:  cmetav1.TLSCAKey,
+							Path: cmetav1.TLSCAKey,
+						},
+					},
+				},
+			},
+		})
+	}
+
 	return vols
 }
 
-func (r *StatefulSetResource) getNodePort() string {
+func (r *StatefulSetResource) getNodePort(name string) string {
 	if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
-		return strconv.FormatInt(int64(r.nodePortSvc.Spec.Ports[0].NodePort), 10)
+		for _, port := range r.nodePortSvc.Spec.Ports {
+			if port.Name == name {
+				return strconv.FormatInt(int64(port.NodePort), 10)
+			}
+		}
 	}
 	return ""
 }
@@ -534,30 +577,41 @@ func (r *StatefulSetResource) portsConfiguration() string {
 func (r *StatefulSetResource) getPorts() []corev1.ContainerPort {
 	if r.pandaCluster.Spec.ExternalConnectivity.Enabled &&
 		len(r.nodePortSvc.Spec.Ports) > 0 {
-		return []corev1.ContainerPort{
+		ports := []corev1.ContainerPort{
 			{
 				Name:          "kafka-internal",
 				ContainerPort: int32(r.pandaCluster.Spec.Configuration.KafkaAPI.Port),
 			},
 			{
-				Name: "kafka-external",
+				Name:          "admin-internal",
+				ContainerPort: int32(r.pandaCluster.Spec.Configuration.AdminAPI.Port),
+			},
+		}
+		for _, port := range r.nodePortSvc.Spec.Ports {
+			ports = append(ports, corev1.ContainerPort{
+				Name: port.Name + "-external",
 				// To distinguish external from internal clients the new listener
 				// and port is exposed for Redpanda clients. The port is chosen
 				// arbitrary to the KafkaAPI + 1, because user can not reach this
 				// port. The routing in the Kubernetes will forward all traffic from
 				// HostPort to the ContainerPort.
-				ContainerPort: r.nodePortSvc.Spec.Ports[0].TargetPort.IntVal,
+				ContainerPort: port.TargetPort.IntVal,
 				// The host port is set to the service node port that doesn't have
 				// any endpoints.
-				HostPort: r.nodePortSvc.Spec.Ports[0].NodePort,
-			},
+				HostPort: port.NodePort,
+			})
 		}
+		return ports
 	}
 
 	return []corev1.ContainerPort{
 		{
 			Name:          "kafka",
 			ContainerPort: int32(r.pandaCluster.Spec.Configuration.KafkaAPI.Port),
+		},
+		{
+			Name:          "admin",
+			ContainerPort: int32(r.pandaCluster.Spec.Configuration.AdminAPI.Port),
 		},
 	}
 }

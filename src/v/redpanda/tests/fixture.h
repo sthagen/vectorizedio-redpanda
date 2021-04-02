@@ -83,7 +83,9 @@ public:
           app.coordinator_ntp_mapper,
           app.fetch_session_cache,
           app.id_allocator_frontend,
-          app.credentials);
+          app.controller->get_credential_store(),
+          app.controller->get_authorizer(),
+          app.controller->get_security_frontend());
     }
 
     // creates single node with default configuration
@@ -270,9 +272,12 @@ public:
     }
 
     kafka::request_context make_request_context() {
-        kafka::sasl_server sasl(kafka::sasl_server::sasl_state::complete);
+        security::sasl_server sasl(security::sasl_server::sasl_state::complete);
         auto conn = ss::make_lw_shared<kafka::connection_context>(
-          *proto, rpc::server::resources(nullptr, nullptr), std::move(sasl));
+          *proto,
+          rpc::server::resources(nullptr, nullptr),
+          std::move(sasl),
+          false);
 
         kafka::request_header header;
         auto encoder_context = kafka::request_context(

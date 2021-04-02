@@ -27,3 +27,4 @@ spec:
         enabled: true
         nodeSecretRef:
           name: cluster-tls-node-certificate
+          namespace: given-cert

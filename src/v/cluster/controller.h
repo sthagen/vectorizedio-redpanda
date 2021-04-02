@@ -15,6 +15,8 @@
 #include "cluster/fwd.h"
 #include "cluster/topic_updates_dispatcher.h"
 #include "rpc/connection_cache.h"
+#include "security/authorizer.h"
+#include "security/credential_store.h"
 #include "storage/fwd.h"
 
 #include <seastar/core/abort_source.hh>
@@ -43,6 +45,16 @@ public:
         return _partition_leaders;
     }
 
+    ss::sharded<security::credential_store>& get_credential_store() {
+        return _credentials;
+    }
+
+    ss::sharded<security_frontend>& get_security_frontend() {
+        return _security_frontend;
+    }
+
+    ss::sharded<security::authorizer>& get_authorizer() { return _authorizer; }
+
     ss::future<> wire_up();
 
     ss::future<> start();
@@ -67,6 +79,10 @@ private:
     ss::sharded<shard_table>& _shard_table;
     ss::sharded<storage::api>& _storage;
     topic_updates_dispatcher _tp_updates_dispatcher;
+    ss::sharded<security::credential_store> _credentials;
+    security_manager _security_manager;
+    ss::sharded<security_frontend> _security_frontend;
+    ss::sharded<security::authorizer> _authorizer;
     consensus_ptr _raft0;
 };
 

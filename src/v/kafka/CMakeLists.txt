@@ -1,10 +1,5 @@
 add_subdirectory(protocol)
 
-set(security_srcs
-    security/scram_algorithm.cc
-    security/scram_credential.cc
-    security/scram_authenticator.cc)
-
 set(handlers_srcs
   server/handlers/api_versions.cc
   server/handlers/metadata.cc
@@ -31,6 +26,8 @@ set(handlers_srcs
   server/handlers/delete_groups.cc
   server/handlers/describe_acls.cc
   server/handlers/describe_log_dirs.cc
+  server/handlers/create_acls.cc
+  server/handlers/delete_acls.cc
   server/handlers/topics/types.cc
   server/handlers/topics/topic_utils.cc
 )
@@ -40,7 +37,6 @@ v_cc_library(
   SRCS
     protocol/batch_reader.cc
     protocol/kafka_batch_adapter.cc
-    ${security_srcs}
     ${handlers_srcs}
     server/requests.cc
     server/member.cc
@@ -59,6 +55,7 @@ v_cc_library(
     v::rpc
     v::cluster
     v::kafka_protocol
+    v::security
     absl::flat_hash_map
     absl::flat_hash_set
 )

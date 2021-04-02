@@ -37,7 +37,7 @@ class RedpandaService(Service):
     WASM_STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT,
                                               "wasm_engine.log")
     CLUSTER_NAME = "my_cluster"
-    READY_TIMEOUT_SEC = 10
+    READY_TIMEOUT_SEC = 20
 
     logs = {
         "redpanda_start_stdout_stderr": {
@@ -108,6 +108,7 @@ class RedpandaService(Service):
                f" --redpanda-cfg {RedpandaService.CONFIG_FILE}"
                f" --default-log-level {self._log_level}"
                f" --logger-log-level=exception=debug "
+               f" --kernel-page-cache=true "
                f" >> {RedpandaService.STDOUT_STDERR_CAPTURE} 2>&1 &")
 
         self.logger.info(
