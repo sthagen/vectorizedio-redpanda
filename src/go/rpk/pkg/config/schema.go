@@ -50,17 +50,18 @@ type RedpandaConfig struct {
 	Superusers                           []string               `yaml:"superusers,omitempty" mapstructure:"superusers,omitempty" json:"superusers,omitempty"`
 	EnableSASL                           *bool                  `yaml:"enable_sasl,omitempty" mapstructure:"enable_sasl,omitempty" json:"enableSasl,omitempty"`
 	GroupTopicPartitions                 *int                   `yaml:"group_topic_partitions,omitempty" mapstructure:"group_topic_partitions,omitempty" json:"groupTopicPartitions,omitempty"`
+	LogSegmentSize                       *int                   `yaml:"log_segment_size,omitempty" mapstructure:"log_segment_size,omitempty" json:"log_segment_size,omitempty"`
 	Other                                map[string]interface{} `yaml:",inline" mapstructure:",remain"`
 }
 
 type Pandaproxy struct {
-	PandaproxyAPI           *SocketAddress `yaml:"pandaproxy_api,omitempty" mapstructure:"pandaproxy_api,omitempty" json:"pandaproxyApi,omitempty"`
-	PandaproxyAPITLS        *ServerTLS     `yaml:"pandaproxy_api_tls,omitempty" mapstructure:"pandaproxy_api_tls,omitempty" json:"pandaproxyApiTls,omitempty"`
-	AdvertisedPandaproxyAPI *SocketAddress `yaml:"advertised_pandaproxy_api,omitempty" mapstructure:"advertised_pandaproxy_api,omitempty" json:"advertisedPandaproxyApi,omitempty"`
+	PandaproxyAPI           []NamedSocketAddress `yaml:"pandaproxy_api,omitempty" mapstructure:"pandaproxy_api,omitempty" json:"pandaproxyApi,omitempty"`
+	PandaproxyAPITLS        []ServerTLS          `yaml:"pandaproxy_api_tls,omitempty" mapstructure:"pandaproxy_api_tls,omitempty" json:"pandaproxyApiTls,omitempty"`
+	AdvertisedPandaproxyAPI []NamedSocketAddress `yaml:"advertised_pandaproxy_api,omitempty" mapstructure:"advertised_pandaproxy_api,omitempty" json:"advertisedPandaproxyApi,omitempty"`
 }
 
 type PandaproxyClient struct {
-	Broker    []SocketAddress `yaml:"broker,omitempty" mapstructure:"broker,omitempty" json:"broker,omitempty"`
+	Brokers   []SocketAddress `yaml:"brokers,omitempty" mapstructure:"brokers,omitempty" json:"brokers,omitempty"`
 	BrokerTLS ServerTLS       `yaml:"broker_tls,omitempty" mapstructure:"broker_tls,omitempty" json:"brokerTls,omitempty"`
 }
 
@@ -114,6 +115,13 @@ type RpkConfig struct {
 	WellKnownIo              string   `yaml:"well_known_io,omitempty" mapstructure:"well_known_io,omitempty" json:"wellKnownIo"`
 	Overprovisioned          bool     `yaml:"overprovisioned" mapstructure:"overprovisioned" json:"overprovisioned"`
 	SMP                      *int     `yaml:"smp,omitempty" mapstructure:"smp,omitempty" json:"smp,omitempty"`
+	SCRAM                    SCRAM    `yaml:"scram,omitempty" mapstructure:"scram,omitempty" json:"scram,omitempty"`
+}
+
+type SCRAM struct {
+	User     string `yaml:"user,omitempty" mapstructure:"user,omitempty" json:"user,omitempty"`
+	Password string `yaml:"password,omitempty" mapstructure:"password,omitempty" json:"password,omitempty"`
+	Type     string `yaml:"type,omitempty" mapstructure:"type,omitempty" json:"type,omitempty"`
 }
 
 func (conf *Config) PIDFile() string {
