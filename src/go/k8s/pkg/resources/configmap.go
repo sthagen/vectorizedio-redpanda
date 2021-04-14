@@ -40,6 +40,9 @@ const (
 
 	oneMB          = 1024 * 1024
 	logSegmentSize = 512 * oneMB
+
+	internal = "Internal"
+	external = "External"
 )
 
 var errKeyDoesNotExistInSecretData = errors.New("cannot find key in secret data")
@@ -163,7 +166,19 @@ func (r *ConfigMapResource) createConfiguration(
 		Port:    clusterCRPortOrRPKDefault(c.RPCServer.Port, cr.RPCServer.Port),
 	}
 
-	cr.AdminApi.Port = clusterCRPortOrRPKDefault(c.AdminAPI.Port, cr.AdminApi.Port)
+	cr.AdminApi[0].Port = clusterCRPortOrRPKDefault(c.AdminAPI.Port, cr.AdminApi[0].Port)
+	cr.AdminApi[0].Name = internal
+	if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
+		externalAdminAPI := config.NamedSocketAddress{
+			SocketAddress: config.SocketAddress{
+				Address: cr.AdminApi[0].Address,
+				Port:    cr.AdminApi[0].Port + 1,
+			},
+			Name: external,
+		}
+		cr.AdminApi = append(cr.AdminApi, externalAdminAPI)
+	}
+
 	cr.DeveloperMode = c.DeveloperMode
 	cr.Directory = dataDirectory
 	if r.pandaCluster.Spec.Configuration.TLS.KafkaAPI.Enabled {
@@ -188,15 +203,21 @@ func (r *ConfigMapResource) createConfiguration(
 		}
 	}
 	if r.pandaCluster.Spec.Configuration.TLS.AdminAPI.Enabled {
-		cr.AdminApiTLS = config.ServerTLS{
+		name := internal
+		if r.pandaCluster.Spec.ExternalConnectivity.Enabled {
+			name = external
+		}
+		adminTLS := config.ServerTLS{
+			Name:              name,
 			KeyFile:           fmt.Sprintf("%s/%s", tlsAdminDir, corev1.TLSPrivateKeyKey),
 			CertFile:          fmt.Sprintf("%s/%s", tlsAdminDir, corev1.TLSCertKey),
 			Enabled:           true,
 			RequireClientAuth: r.pandaCluster.Spec.Configuration.TLS.AdminAPI.RequireClientAuth,
 		}
 		if r.pandaCluster.Spec.Configuration.TLS.AdminAPI.RequireClientAuth {
-			cr.AdminApiTLS.TruststoreFile = fmt.Sprintf("%s/%s", tlsAdminDir, cmetav1.TLSCAKey)
+			adminTLS.TruststoreFile = fmt.Sprintf("%s/%s", tlsAdminDir, cmetav1.TLSCAKey)
 		}
+		cr.AdminApiTLS = append(cr.AdminApiTLS, adminTLS)
 	}
 
 	if r.pandaCluster.Spec.CloudStorage.Enabled {

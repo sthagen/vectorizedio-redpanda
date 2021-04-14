@@ -46,7 +46,9 @@ auto get_consumer_offsets(
       client,
       fmt::format("/consumers/{}/instances/{}/offsets", g_id(), m_id()),
       std::move(body),
-      boost::beast::http::verb::get);
+      boost::beast::http::verb::get,
+      ppj::serialization_format::json_v2,
+      ppj::serialization_format::json_v2);
     return res;
 };
 
@@ -64,6 +66,7 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
     {
         info("Create consumer");
         ss::sstring req_body(R"({
+  "name": "test_consumer",
   "format": "binary",
   "auto.offset.reset": "earliest",
   "auto.commit.enable": "false",
@@ -84,7 +87,7 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
 
         auto res_data = ppj::rjson_parse(
           res.body.data(), ppj::create_consumer_response_handler());
-        BOOST_REQUIRE(res_data.instance_id != kafka::no_member);
+        BOOST_REQUIRE_EQUAL(res_data.instance_id, "test_consumer");
         member_id = res_data.instance_id;
         BOOST_REQUIRE_EQUAL(
           res_data.base_uri,
@@ -177,7 +180,10 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
             group_id(),
             member_id(),
             "1000",
-            "1000000"));
+            "1000000"),
+          boost::beast::http::verb::get,
+          ppj::serialization_format::json_v2,
+          ppj::serialization_format::binary_v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
@@ -213,7 +219,9 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           fmt::format(
             "/consumers/{}/instances/{}/offsets", group_id(), member_id()),
           std::move(body),
-          boost::beast::http::verb::post);
+          boost::beast::http::verb::post,
+          ppj::serialization_format::json_v2,
+          ppj::serialization_format::json_v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::no_content);
     }
@@ -234,7 +242,9 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           client,
           fmt::format(
             "/consumers/{}/instances/{}/offsets", group_id(), member_id()),
-          boost::beast::http::verb::post);
+          boost::beast::http::verb::post,
+          ppj::serialization_format::json_v2,
+          ppj::serialization_format::json_v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::no_content);
     }
