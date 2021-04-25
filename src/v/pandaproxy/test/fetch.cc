@@ -67,7 +67,7 @@ FIXTURE_TEST(pandaproxy_fetch, pandaproxy_test_fixture) {
           "/topics//partitions/0/"
           "records?max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
@@ -85,7 +85,7 @@ FIXTURE_TEST(pandaproxy_fetch, pandaproxy_test_fixture) {
           "/topics//partitions/0/"
           "records?offset=0&max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
@@ -103,7 +103,7 @@ FIXTURE_TEST(pandaproxy_fetch, pandaproxy_test_fixture) {
           "/topics/t/partitions/0/"
           "records?offset=0&max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
@@ -130,34 +130,34 @@ FIXTURE_TEST(pandaproxy_fetch, pandaproxy_test_fixture) {
           std::move(body),
           boost::beast::http::verb::post,
           ppj::serialization_format::binary_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
-          res.body, R"({"offsets":[{"partition":0,"offset":1}]})");
+          res.body, R"({"offsets":[{"partition":0,"offset":0}]})");
     }
 
     {
-        info("Fetch offset 0 - expect offsets 0-3");
+        info("Fetch offset 0 - expect offsets 0-2");
         set_client_config("retries", size_t(0));
         auto res = http_request(
           client,
           "/topics/t/partitions/0/"
           "records?offset=0&max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
           res.body,
-          R"([{"topic":"t","key":"AAD//w==","value":"","partition":0,"offset":0},{"topic":"t","key":"","value":"dmVjdG9yaXplZA==","partition":0,"offset":1},{"topic":"t","key":"","value":"cGFuZGFwcm94eQ==","partition":0,"offset":2},{"topic":"t","key":"","value":"bXVsdGlicm9rZXI=","partition":0,"offset":3}])");
+          R"([{"topic":"t","key":null,"value":"dmVjdG9yaXplZA==","partition":0,"offset":0},{"topic":"t","key":null,"value":"cGFuZGFwcm94eQ==","partition":0,"offset":1},{"topic":"t","key":null,"value":"bXVsdGlicm9rZXI=","partition":0,"offset":2}])");
     }
 
     {
-        info("Produce to known topic - offset 4");
+        info("Produce to known topic - offset 3");
         set_client_config("retries", size_t(0));
         auto body = iobuf();
         body.append(batch_2_body.data(), batch_2_body.size());
@@ -167,45 +167,114 @@ FIXTURE_TEST(pandaproxy_fetch, pandaproxy_test_fixture) {
           std::move(body),
           boost::beast::http::verb::post,
           ppj::serialization_format::binary_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
-          res.body, R"({"offsets":[{"partition":0,"offset":4}]})");
+          res.body, R"({"offsets":[{"partition":0,"offset":3}]})");
     }
 
     {
-        info("Fetch offset 4 - expect offset 4");
+        info("Fetch offset 3 - expect offset 3");
         auto res = http_request(
           client,
           "/topics/t/partitions/0/"
-          "records?offset=4&max_bytes=1024&timeout=5000",
+          "records?offset=3&max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
           res.body,
-          R"([{"topic":"t","key":"","value":"bXVsdGliYXRjaA==","partition":0,"offset":4}])");
+          R"([{"topic":"t","key":null,"value":"bXVsdGliYXRjaA==","partition":0,"offset":3}])");
     }
 
     {
-        info("Fetch offset 2 - expect offsets 1-4");
+        info("Fetch offset 2 - expect offsets 0-3");
         auto res = http_request(
           client,
           "/topics/t/partitions/0/"
           "records?offset=2&max_bytes=1024&timeout=5000",
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
           res.body,
-          R"([{"topic":"t","key":"","value":"dmVjdG9yaXplZA==","partition":0,"offset":1},{"topic":"t","key":"","value":"cGFuZGFwcm94eQ==","partition":0,"offset":2},{"topic":"t","key":"","value":"bXVsdGlicm9rZXI=","partition":0,"offset":3},{"topic":"t","key":"","value":"bXVsdGliYXRjaA==","partition":0,"offset":4}])");
+          R"([{"topic":"t","key":null,"value":"dmVjdG9yaXplZA==","partition":0,"offset":0},{"topic":"t","key":null,"value":"cGFuZGFwcm94eQ==","partition":0,"offset":1},{"topic":"t","key":null,"value":"bXVsdGlicm9rZXI=","partition":0,"offset":2},{"topic":"t","key":null,"value":"bXVsdGliYXRjaA==","partition":0,"offset":3}])");
+    }
+}
+
+FIXTURE_TEST(pandaproxy_fetch_json_v2, pandaproxy_test_fixture) {
+    using namespace std::chrono_literals;
+
+    set_client_config("retry_base_backoff_ms", 10ms);
+    set_client_config("produce_batch_delay_ms", 0ms);
+
+    info("Waiting for leadership");
+    wait_for_controller_leadership().get();
+
+    info("Connecting client");
+    auto client = make_client();
+    const ss::sstring batch_body(
+      R"({
+   "records":[
+      {
+         "key": null,
+         "value":{"object":["vectorized"]},
+         "partition":0
+      },
+      {
+         "value":{"object":["pandaproxy"]},
+         "partition":0
+      }
+   ]
+})");
+
+    info("Adding known topic");
+    auto tp = model::topic_partition(model::topic("t"), model::partition_id(0));
+    auto ntp = make_default_ntp(tp.topic, tp.partition);
+    add_topic(model::topic_namespace_view(ntp)).get();
+
+    {
+        info("Produce to known topic - offsets 1-3");
+        // Will require a metadata update
+        set_client_config("retries", size_t(5));
+        auto body = iobuf();
+        body.append(batch_body.data(), batch_body.size());
+        auto res = http_request(
+          client,
+          "/topics/t",
+          std::move(body),
+          boost::beast::http::verb::post,
+          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2);
+
+        BOOST_REQUIRE_EQUAL(
+          res.headers.result(), boost::beast::http::status::ok);
+        BOOST_REQUIRE_EQUAL(
+          res.body, R"({"offsets":[{"partition":0,"offset":0}]})");
+    }
+
+    {
+        info("Fetch offset 1 as json - expect offsets 0-1");
+        auto res = http_request(
+          client,
+          "/topics/t/partitions/0/"
+          "records?offset=1&max_bytes=1024&timeout=5000",
+          boost::beast::http::verb::get,
+          ppj::serialization_format::v2,
+          ppj::serialization_format::json_v2);
+
+        BOOST_REQUIRE_EQUAL(
+          res.headers.result(), boost::beast::http::status::ok);
+        BOOST_REQUIRE_EQUAL(
+          res.body,
+          R"([{"topic":"t","key":null,"value":{"object":["vectorized"]},"partition":0,"offset":0},{"topic":"t","key":null,"value":{"object":["pandaproxy"]},"partition":0,"offset":1}])");
     }
 }

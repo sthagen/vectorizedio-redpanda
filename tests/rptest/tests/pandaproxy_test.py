@@ -35,9 +35,14 @@ HTTP_FETCH_TOPIC_HEADERS = {
     "Content-Type": "application/vnd.kafka.v2+json"
 }
 
-HTTP_PRODUCE_TOPIC_HEADERS = {
+HTTP_PRODUCE_BINARY_V2_TOPIC_HEADERS = {
     "Accept": "application/vnd.kafka.v2+json",
     "Content-Type": "application/vnd.kafka.binary.v2+json"
+}
+
+HTTP_PRODUCE_JSON_V2_TOPIC_HEADERS = {
+    "Accept": "application/vnd.kafka.v2+json",
+    "Content-Type": "application/vnd.kafka.json.v2+json"
 }
 
 HTTP_CREATE_CONSUMER_HEADERS = {
@@ -55,8 +60,13 @@ HTTP_REMOVE_CONSUMER_HEADERS = {
     "Content-Type": "application/vnd.kafka.v2+json"
 }
 
-HTTP_CONSUMER_FETCH_HEADERS = {
+HTTP_CONSUMER_FETCH_BINARY_V2_HEADERS = {
     "Accept": "application/vnd.kafka.binary.v2+json",
+    "Content-Type": "application/vnd.kafka.v2+json"
+}
+
+HTTP_CONSUMER_FETCH_JSON_V2_HEADERS = {
+    "Accept": "application/vnd.kafka.json.v2+json",
     "Content-Type": "application/vnd.kafka.v2+json"
 }
 
@@ -86,7 +96,7 @@ class Consumer:
         res = requests.delete(self.base_uri, headers=headers)
         return res
 
-    def fetch(self, headers=HTTP_CONSUMER_FETCH_HEADERS):
+    def fetch(self, headers=HTTP_CONSUMER_FETCH_BINARY_V2_HEADERS):
         res = requests.get(f"{self.base_uri}/records", headers=headers)
         return res
 
@@ -146,7 +156,10 @@ class PandaProxyTest(RedpandaTest):
     def _get_topics(self, headers=HTTP_GET_TOPICS_HEADERS):
         return requests.get(f"{self._base_uri()}/topics", headers=headers)
 
-    def _produce_topic(self, topic, data, headers=HTTP_PRODUCE_TOPIC_HEADERS):
+    def _produce_topic(self,
+                       topic,
+                       data,
+                       headers=HTTP_PRODUCE_BINARY_V2_TOPIC_HEADERS):
         return requests.post(f"{self._base_uri()}/topics/{topic}",
                              data,
                              headers=headers)
@@ -333,13 +346,13 @@ class PandaProxyTest(RedpandaTest):
 
         produce_result = produce_result_raw.json()
         for o in produce_result["offsets"]:
-            assert o["offset"] == 1, f'error_code {o["error_code"]}'
+            assert o["offset"] == 0, f'error_code {o["error_code"]}'
 
         self.logger.info(f"Consuming from topic: {name}")
         kc = KafkaCat(self.redpanda)
-        assert kc.consume_one(name, 0, 1)["payload"] == "vectorized"
-        assert kc.consume_one(name, 1, 1)["payload"] == "pandaproxy"
-        assert kc.consume_one(name, 2, 1)["payload"] == "multibroker"
+        assert kc.consume_one(name, 0, 0)["payload"] == "vectorized"
+        assert kc.consume_one(name, 1, 0)["payload"] == "pandaproxy"
+        assert kc.consume_one(name, 2, 0)["payload"] == "multibroker"
 
         self.logger.info(f"Producing to topic without partition: {name}")
         produce_result_raw = self._produce_topic(
@@ -355,7 +368,7 @@ class PandaProxyTest(RedpandaTest):
         assert produce_result_raw.status_code == requests.codes.ok
         produce_result = produce_result_raw.json()
         for o in produce_result["offsets"]:
-            assert o["offset"] == 2, f'error_code {o["error_code"]}'
+            assert o["offset"] == 1, f'error_code {o["error_code"]}'
 
     @cluster(num_nodes=3)
     def test_fetch_topic_validation(self):
@@ -393,10 +406,9 @@ class PandaProxyTest(RedpandaTest):
             name,
             0,
             headers={"Accept": "application/vnd.kafka.binary.v2+json"})
-        assert fetch_raw_result.status_code == requests.codes.unsupported_media_type
+        assert fetch_raw_result.status_code == requests.codes.not_found
         fetch_result = fetch_raw_result.json()
-        assert fetch_result[
-            "error_code"] == requests.codes.unsupported_media_type
+        assert fetch_result["error_code"] == 40402
 
         self.logger.info(f"Consuming with no accept header")
         fetch_raw_result = self._fetch_topic(
@@ -441,20 +453,20 @@ class PandaProxyTest(RedpandaTest):
         assert produce_result_raw.status_code == requests.codes.ok
         produce_result = produce_result_raw.json()
         for o in produce_result["offsets"]:
-            assert o["offset"] == 1, f'error_code {o["error_code"]}'
+            assert o["offset"] == 0, f'error_code {o["error_code"]}'
 
         self.logger.info(f"Consuming from topic: {name}")
         fetch_raw_result_0 = self._fetch_topic(name, 0)
         assert fetch_raw_result_0.status_code == requests.codes.ok
         fetch_result_0 = fetch_raw_result_0.json()
         expected = json.loads(data)
-        # The first batch is a control batch,ignore it.
-        assert fetch_result_0[1]["topic"] == name
-        assert fetch_result_0[1]["key"] == ''
-        assert fetch_result_0[1]["value"] == expected["records"][0]["value"]
-        assert fetch_result_0[1]["partition"] == expected["records"][0][
+        assert len(fetch_result_0) == 1
+        assert fetch_result_0[0]["topic"] == name
+        assert fetch_result_0[0]["key"] is None
+        assert fetch_result_0[0]["value"] == expected["records"][0]["value"]
+        assert fetch_result_0[0]["partition"] == expected["records"][0][
             "partition"]
-        assert fetch_result_0[1]["offset"] == 1
+        assert fetch_result_0[0]["offset"] == 0
 
     @cluster(num_nodes=3)
     def test_create_consumer_validation(self):
@@ -634,7 +646,7 @@ class PandaProxyTest(RedpandaTest):
         assert sc_res.status_code == requests.codes.no_content
 
     @cluster(num_nodes=3)
-    def test_consumer_group(self):
+    def test_consumer_group_binary_v2(self):
         """
         Create a consumer group and use it
         """
@@ -685,8 +697,8 @@ class PandaProxyTest(RedpandaTest):
         cf_res = c0.fetch()
         assert cf_res.status_code == requests.codes.ok
         fetch_result = cf_res.json()
-        # 3 topics * 3 * (1 ctrl batch + 1 msg)
-        assert len(fetch_result) == 3 * 3 * 2
+        # 3 topics * 3 msg
+        assert len(fetch_result) == 3 * 3
         print(fetch_result)
 
         self.logger.info(f"Get consumer offsets")
@@ -712,7 +724,60 @@ class PandaProxyTest(RedpandaTest):
         co_res = co_res_raw.json()
         assert len(co_res["offsets"]) == 9
         for i in range(len(co_res["offsets"])):
-            assert co_res["offsets"][i]["offset"] == 1
+            assert co_res["offsets"][i]["offset"] == 0
+
+        # Remove consumer
+        self.logger.info("Remove consumer")
+        rc_res = c0.remove()
+        assert rc_res.status_code == requests.codes.no_content
+
+    @cluster(num_nodes=3)
+    def test_consumer_group_json_v2(self):
+        """
+        Create a consumer group and use it
+        """
+
+        group_id = f"pandaproxy-group-{uuid.uuid4()}"
+
+        # Create 3 topics
+        topics = self._create_topics(create_topic_names(3), 3, 3)
+
+        for name in topics:
+            self.logger.info(f"Producing to topic: {name}")
+            produce_result_raw = self._produce_topic(
+                name,
+                '''
+            {
+                "records": [
+                    {"value": {"object":["vectorized"]}, "partition": 0},
+                    {"value": {"object":["pandaproxy"]}, "partition": 0},
+                    {"value": {"object":["multibroker"]}, "partition": 0}
+                ]
+            }''',
+                headers=HTTP_PRODUCE_JSON_V2_TOPIC_HEADERS)
+            print(produce_result_raw.content)
+            assert produce_result_raw.status_code == requests.codes.ok
+
+        # Create a consumer
+        self.logger.info("Create a consumer")
+        cc_res = self._create_consumer(group_id)
+        assert cc_res.status_code == requests.codes.ok
+        c0 = Consumer(cc_res.json())
+
+        # Subscribe a consumer
+        self.logger.info(f"Subscribe consumer to topics: {topics}")
+        sc_res = c0.subscribe(topics)
+        assert sc_res.status_code == requests.codes.ok
+
+        # Fetch from a consumer
+        self.logger.info(f"Consumer fetch")
+        cf_res = c0.fetch(headers=HTTP_CONSUMER_FETCH_JSON_V2_HEADERS)
+        assert cf_res.status_code == requests.codes.ok
+        fetch_result = cf_res.json()
+        # 3 topics * 3 msg
+        assert len(fetch_result) == 3 * 3
+        for r in fetch_result:
+            assert r["value"]["object"]
 
         # Remove consumer
         self.logger.info("Remove consumer")

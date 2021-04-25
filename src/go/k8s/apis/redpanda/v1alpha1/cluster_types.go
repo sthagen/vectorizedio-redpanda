@@ -23,6 +23,8 @@ type ClusterSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
+	// If specified, Redpanda Pod annotations
+	Annotations map[string]string `json:"annotations,omitempty"`
 	// Image is the fully qualified name of the Redpanda container
 	Image string `json:"image,omitempty"`
 	// Version is the Redpanda container tag
@@ -170,6 +172,8 @@ type RedpandaConfig struct {
 	DeveloperMode bool          `json:"developerMode,omitempty"`
 	// Number of partitions in the internal group membership topic
 	GroupTopicPartitions int `json:"groupTopicPartitions,omitempty"`
+	// Enable auto-creation of topics. Reference https://kafka.apache.org/documentation/#brokerconfigs_auto.create.topics.enable
+	AutoCreateTopics bool `json:"autoCreateTopics,omitempty"`
 }
 
 // AdminAPI is configuration of the redpanda Admin API

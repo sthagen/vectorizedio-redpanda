@@ -15,7 +15,6 @@ import {
   DisableCoprosReply,
   DisableCoprosRequest,
   EmptyRequest,
-  EmptyResponse,
   EnableCoprocessor,
   EnableCoprocessorRequestData,
   EnableCoprosReply,
@@ -24,12 +23,14 @@ import {
   ProcessBatchReplyItem,
   ProcessBatchRequest,
   ProcessBatchRequestItem,
+  StateSizeT,
 } from "../domain/generatedRpc/generatedClasses";
 import { SupervisorServer } from "./serverAndClients/rpcServer";
 import { Handle } from "../domain/Handle";
 import errors, { DisableResponseCode } from "./errors";
 import { Logger } from "winston";
 import Logging from "../utilities/Logging";
+import requireNative from "./require-native";
 
 export class ProcessBatchServer extends SupervisorServer {
   private readonly repository: Repository;
@@ -99,8 +100,8 @@ export class ProcessBatchServer extends SupervisorServer {
     return Promise.resolve({ responses });
   }
 
-  heartbeat(input: EmptyRequest): Promise<EmptyResponse> {
-    return Promise.resolve({ empty: 0 });
+  heartbeat(input: EmptyRequest): Promise<StateSizeT> {
+    return Promise.resolve({ size: BigInt(this.repository.size()) });
   }
 
   validateEnableCoprocInput(
@@ -158,12 +159,14 @@ export class ProcessBatchServer extends SupervisorServer {
      * We create a 'module' result where our function save the object that
      * coprocessor script exports.
      */
-    const module: ResultFunction = {};
+    const module: ResultFunction = {
+      exports: {},
+    };
     /**
      * pass our module object and nodeJs require function.
      */
     try {
-      loadScript(module, require);
+      loadScript(module, requireNative);
     } catch (e) {
       this.logger.error(`error on load wasm script: ${id}, ${e.message}`);
       return [undefined, errors.validateLoadScriptError(e, id, script)];

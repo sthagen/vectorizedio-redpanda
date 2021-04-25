@@ -47,8 +47,8 @@ auto get_consumer_offsets(
       fmt::format("/consumers/{}/instances/{}/offsets", g_id(), m_id()),
       std::move(body),
       boost::beast::http::verb::get,
-      ppj::serialization_format::json_v2,
-      ppj::serialization_format::json_v2);
+      ppj::serialization_format::v2,
+      ppj::serialization_format::v2);
     return res;
 };
 
@@ -80,8 +80,8 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           fmt::format("/consumers/{}", group_id()),
           std::move(req_body_buf),
           boost::beast::http::verb::post,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
 
@@ -99,7 +99,7 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
             member_id()));
         BOOST_REQUIRE_EQUAL(
           res.headers.at(boost::beast::http::field::content_type),
-          to_header_value(ppj::serialization_format::json_v2));
+          to_header_value(ppj::serialization_format::v2));
     }
     info("Member id: {}", member_id);
 
@@ -131,8 +131,8 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
             "/consumers/{}/instances/{}/subscription", group_id(), member_id()),
           std::move(req_body_buf),
           boost::beast::http::verb::post,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
     }
@@ -164,12 +164,12 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           std::move(body),
           boost::beast::http::verb::post,
           ppj::serialization_format::binary_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2);
 
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
-          res.body, R"({"offsets":[{"partition":0,"offset":1}]})");
+          res.body, R"({"offsets":[{"partition":0,"offset":0}]})");
     }
     {
         info("Consume from topic");
@@ -182,13 +182,13 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
             "1000",
             "1000000"),
           boost::beast::http::verb::get,
-          ppj::serialization_format::json_v2,
+          ppj::serialization_format::v2,
           ppj::serialization_format::binary_v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
           res.body,
-          R"([{"topic":"t","key":"AAD//w==","value":"","partition":0,"offset":0},{"topic":"t","key":"","value":"dmVjdG9yaXplZA==","partition":0,"offset":1},{"topic":"t","key":"","value":"cGFuZGFwcm94eQ==","partition":0,"offset":2},{"topic":"t","key":"","value":"bXVsdGlicm9rZXI=","partition":0,"offset":3}])");
+          R"([{"topic":"t","key":null,"value":"dmVjdG9yaXplZA==","partition":0,"offset":0},{"topic":"t","key":null,"value":"cGFuZGFwcm94eQ==","partition":0,"offset":1},{"topic":"t","key":null,"value":"bXVsdGlicm9rZXI=","partition":0,"offset":2}])");
     }
 
     {
@@ -220,8 +220,8 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
             "/consumers/{}/instances/{}/offsets", group_id(), member_id()),
           std::move(body),
           boost::beast::http::verb::post,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::no_content);
     }
@@ -243,20 +243,20 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           fmt::format(
             "/consumers/{}/instances/{}/offsets", group_id(), member_id()),
           boost::beast::http::verb::post,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::no_content);
     }
 
     {
-        info("Get consumer offsets (expect 3)");
+        info("Get consumer offsets (expect 2)");
         auto res = get_consumer_offsets(client, group_id, member_id);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
         BOOST_REQUIRE_EQUAL(
           res.body,
-          R"({"offsets":[{"topic":"t","partition":0,"offset":3,"metadata":""}]})");
+          R"({"offsets":[{"topic":"t","partition":0,"offset":2,"metadata":""}]})");
     }
 
     {
@@ -265,8 +265,8 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           client,
           fmt::format("/consumers/{}/instances/{}", group_id(), member_id()),
           boost::beast::http::verb::delete_,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::no_content);
     }
@@ -277,8 +277,8 @@ FIXTURE_TEST(pandaproxy_consumer_group, pandaproxy_test_fixture) {
           client,
           fmt::format("/consumers/{}/instances/{}", group_id(), member_id()),
           boost::beast::http::verb::delete_,
-          ppj::serialization_format::json_v2,
-          ppj::serialization_format::json_v2);
+          ppj::serialization_format::v2,
+          ppj::serialization_format::v2);
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::not_found);
     }

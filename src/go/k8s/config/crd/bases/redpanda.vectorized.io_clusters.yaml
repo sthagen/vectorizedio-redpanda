@@ -36,6 +36,11 @@ spec:
           spec:
             description: ClusterSpec defines the desired state of Cluster
             properties:
+              annotations:
+                additionalProperties:
+                  type: string
+                description: If specified, Redpanda Pod annotations
+                type: object
               cloudStorage:
                 description: Cloud storage configuration for cluster
                 properties:
@@ -152,6 +157,9 @@ spec:
                           type: object
                       type: object
                     type: array
+                  autoCreateTopics:
+                    description: Enable auto-creation of topics. Reference https://kafka.apache.org/documentation/#brokerconfigs_auto.create.topics.enable
+                    type: boolean
                   developerMode:
                     type: boolean
                   groupTopicPartitions:
