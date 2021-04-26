@@ -321,7 +321,8 @@ static storage::log_config manager_config_from_global_config() {
         .stable_window = config::shard_local_cfg().reclaim_stable_window(),
         .min_size = config::shard_local_cfg().reclaim_min_size(),
         .max_size = config::shard_local_cfg().reclaim_max_size(),
-      });
+      },
+      config::shard_local_cfg().readers_cache_eviction_timeout_ms());
 }
 
 // add additional services in here
@@ -660,7 +661,8 @@ void application::start_redpanda() {
             std::ref(controller->get_topics_frontend()),
             std::ref(controller->get_members_manager()),
             std::ref(metadata_cache),
-            std::ref(controller->get_security_frontend()));
+            std::ref(controller->get_security_frontend()),
+            std::ref(controller->get_api()));
           proto->register_service<cluster::metadata_dissemination_handler>(
             _scheduling_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
