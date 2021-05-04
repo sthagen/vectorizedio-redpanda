@@ -164,14 +164,14 @@ func (r *ConfigMapResource) createConfiguration(
 	}
 
 	cr.AdminApi[0].Port = clusterCRPortOrRPKDefault(r.pandaCluster.AdminAPIInternal().Port, cr.AdminApi[0].Port)
-	cr.AdminApi[0].Name = InternalListenerName
+	cr.AdminApi[0].Name = AdminPortName
 	if r.pandaCluster.AdminAPIExternal() != nil {
 		externalAdminAPI := config.NamedSocketAddress{
 			SocketAddress: config.SocketAddress{
 				Address: cr.AdminApi[0].Address,
 				Port:    cr.AdminApi[0].Port + 1,
 			},
-			Name: ExternalListenerName,
+			Name: AdminPortExternalName,
 		}
 		cr.AdminApi = append(cr.AdminApi, externalAdminAPI)
 	}
@@ -203,9 +203,9 @@ func (r *ConfigMapResource) createConfiguration(
 	}
 	adminAPITLSListener := r.pandaCluster.AdminAPITLS()
 	if adminAPITLSListener != nil {
-		name := InternalListenerName
+		name := AdminPortName
 		if adminAPITLSListener.External.Enabled {
-			name = ExternalListenerName
+			name = AdminPortExternalName
 		}
 		adminTLS := config.ServerTLS{
 			Name:              name,
@@ -268,6 +268,9 @@ func (r *ConfigMapResource) createConfiguration(
 		})
 	}
 
+	r.preparePandaproxy(cfgRpk)
+	r.preparePandaproxyClient(cfgRpk)
+
 	return cfgRpk, nil
 }
 
@@ -308,6 +311,48 @@ func (r *ConfigMapResource) prepareCloudStorage(
 	trustfile := r.pandaCluster.Spec.CloudStorage.Trustfile
 	if trustfile != "" {
 		cr.CloudStorageTrustFile = &trustfile
+	}
+}
+
+func (r *ConfigMapResource) preparePandaproxy(cfgRpk *config.Config) {
+	internal := r.pandaCluster.PandaproxyAPIInternal()
+	if internal == nil {
+		return
+	}
+
+	cfgRpk.Pandaproxy.PandaproxyAPI = []config.NamedSocketAddress{
+		{
+			SocketAddress: config.SocketAddress{
+				Address: "0.0.0.0",
+				Port:    internal.Port,
+			},
+			Name: PandaproxyPortInternalName,
+		}}
+
+	if r.pandaCluster.PandaproxyAPIExternal() != nil {
+		cfgRpk.Pandaproxy.PandaproxyAPI = append(cfgRpk.Pandaproxy.PandaproxyAPI,
+			config.NamedSocketAddress{
+				SocketAddress: config.SocketAddress{
+					Address: "0.0.0.0",
+					Port:    calculateExternalPort(internal.Port),
+				},
+				Name: PandaproxyPortExternalName,
+			})
+	}
+}
+
+func (r *ConfigMapResource) preparePandaproxyClient(cfgRpk *config.Config) {
+	if internal := r.pandaCluster.PandaproxyAPIInternal(); internal == nil {
+		return
+	}
+
+	replicas := *r.pandaCluster.Spec.Replicas
+	cfgRpk.PandaproxyClient = &config.PandaproxyClient{}
+	for i := int32(0); i < replicas; i++ {
+		cfgRpk.PandaproxyClient.Brokers = append(cfgRpk.PandaproxyClient.Brokers, config.SocketAddress{
+			Address: fmt.Sprintf("%s-%d.%s", r.pandaCluster.Name, i, r.serviceFQDN),
+			Port:    r.pandaCluster.InternalListener().Port,
+		})
 	}
 }
 

@@ -41,7 +41,8 @@ public:
         std::vector<unresolved_address> advertised_listeners;
         ss::semaphore mem_sem;
         ss::abort_source as;
-        kafka::client::client& client;
+        ss::smp_service_group smp_sg;
+        ss::sharded<kafka::client::client>& client;
         const configuration& config;
     };
 
@@ -61,9 +62,13 @@ public:
       = ss::noncopyable_function<ss::future<reply_t>(request_t, reply_t)>;
 
     struct route_t {
-        ss::sstring api;
         ss::path_description path_desc;
         function_handler handler;
+    };
+
+    struct routes_t {
+        ss::sstring api;
+        std::vector<route_t> routes;
     };
 
     server() = delete;
@@ -79,7 +84,7 @@ public:
       pandaproxy::context_t ctx);
 
     void route(route_t route);
-    void route(std::vector<route_t>&& routes);
+    void routes(routes_t&& routes);
 
     ss::future<> start();
     ss::future<> stop();

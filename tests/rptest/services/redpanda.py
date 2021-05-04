@@ -71,7 +71,6 @@ class RedpandaService(Service):
         self._enable_pp = enable_pp
         self._log_level = log_level
         self._topics = topics or ()
-        self.v_build_dir = self._context.globals.get("v_build_dir", None)
         self._admin = Admin(self)
 
     def sasl_enabled(self):
@@ -334,6 +333,9 @@ class RedpandaService(Service):
         brokers = ",".join(
             map(lambda n: self.broker_address(n), self.nodes[:limit]))
         return brokers
+
+    def brokers_list(self, limit=None):
+        return [self.broker_address(n) for n in self.nodes[:limit]]
 
     def metrics(self, node):
         assert node in self.nodes

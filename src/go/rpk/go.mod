@@ -21,6 +21,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.0
 	github.com/icza/dyno v0.0.0-20200205103839-49cb13720835
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/lestrrat-go/jwx v1.1.7
 	github.com/lorenzosaino/go-sysctl v0.1.0
 	github.com/lovoo/goka v1.0.6 // indirect
 	github.com/magiconair/properties v1.8.1 // indirect
@@ -51,4 +52,4 @@ require (
 	mvdan.cc/sh/v3 v3.2.1
 )
 
-go 1.13
+go 1.16

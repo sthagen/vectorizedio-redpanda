@@ -121,17 +121,6 @@ func (r *StatefulSetResource) Ensure(ctx context.Context) error {
 			return fmt.Errorf("failed to retrieve node port service %s: %w", r.nodePortName, err)
 		}
 
-		// TODO(av) clean this up and unify with the same code in cluster_controller status handling
-		externalKafkaListener := r.pandaCluster.ExternalListener()
-		externalAdminListener := r.pandaCluster.AdminAPIExternal()
-		expectedPortLength := 2
-		if externalAdminListener == nil || externalKafkaListener == nil {
-			expectedPortLength = 1
-		}
-		if len(r.nodePortSvc.Spec.Ports) != expectedPortLength {
-			return fmt.Errorf("node port service %s: %w", r.nodePortName, errNodePortMissing)
-		}
-
 		for _, port := range r.nodePortSvc.Spec.Ports {
 			if port.NodePort == 0 {
 				return fmt.Errorf("node port service %s, port %s is 0: %w", r.nodePortName, port.Name, errNodePortMissing)
@@ -300,7 +289,7 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 							Name:            configuratorContainerName,
 							Image:           r.fullConfiguratorImage(),
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Env: []corev1.EnvVar{
+							Env: append([]corev1.EnvVar{
 								{
 									Name:  "SERVICE_FQDN",
 									Value: r.serviceFQDN,
@@ -336,9 +325,9 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								},
 								{
 									Name:  "HOST_PORT",
-									Value: r.getNodePort(),
+									Value: r.getNodePort(ExternalListenerName),
 								},
-							},
+							}, r.pandaproxyEnvVars()...),
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser:  pointer.Int64Ptr(userID),
 								RunAsGroup: pointer.Int64Ptr(groupID),
@@ -491,6 +480,18 @@ func overprovisioned(developerMode bool, limits corev1.ResourceList) []string {
 	}
 }
 
+func (r *StatefulSetResource) pandaproxyEnvVars() []corev1.EnvVar {
+	var envs []corev1.EnvVar
+	listener := r.pandaCluster.PandaproxyAPIExternal()
+	if listener != nil {
+		envs = append(envs, corev1.EnvVar{
+			Name:  "PROXY_HOST_PORT",
+			Value: r.getNodePort(PandaproxyPortExternalName),
+		})
+	}
+	return envs
+}
+
 func (r *StatefulSetResource) secretVolumeMounts() []corev1.VolumeMount {
 	var mounts []corev1.VolumeMount
 	tlsListener := r.pandaCluster.KafkaTLSListener()
@@ -588,12 +589,10 @@ func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 	return vols
 }
 
-func (r *StatefulSetResource) getNodePort() string {
-	if r.pandaCluster.ExternalListener() != nil {
-		for _, port := range r.nodePortSvc.Spec.Ports {
-			if port.Name == ExternalListenerName {
-				return strconv.FormatInt(int64(port.NodePort), 10)
-			}
+func (r *StatefulSetResource) getNodePort(name string) string {
+	for _, port := range r.nodePortSvc.Spec.Ports {
+		if port.Name == name {
+			return strconv.FormatInt(int64(port.NodePort), 10)
 		}
 	}
 	return ""
@@ -622,19 +621,24 @@ func (r *StatefulSetResource) portsConfiguration() string {
 }
 
 func (r *StatefulSetResource) getPorts() []corev1.ContainerPort {
+	ports := []corev1.ContainerPort{{
+		Name:          AdminPortName,
+		ContainerPort: int32(r.pandaCluster.AdminAPIInternal().Port),
+	}}
+	internalListener := r.pandaCluster.InternalListener()
+	ports = append(ports, corev1.ContainerPort{
+		Name:          InternalListenerName,
+		ContainerPort: int32(internalListener.Port),
+	})
+	if internalProxy := r.pandaCluster.PandaproxyAPIInternal(); internalProxy != nil {
+		ports = append(ports, corev1.ContainerPort{
+			Name:          PandaproxyPortInternalName,
+			ContainerPort: int32(internalProxy.Port),
+		})
+	}
+
 	if r.pandaCluster.ExternalListener() != nil &&
 		len(r.nodePortSvc.Spec.Ports) > 0 {
-		ports := []corev1.ContainerPort{
-			{
-				Name:          "admin-internal",
-				ContainerPort: int32(r.pandaCluster.AdminAPIInternal().Port),
-			},
-		}
-		internalListener := r.pandaCluster.InternalListener()
-		ports = append(ports, corev1.ContainerPort{
-			Name:          InternalListenerName,
-			ContainerPort: int32(internalListener.Port),
-		})
 		for _, port := range r.nodePortSvc.Spec.Ports {
 			ports = append(ports, corev1.ContainerPort{
 				Name: port.Name,
@@ -652,15 +656,6 @@ func (r *StatefulSetResource) getPorts() []corev1.ContainerPort {
 		return ports
 	}
 
-	ports := []corev1.ContainerPort{{
-		Name:          "admin",
-		ContainerPort: int32(r.pandaCluster.AdminAPIInternal().Port),
-	}}
-	internalListener := r.pandaCluster.InternalListener()
-	ports = append(ports, corev1.ContainerPort{
-		Name:          InternalListenerName,
-		ContainerPort: int32(internalListener.Port),
-	})
 	return ports
 }
 
