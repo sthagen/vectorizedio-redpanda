@@ -35,6 +35,9 @@ public:
           = 0;
         virtual ss::future<std::optional<storage::timequery_result>>
           timequery(model::timestamp, ss::io_priority_class) = 0;
+        virtual ss::future<std::vector<cluster::rm_stm::tx_range>>
+          aborted_transactions(model::offset, model::offset) = 0;
+        virtual cluster::partition_probe& probe() = 0;
         virtual ~impl() noexcept = default;
     };
 
@@ -51,6 +54,11 @@ public:
 
     const model::ntp& ntp() const { return _impl->ntp(); }
 
+    ss::future<std::vector<cluster::rm_stm::tx_range>>
+    aborted_transactions(model::offset base, model::offset last) {
+        return _impl->aborted_transactions(base, last);
+    }
+
     ss::future<model::record_batch_reader> make_reader(
       storage::log_reader_config cfg,
       std::optional<model::timeout_clock::time_point> deadline = std::nullopt) {
@@ -62,6 +70,8 @@ public:
         return _impl->timequery(ts, io_pc);
     }
 
+    cluster::partition_probe& probe() { return _impl->probe(); }
+
 private:
     std::unique_ptr<impl> _impl;
 };
@@ -70,5 +80,10 @@ template<typename Impl, typename... Args>
 partition_proxy make_partition_proxy(Args&&... args) {
     return partition_proxy(std::make_unique<Impl>(std::forward<Args>(args)...));
 }
+
+std::optional<partition_proxy> make_partition_proxy(
+  const model::materialized_ntp&,
+  ss::lw_shared_ptr<cluster::partition>,
+  cluster::partition_manager&);
 
 } // namespace kafka

@@ -192,6 +192,8 @@ configuration::configuration()
       "Target quota byte rate (bytes per second) - 2GB default",
       required::no,
       2_GiB)
+  , cluster_id(
+      *this, "cluster_id", "Cluster identifier", required::no, std::nullopt)
   , rack(*this, "rack", "Rack identifier", required::no, std::nullopt)
   , dashboard_dir(
       *this,
@@ -246,14 +248,14 @@ configuration::configuration()
       "metadata_dissemination_retry_delay_ms",
       "Delay before retry a topic lookup in a shard or other meta tables",
       required::no,
-      0'100ms)
+      0'500ms)
   , metadata_dissemination_retries(
       *this,
       "metadata_dissemination_retries",
       "Number of attempts of looking up a topic's meta data like shard before "
       "failing a request",
       required::no,
-      10)
+      30)
   , stm_snapshot_recovery_policy(
       *this,
       "stm_snapshot_recovery_policy",
@@ -280,6 +282,12 @@ configuration::configuration()
       "Time to wait state catch up before rejecting a request",
       required::no,
       2000ms)
+  , tx_timeout_delay_ms(
+      *this,
+      "tx_timeout_delay_ms",
+      "Delay before scheduling next check for timed out transactions",
+      required::no,
+      1000ms)
   , rm_violation_recovery_policy(
       *this,
       "rm_violation_recovery_policy",
@@ -319,6 +327,12 @@ configuration::configuration()
       "Default topic compression type",
       required::no,
       model::compression::producer)
+  , fetch_max_bytes(
+      *this,
+      "fetch_max_bytes",
+      "Maximum number of bytes returned in fetch request",
+      required::no,
+      55_MiB)
   , transactional_id_expiration_ms(
       *this,
       "transactional_id_expiration_ms",
@@ -345,7 +359,7 @@ configuration::configuration()
       "log_compaction_interval_ms",
       "How often do we trigger background compaction",
       required::no,
-      5min)
+      10s)
   , retention_bytes(
       *this,
       "retention_bytes",
@@ -364,6 +378,24 @@ configuration::configuration()
       "Default replication factor for new topics",
       required::no,
       1)
+  , transaction_coordinator_replication(
+      *this,
+      "transaction_coordinator_replication",
+      "Replication factor for a transaction coordinator topic",
+      required::no,
+      1)
+  , id_allocator_replication(
+      *this,
+      "id_allocator_replication",
+      "Replication factor for an id allocator topic",
+      required::no,
+      1)
+  , transaction_coordinator_cleanup_policy(
+      *this,
+      "transaction_coordinator_cleanup_policy",
+      "Cleanup policy for a transaction coordinator topic",
+      required::no,
+      model::cleanup_policy_bitflags::compaction)
   , create_topic_timeout_ms(
       *this,
       "create_topic_timeout_ms",
@@ -547,6 +579,53 @@ configuration::configuration()
       "Interval between iterations of controller backend housekeeping loop",
       required::no,
       1s)
+  , node_management_operation_timeout_ms(
+      *this,
+      "node_management_operation_timeout_ms",
+      "Timeout for executing node management operations",
+      required::no,
+      5s)
+  , compaction_ctrl_update_interval_ms(
+      *this, "compaction_ctrl_update_interval_ms", "", required::no, 30s)
+  , compaction_ctrl_p_coeff(
+      *this,
+      "compaction_ctrl_p_coeff",
+      "proportional coefficient for compaction PID controller. This has to be "
+      "negative since compaction backlog should decrease when number of "
+      "compaction shares increases",
+      required::no,
+      -12.5)
+  , compaction_ctrl_i_coeff(
+      *this,
+      "compaction_ctrl_i_coeff",
+      "integral coefficient for compaction PID controller.",
+      required::no,
+      0.0)
+  , compaction_ctrl_d_coeff(
+      *this,
+      "compaction_ctrl_d_coeff",
+      "derivative coefficient for compaction PID controller.",
+      required::no,
+      0.2)
+  , compaction_ctrl_min_shares(
+      *this,
+      "compaction_ctrl_min_shares",
+      "minimum number of IO and CPU shares that compaction process can use",
+      required::no,
+      10)
+  , compaction_ctrl_max_shares(
+      *this,
+      "compaction_ctrl_max_shares",
+      "maximum number of IO and CPU shares that compaction process can use",
+      required::no,
+      1000)
+  , compaction_ctrl_backlog_size(
+      *this,
+      "compaction_ctrl_backlog_size",
+      "target backlog size for compaction controller. if not set compaction "
+      "target compaction backlog would be equal to ",
+      required::no,
+      std::nullopt)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",

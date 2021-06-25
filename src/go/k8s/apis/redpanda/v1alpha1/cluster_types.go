@@ -51,6 +51,24 @@ type ClusterSpec struct {
 	Superusers []Superuser `json:"superUsers,omitempty"`
 	// SASL enablement flag
 	EnableSASL bool `json:"enableSasl,omitempty"`
+	// For configuration parameters not exposed, a map can be provided for string values.
+	// Such values are passed transparently to Redpanda. The key format is "<subsystem>.field", e.g.,
+	//
+	// additionalConfiguration:
+	//   redpanda.enable_idempotence: "true"
+	//   redpanda.default_topic_partitions: "3"
+	//   pandaproxy_client.produce_batch_size_bytes: "2097152"
+	//
+	// Notes:
+	// 1. versioning is not supported for map keys
+	// 2. key names not supported by Redpanda will lead to failure on start up
+	// 3. updating this map requires a manual restart of the Redpanda pods
+	// 4. cannot have keys that conflict with existing struct fields - it leads to panic
+	AdditionalConfiguration map[string]string `json:"additionalConfiguration,omitempty"`
+	// DNSTrailingDotDisabled gives ability to turn off the fully-qualified
+	// DNS name.
+	// http://www.dns-sd.org/trailingdotsindomainnames.html
+	DNSTrailingDotDisabled bool `json:"dnsTrailingDotDisabled,omitempty"`
 }
 
 // Superuser has full access to the Redpanda cluster
@@ -142,6 +160,7 @@ type NodesList struct {
 	External           []string `json:"external,omitempty"`
 	ExternalAdmin      []string `json:"externalAdmin,omitempty"`
 	ExternalPandaproxy []string `json:"externalPandaproxy,omitempty"`
+	PandaproxyIngress  *string  `json:"pandaproxyIngress,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -207,6 +226,8 @@ type PandaproxyAPI struct {
 	// nodes outside of a Kubernetes cluster. For more
 	// information please go to ExternalConnectivityConfig
 	External ExternalConnectivityConfig `json:"external,omitempty"`
+	// Configuration of TLS for Pandaproxy API
+	TLS PandaproxyAPITLS `json:"tls,omitempty"`
 }
 
 // KafkaAPITLS configures TLS for redpanda Kafka API
@@ -231,6 +252,10 @@ type PandaproxyAPI struct {
 // retrieved from the Secret named '<redpanda-cluster-name>-user-client'.
 //
 // All TLS secrets are stored in the same namespace as the Redpanda cluster.
+//
+// Additionally all mentioned certificates beside PEM version will have JKS
+// and PKCS#12 certificate. Both stores are protected with the password that
+// is the same as the name of the Cluster custom resource.
 type KafkaAPITLS struct {
 	Enabled bool `json:"enabled,omitempty"`
 	// References cert-manager Issuer or ClusterIssuer. When provided, this
@@ -264,7 +289,33 @@ type KafkaAPITLS struct {
 // the Secret named '<redpanda-cluster-name>-admin-api-client'.
 //
 // All TLS secrets are stored in the same namespace as the Redpanda cluster.
+//
+// Additionally all mentioned certificates beside PEM version will have JKS
+// and PKCS#12 certificate. Both stores are protected with the password that
+// is the same as the name of the Cluster custom resource.
 type AdminAPITLS struct {
+	Enabled           bool `json:"enabled,omitempty"`
+	RequireClientAuth bool `json:"requireClientAuth,omitempty"`
+}
+
+// PandaproxyAPITLS configures the TLS of the Pandaproxy API
+//
+// If Enabled is set to true, one-way TLS verification is enabled.
+// In that case, a key pair ('tls.crt', 'tls.key') and CA certificate 'ca.crt'
+// are generated and stored in a Secret named '<redpanda-cluster-name>-proxy-api-node'
+// and namespace as the Redpanda cluster. 'ca.crt' must be used by a client as a
+// truststore when communicating with Redpanda.
+//
+// If RequireClientAuth is set to true, two-way TLS verification is enabled.
+// In that case, a client certificate is generated, which can be retrieved from
+// the Secret named '<redpanda-cluster-name>-proxy-api-client'.
+//
+// All TLS secrets are stored in the same namespace as the Redpanda cluster.
+//
+// Additionally all mentioned certificates beside PEM version will have JKS
+// and PKCS#12 certificate. Both stores are protected with the password that
+// is the same as the name of the Cluster custom resource.
+type PandaproxyAPITLS struct {
 	Enabled           bool `json:"enabled,omitempty"`
 	RequireClientAuth bool `json:"requireClientAuth,omitempty"`
 }
@@ -273,6 +324,11 @@ type AdminAPITLS struct {
 type SocketAddress struct {
 	Port int `json:"port,omitempty"`
 }
+
+const (
+	// MinimumMemoryPerCore the minimum amount of memory needed per core
+	MinimumMemoryPerCore = 2 * gb
+)
 
 func init() {
 	SchemeBuilder.Register(&Cluster{}, &ClusterList{})
@@ -363,6 +419,17 @@ func (r *Cluster) PandaproxyAPIExternal() *PandaproxyAPI {
 	for _, el := range r.Spec.Configuration.PandaproxyAPI {
 		if el.External.Enabled {
 			return &el
+		}
+	}
+	return nil
+}
+
+// PandaproxyAPITLS returns a Pandaproxy listener that has TLS enabled.
+// It returns nil if no TLS is configured.
+func (r *Cluster) PandaproxyAPITLS() *PandaproxyAPI {
+	for i, el := range r.Spec.Configuration.PandaproxyAPI {
+		if el.TLS.Enabled {
+			return &r.Spec.Configuration.PandaproxyAPI[i]
 		}
 	}
 	return nil

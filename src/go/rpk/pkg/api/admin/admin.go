@@ -25,8 +25,6 @@ import (
 	"github.com/Shopify/sarama"
 	"github.com/hashicorp/go-multierror"
 	log "github.com/sirupsen/logrus"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
-	vtls "github.com/vectorizedio/redpanda/src/go/rpk/pkg/tls"
 )
 
 const (
@@ -52,37 +50,25 @@ type newUser struct {
 	Algorithm string `json:"algorithm"`
 }
 
-func NewAdminAPI(urls []string, tlsConf *config.TLS) (AdminAPI, error) {
-	var err error
-
+func NewAdminAPI(urls []string, tlsConfig *tls.Config) (AdminAPI, error) {
+	adminUrls := make([]string, len(urls))
 	for i := 0; i < len(urls); i++ {
+		prefix := ""
 		url := urls[i]
 		// Go's http library requires that the URL have a protocol.
 		if !(strings.HasPrefix(url, httpPrefix) ||
 			strings.HasPrefix(url, httpsPrefix)) {
 
-			prefix := httpPrefix
+			prefix = httpPrefix
 
-			if tlsConf != nil {
+			if tlsConfig != nil {
 				// If TLS will be enabled, use HTTPS as the protocol
 				prefix = httpsPrefix
 			}
 
 			url = strings.TrimRight(url, "/")
-			urls[i] = fmt.Sprintf("%s%s", prefix, url)
 		}
-	}
-
-	var tlsConfig *tls.Config
-	if tlsConf != nil {
-		tlsConfig, err = vtls.BuildTLSConfig(
-			tlsConf.CertFile,
-			tlsConf.KeyFile,
-			tlsConf.TruststoreFile,
-		)
-		if err != nil {
-			return nil, err
-		}
+		adminUrls[i] = fmt.Sprintf("%s%s", prefix, url)
 	}
 
 	tr := &http.Transport{
@@ -90,7 +76,7 @@ func NewAdminAPI(urls []string, tlsConf *config.TLS) (AdminAPI, error) {
 	}
 
 	client := &http.Client{Transport: tr}
-	return &adminAPI{urls: urls, client: client}, nil
+	return &adminAPI{urls: adminUrls, client: client}, nil
 }
 
 func (a *adminAPI) CreateUser(username, password string) error {
@@ -105,10 +91,11 @@ func (a *adminAPI) CreateUser(username, password string) error {
 		Password:  password,
 		Algorithm: sarama.SASLTypeSCRAMSHA256,
 	}
+	urls := make([]string, len(a.urls))
 	for i := 0; i < len(a.urls); i++ {
-		a.urls[i] = fmt.Sprintf("%s%s", a.urls[i], usersEndpoint)
+		urls[i] = fmt.Sprintf("%s%s", a.urls[i], usersEndpoint)
 	}
-	_, err := sendToMultiple(a.urls, http.MethodPost, u, a.client)
+	_, err := sendToMultiple(urls, http.MethodPost, u, a.client)
 	return err
 }
 
@@ -117,18 +104,20 @@ func (a *adminAPI) DeleteUser(username string) error {
 		return errors.New("empty username")
 	}
 
+	urls := make([]string, len(a.urls))
 	for i := 0; i < len(a.urls); i++ {
-		a.urls[i] = fmt.Sprintf("%s%s/%s", a.urls[i], usersEndpoint, username)
+		urls[i] = fmt.Sprintf("%s%s/%s", a.urls[i], usersEndpoint, username)
 	}
-	_, err := sendToMultiple(a.urls, http.MethodDelete, nil, a.client)
+	_, err := sendToMultiple(urls, http.MethodDelete, nil, a.client)
 	return err
 }
 
 func (a *adminAPI) ListUsers() ([]string, error) {
+	urls := make([]string, len(a.urls))
 	for i := 0; i < len(a.urls); i++ {
-		a.urls[i] = fmt.Sprintf("%s%s", a.urls[i], usersEndpoint)
+		urls[i] = fmt.Sprintf("%s%s", a.urls[i], usersEndpoint)
 	}
-	res, err := sendToMultiple(a.urls, http.MethodGet, nil, a.client)
+	res, err := sendToMultiple(urls, http.MethodGet, nil, a.client)
 	if err != nil {
 		return nil, err
 	}

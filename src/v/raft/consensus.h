@@ -56,7 +56,7 @@ public:
         model::term_id term{0};
 
         uint32_t crc() const {
-            crc32 c;
+            crc::crc32c c;
             c.extend(voted_for());
             c.extend(term());
             return c.value();
@@ -68,7 +68,7 @@ public:
         model::term_id term{0};
 
         uint32_t crc() const {
-            crc32 c;
+            crc::crc32c c;
             c.extend(voted_for.id()());
             c.extend(voted_for.revision()());
             c.extend(term());
@@ -172,6 +172,8 @@ public:
 
     ss::future<result<replicate_result>>
     replicate(model::record_batch_reader&&, replicate_options);
+    replicate_stages
+    replicate_in_stages(model::record_batch_reader&&, replicate_options);
 
     /**
      * Replication happens only when expected_term matches the current _term
@@ -198,14 +200,14 @@ public:
      */
     ss::future<result<replicate_result>>
     replicate(model::term_id, model::record_batch_reader&&, replicate_options);
-
+    replicate_stages replicate_in_stages(
+      model::term_id, model::record_batch_reader&&, replicate_options);
     ss::future<model::record_batch_reader> make_reader(
       storage::log_reader_config,
       std::optional<clock_type::time_point> = std::nullopt);
 
     model::offset get_latest_configuration_offset() const;
     model::offset committed_offset() const { return _commit_index; }
-    model::offset last_stable_offset() const;
 
     /**
      * Last visible index is an offset that is safe to be fetched by the
@@ -339,10 +341,15 @@ private:
     append_entries_reply
       make_append_entries_reply(vnode, storage::append_result);
 
-    ss::future<result<replicate_result>> do_replicate(
+    replicate_stages do_replicate(
       std::optional<model::term_id>,
       model::record_batch_reader&&,
       replicate_options);
+    ss::future<result<replicate_result>> do_append_replicate_relaxed(
+      std::optional<model::term_id>,
+      model::record_batch_reader,
+      consistency_level,
+      ss::semaphore_units<>);
 
     ss::future<storage::append_result>
     disk_append(model::record_batch_reader&&, update_last_quorum_index);
@@ -400,7 +407,10 @@ private:
 
     void setup_metrics();
 
-    bytes voted_for_key() const;
+    bytes voted_for_key() const {
+        return raft::details::serialize_group_key(
+          _group, metadata_key::voted_for);
+    }
     void read_voted_for();
     ss::future<> write_voted_for(consensus::voted_for_configuration);
     model::term_id get_last_entry_term(const storage::offset_stats&) const;
@@ -414,7 +424,10 @@ private:
     ss::future<model::record_batch_reader>
       do_make_reader(storage::log_reader_config);
 
-    bytes last_applied_key() const;
+    bytes last_applied_key() const {
+        return raft::details::serialize_group_key(
+          _group, metadata_key::last_applied_offset);
+    }
 
     void maybe_update_last_visible_index(model::offset);
     void maybe_update_majority_replicated_index();

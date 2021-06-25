@@ -56,7 +56,8 @@ disk_log_impl::disk_log_impl(
   , _kvstore(kvstore)
   , _start_offset(read_start_offset())
   , _lock_mngr(_segs)
-  , _max_segment_size(internal::jitter_segment_size(max_segment_size()))
+  , _max_segment_size(internal::jitter_segment_size(
+      std::min(max_segment_size(), segment_size_hard_limit)))
   , _readers_cache(std::make_unique<readers_cache>(
       config().ntp(), _manager.config().readers_cache_eviction_timeout)) {
     const bool is_compacted = config().is_compacted();
@@ -262,31 +263,47 @@ ss::future<> disk_log_impl::garbage_collect_oldest_segments(
 }
 
 ss::future<> disk_log_impl::do_compact(compaction_config cfg) {
-    /*
-     * single segment compaction
-     */
+    // find first not compacted segment
     auto segit = std::find_if(
       _segs.begin(), _segs.end(), [](ss::lw_shared_ptr<segment>& s) {
           return !s->has_appender() && s->is_compacted_segment()
                  && !s->finished_self_compaction();
       });
-    if (segit != _segs.end()) {
+    // loop until we compact segment or reached end of segments set
+    for (; segit != _segs.end(); ++segit) {
         auto seg = *segit;
-        auto f = _stm_manager->ensure_snapshot_exists(
+        if (
+          seg->has_appender() || seg->finished_self_compaction()
+          || !seg->is_compacted_segment()) {
+            continue;
+        }
+
+        co_await _stm_manager->ensure_snapshot_exists(
           seg->offsets().committed_offset);
 
-        return f.then([this, seg, cfg]() {
-            return storage::internal::self_compact_segment(
-                     seg, cfg, _probe, *_readers_cache)
-              .finally([seg] { seg->mark_as_finished_self_compaction(); });
-        });
+        auto result = co_await storage::internal::self_compact_segment(
+          seg, cfg, _probe, *_readers_cache);
+        vlog(
+          stlog.debug,
+          "segment {} compaction result: {}",
+          seg->reader().filename(),
+          result);
+        _compaction_ratio.update(result.compaction_ratio());
+        // if we compacted segment return, otherwise loop
+        if (result.did_compact()) {
+            co_return;
+        }
     }
 
     if (auto range = find_compaction_range(); range) {
-        return compact_adjacent_segments(std::move(*range), cfg);
+        auto r = co_await compact_adjacent_segments(std::move(*range), cfg);
+        vlog(
+          stlog.debug,
+          "adjejcent segments of {}, compaction result: {}",
+          config().ntp(),
+          r);
+        _compaction_ratio.update(r.compaction_ratio());
     }
-
-    return ss::now();
 }
 
 std::optional<std::pair<segment_set::iterator, segment_set::iterator>>
@@ -358,7 +375,7 @@ disk_log_impl::find_compaction_range() {
     return range;
 }
 
-ss::future<> disk_log_impl::compact_adjacent_segments(
+ss::future<compaction_result> disk_log_impl::compact_adjacent_segments(
   std::pair<segment_set::iterator, segment_set::iterator> range,
   storage::compaction_config cfg) {
     // lightweight copy of segments in range. once a scheduling event occurs in
@@ -392,7 +409,7 @@ ss::future<> disk_log_impl::compact_adjacent_segments(
     // size is already contained in the partition size probe
     replacement->mark_as_compacted_segment();
     _probe.add_initial_segment(*replacement.get());
-    co_await storage::internal::self_compact_segment(
+    auto ret = co_await storage::internal::self_compact_segment(
       replacement, cfg, _probe, *_readers_cache);
     _probe.delete_segment(*replacement.get());
     vlog(stlog.debug, "Final compacted segment {}", replacement);
@@ -426,7 +443,6 @@ ss::future<> disk_log_impl::compact_adjacent_segments(
               "Aborting compaction of closed segment: {}", *segment));
         }
     }
-
     // transfer segment state from replacement to target
     locks = co_await internal::transfer_segment(
       target, replacement, cfg, _probe, std::move(locks));
@@ -446,6 +462,8 @@ ss::future<> disk_log_impl::compact_adjacent_segments(
         co_await remove_segment_permanently(
           segments.back(), "compact_adjacent_segments");
     }
+
+    co_return ret;
 }
 compaction_config
 disk_log_impl::apply_overrides(compaction_config defaults) const {
@@ -495,7 +513,8 @@ ss::future<> disk_log_impl::compact(compaction_config cfg) {
     if (config().is_compacted() && !_segs.empty()) {
         f = f.then([this, cfg] { return do_compact(cfg); });
     }
-    return f;
+    return f.then(
+      [this] { _probe.set_compaction_ration(_compaction_ratio.get()); });
 }
 
 ss::future<> disk_log_impl::gc(compaction_config cfg) {
@@ -1085,6 +1104,117 @@ disk_log_impl::update_configuration(ntp_config::default_overrides o) {
     }
 
     return ss::now();
+}
+/**
+ * We express compaction backlog as the size of a data that have to be read to
+ * perform full compaction.
+ *
+ * According to this assumption compaction backlog consist of two components
+ *
+ * 1) size of not yet self compacted segments
+ * 2) size of all possible adjacent segments compactions
+ *
+ * Component 1. of a compaction backlog is simply a sum of sizes of all not self
+ * compacted segments.
+ *
+ * Calculation of 2nd part of compaction backlog is based on the observation
+ * that adjacent segment compactions can be presented as a tree
+ * (each leaf represents a log segment)
+ *                              ┌────┐
+ *                        ┌────►│ s5 │◄┐
+ *                        │     └────┘ │
+ *                        │            │
+ *                        │            │
+ *                        │            │
+ *                      ┌─┴──┐         │
+ *                    ┌►│ s4 │◄┐       │
+ *                    │ └────┘ │       │
+ *                    │        │       │
+ *                    │        │       │
+ *                    │        │       │
+ *                    │        │       │
+ *                  ┌─┴──┐  ┌──┴─┐  ┌──┴─┐
+ *                  │ s1 │  │ s2 │  │ s3 │
+ *                  └────┘  └────┘  └────┘
+ *
+ * To create segment from upper tree level two self compacted adjacent segments
+ * from level below are concatenated and then resulting segment is self
+ * compacted.
+ *
+ * In presented example size of s4:
+ *
+ *          sizeof(s4) = sizeof(s1) + sizeof(s2)
+ *
+ * Estimation of an s4 size after it will be self compacted is based on the
+ * average compaction factor - `cf`. After self compaction size of
+ * s4 will be estimated as
+ *
+ *         sizeof(s4) = cf * s4
+ *
+ * This allows calculating next compaction step which would be:
+ *
+ *         sizeof(s5) = cf * sizeof(s4) + s3 = cf * (sizeof(s1) + sizeof(s2))
+ *
+ * In order to calculate the backlog we have to sum both terms.
+ *
+ * Continuing those operation for upper tree levels we can obtain an equation
+ * describing adjacent segments compaction backlog:
+ *
+ * cnt - segments count
+ *
+ *  backlog = sum(n=1,cnt) [sum(k=0, cnt - n + 1)][cf^k * sizeof(sn)] -
+ *  cf^(cnt-1) * s1
+ */
+int64_t disk_log_impl::compaction_backlog() const {
+    if (!config().is_compacted() || _segs.empty()) {
+        return 0;
+    }
+
+    std::vector<std::vector<ss::lw_shared_ptr<segment>>> segments_per_term;
+    auto current_term = _segs.front()->offsets().term;
+    segments_per_term.emplace_back();
+    auto idx = 0;
+    int64_t backlog = 0;
+    for (auto& s : _segs) {
+        if (!s->finished_self_compaction()) {
+            backlog += static_cast<int64_t>(s->size_bytes());
+        }
+        // if has appender do not include into adjacent segments calculation
+        if (s->has_appender()) {
+            continue;
+        }
+
+        if (current_term != s->offsets().term) {
+            ++idx;
+            segments_per_term.emplace_back();
+        }
+        segments_per_term[idx].push_back(s);
+    }
+    auto cf = _compaction_ratio.get();
+
+    for (const auto& segs : segments_per_term) {
+        auto segment_count = segs.size();
+        if (segment_count == 1) {
+            continue;
+        }
+        for (size_t n = 1; n <= segment_count; ++n) {
+            auto& s = segs[n - 1];
+            auto sz = s->finished_self_compaction() ? s->size_bytes()
+                                                    : s->size_bytes() * cf;
+            for (size_t k = 0; k <= segment_count - n; ++k) {
+                if (k == segment_count - 1) {
+                    continue;
+                }
+                if (k == 0) {
+                    backlog += static_cast<int64_t>(sz);
+                } else {
+                    backlog += static_cast<int64_t>(std::pow(cf, k) * sz);
+                }
+            }
+        }
+    }
+
+    return backlog;
 }
 
 std::ostream& disk_log_impl::print(std::ostream& o) const {

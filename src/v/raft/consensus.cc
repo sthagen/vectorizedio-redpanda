@@ -30,6 +30,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 
 #include <fmt/ostream.h>
 
@@ -519,32 +520,63 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
 
 ss::future<result<replicate_result>>
 consensus::replicate(model::record_batch_reader&& rdr, replicate_options opts) {
-    return do_replicate({}, std::move(rdr), opts);
+    auto r = do_replicate({}, std::move(rdr), opts);
+    return r.request_enqueued.then(
+      [f = std::move(r.replicate_finished)]() mutable { return std::move(f); });
 }
 
 ss::future<result<replicate_result>> consensus::replicate(
   model::term_id expected_term,
   model::record_batch_reader&& rdr,
   replicate_options opts) {
+    auto r = do_replicate(expected_term, std::move(rdr), opts);
+    return r.request_enqueued.then(
+      [f = std::move(r.replicate_finished)]() mutable { return std::move(f); });
+}
+
+replicate_stages consensus::replicate_in_stages(
+  model::record_batch_reader&& rdr, replicate_options opts) {
+    return do_replicate({}, std::move(rdr), opts);
+}
+
+replicate_stages consensus::replicate_in_stages(
+  model::term_id expected_term,
+  model::record_batch_reader&& rdr,
+  replicate_options opts) {
     return do_replicate(expected_term, std::move(rdr), opts);
 }
 
-ss::future<result<replicate_result>> consensus::do_replicate(
+replicate_stages
+wrap_stages_with_gate(ss::gate& gate, replicate_stages stages) {
+    return replicate_stages(
+      ss::with_gate(
+        gate,
+        [f = std::move(stages.request_enqueued)]() mutable {
+            return std::move(f);
+        }),
+      ss::with_gate(gate, [f = std::move(stages.replicate_finished)]() mutable {
+          return std::move(f);
+      }));
+}
+replicate_stages consensus::do_replicate(
   std::optional<model::term_id> expected_term,
   model::record_batch_reader&& rdr,
   replicate_options opts) {
+    // if gate is closed return fast, after this check we are certain that
+    // `ss::with_gate` will succeed
+    if (unlikely(_bg.is_closed())) {
+        return replicate_stages(errc::shutting_down);
+    }
+
     if (!is_leader() || unlikely(_transferring_leadership)) {
-        return seastar::make_ready_future<result<replicate_result>>(
-          errc::not_leader);
+        return replicate_stages(errc::not_leader);
     }
 
     if (opts.consistency == consistency_level::quorum_ack) {
         _probe.replicate_requests_ack_all();
-        return ss::with_gate(
-          _bg, [this, expected_term, rdr = std::move(rdr)]() mutable {
-              return _batcher.replicate(expected_term, std::move(rdr))
-                .finally([this] { _probe.replicate_done(); });
-          });
+
+        return wrap_stages_with_gate(
+          _bg, _batcher.replicate(expected_term, std::move(rdr)));
     }
 
     if (opts.consistency == consistency_level::leader_ack) {
@@ -554,41 +586,61 @@ ss::future<result<replicate_result>> consensus::do_replicate(
     }
     // For relaxed consistency, append data to leader disk without flush
     // asynchronous replication is provided by Raft protocol recovery mechanism.
-    return _op_lock
-      .with([this,
-             expected_term,
-             rdr = std::move(rdr),
-             lvl = opts.consistency]() mutable {
-          if (!is_leader()) {
-              return seastar::make_ready_future<result<replicate_result>>(
-                errc::not_leader);
-          }
 
-          if (expected_term.has_value() && expected_term.value() != _term) {
-              return seastar::make_ready_future<result<replicate_result>>(
-                errc::not_leader);
+    ss::promise<> enqueued;
+    auto enqueued_f = enqueued.get_future();
+    using ret_t = result<replicate_result>;
+
+    auto replicated = _op_lock.get_units().then_wrapped(
+      [this,
+       expected_term,
+       enqueued = std::move(enqueued),
+       lvl = opts.consistency,
+       rdr = std::move(rdr)](ss::future<ss::semaphore_units<>> f) mutable {
+          if (!f.failed()) {
+              enqueued.set_value();
+              return do_append_replicate_relaxed(
+                expected_term, std::move(rdr), lvl, f.get());
           }
-          _last_write_consistency_level = lvl;
-          return disk_append(
-                   model::make_record_batch_reader<
-                     details::term_assigning_reader>(
-                     std::move(rdr), model::term_id(_term)),
-                   update_last_quorum_index::no)
-            .then([this](storage::append_result res) {
-                // only update visibility upper bound if all quorum replicated
-                // entries are committed already
-                if (_commit_index >= _last_quorum_replicated_index) {
-                    // for relaxed consistency mode update visibility upper
-                    // bound with last offset appended to the log
-                    _visibility_upper_bound_index = std::max(
-                      _visibility_upper_bound_index, res.last_offset);
-                    maybe_update_majority_replicated_index();
-                }
-                return result<replicate_result>(
-                  replicate_result{.last_offset = res.last_offset});
-            });
+          enqueued.set_exception(f.get_exception());
+          return ss::make_ready_future<ret_t>(errc::leader_append_failed);
+      });
+
+    return wrap_stages_with_gate(
+      _bg, replicate_stages(std::move(enqueued_f), std::move(replicated)));
+}
+
+ss::future<result<replicate_result>> consensus::do_append_replicate_relaxed(
+  std::optional<model::term_id> expected_term,
+  model::record_batch_reader rdr,
+  consistency_level lvl,
+  ss::semaphore_units<> u) {
+    using ret_t = result<replicate_result>;
+    if (!is_leader()) {
+        return seastar::make_ready_future<ret_t>(errc::not_leader);
+    }
+
+    if (expected_term.has_value() && expected_term.value() != _term) {
+        return seastar::make_ready_future<ret_t>(errc::not_leader);
+    }
+    _last_write_consistency_level = lvl;
+    return disk_append(
+             model::make_record_batch_reader<details::term_assigning_reader>(
+               std::move(rdr), model::term_id(_term)),
+             update_last_quorum_index::no)
+      .then([this](storage::append_result res) {
+          // only update visibility upper bound if all quorum
+          // replicated entries are committed already
+          if (_commit_index >= _last_quorum_replicated_index) {
+              // for relaxed consistency mode update visibility
+              // upper bound with last offset appended to the log
+              _visibility_upper_bound_index = std::max(
+                _visibility_upper_bound_index, res.last_offset);
+              maybe_update_majority_replicated_index();
+          }
+          return ret_t(replicate_result{.last_offset = res.last_offset});
       })
-      .finally([this] { _probe.replicate_done(); });
+      .finally([this, u = std::move(u)] { _probe.replicate_done(); });
 }
 
 void consensus::dispatch_flush_with_lock() {
@@ -603,12 +655,6 @@ void consensus::dispatch_flush_with_lock() {
             return flush_log();
         });
     });
-}
-
-model::offset consensus::last_stable_offset() const {
-    // TODO: handle transactions, when we implement them, for now LSO is simply
-    // equal to max consumable offset
-    return _majority_replicated_index;
 }
 
 ss::future<model::record_batch_reader>
@@ -975,24 +1021,12 @@ void consensus::start_dispatching_disk_append_events() {
     });
 }
 
-bytes consensus::voted_for_key() const {
-    iobuf buf;
-    reflection::serialize(buf, metadata_key::voted_for, _group);
-    return iobuf_to_bytes(buf);
-}
-
 ss::future<>
 consensus::write_voted_for(consensus::voted_for_configuration config) {
     auto key = voted_for_key();
     iobuf val = reflection::to_iobuf(config);
     return _storage.kvs().put(
       storage::kvstore::key_space::consensus, std::move(key), std::move(val));
-}
-
-bytes consensus::last_applied_key() const {
-    iobuf buf;
-    reflection::serialize(buf, metadata_key::last_applied_offset, _group);
-    return iobuf_to_bytes(buf);
 }
 
 ss::future<> consensus::write_last_applied(model::offset o) {
@@ -1015,9 +1049,8 @@ model::offset consensus::read_last_applied() const {
 }
 
 ss::future<model::run_id> consensus::get_run_id() {
-    iobuf buf;
-    reflection::serialize(buf, metadata_key::unique_local_id, _group);
-    const auto key = iobuf_to_bytes(buf);
+    auto key = raft::details::serialize_group_key(
+      _group, metadata_key::unique_local_id);
 
     auto value = _storage.kvs().get(
       storage::kvstore::key_space::consensus, key);
@@ -1723,8 +1756,10 @@ ss::future<std::error_code> consensus::replicate_configuration(
            * We use replicate_batcher::do_flush directly as we already hold the
            * _op_lock mutex when replicating configuration
            */
+          std::vector<ss::semaphore_units<>> units;
+          units.push_back(std::move(u));
           return _batcher
-            .do_flush({}, std::move(req), std::move(u), std::move(seqs))
+            .do_flush({}, std::move(req), std::move(units), std::move(seqs))
             .then([] { return std::error_code(errc::success); });
       });
 }
@@ -1925,6 +1960,18 @@ consensus::do_maybe_update_leader_commit_idx(ss::semaphore_units<> u) {
 
           return model::offset{};
       });
+    /**
+     * we have to make sure that we do not advance committed_index beyond the
+     * point which is readable in log. Since we are not waiting for flush to
+     * happen before updating leader commited index we have to limit committed
+     * index to the log committed offset. This way we make sure that when read
+     * is handled all batches up to committed offset will be visible. Allowing
+     * committed offset to be greater than leader flushed offset may result in
+     * stale read i.e. even though the committed_index was updated on the leader
+     * batcher aren't readable since some of the writes are still in flight in
+     * segment appender.
+     */
+    majority_match = std::min(majority_match, lstats.committed_offset);
     if (
       majority_match > _commit_index
       && _log.get_term(majority_match) == _term) {

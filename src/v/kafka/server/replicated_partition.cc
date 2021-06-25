@@ -12,6 +12,7 @@
 
 #include "kafka/protocol/errors.h"
 #include "model/fundamental.h"
+#include "raft/types.h"
 #include "storage/types.h"
 
 #include <seastar/core/coroutine.hh>
@@ -32,7 +33,7 @@ ss::future<model::record_batch_reader> replicated_partition::make_reader(
   std::optional<model::timeout_clock::time_point> deadline) {
     cfg.start_offset = _translator->from_kafka_offset(cfg.start_offset);
     cfg.max_offset = _translator->from_kafka_offset(cfg.max_offset);
-    cfg.type_filter = {raft::data_batch_type};
+    cfg.type_filter = {model::record_batch_type::raft_data};
 
     class reader : public model::record_batch_reader::impl {
     public:
@@ -73,6 +74,8 @@ ss::future<model::record_batch_reader> replicated_partition::make_reader(
             });
         }
 
+        ss::future<> finally() noexcept final { return _underlying->finally(); }
+
     private:
         std::unique_ptr<model::record_batch_reader::impl> _underlying;
         ss::lw_shared_ptr<offset_translator> _translator;
@@ -106,18 +109,21 @@ ss::future<result<model::offset>> replicated_partition::replicate(
           return ret_t(_translator->to_kafka_offset(r.value().last_offset));
       });
 }
-ss::future<checked<model::offset, kafka::error_code>>
-replicated_partition::replicate(
+
+raft::replicate_stages replicated_partition::replicate(
   model::batch_identity batch_id,
   model::record_batch_reader&& rdr,
   raft::replicate_options opts) {
-    using ret_t = checked<model::offset, kafka::error_code>;
-    return _partition->replicate(batch_id, std::move(rdr), opts)
-      .then([this](checked<raft::replicate_result, kafka::error_code> r) {
+    using ret_t = result<raft::replicate_result>;
+    auto res = _partition->replicate_in_stages(batch_id, std::move(rdr), opts);
+    res.replicate_finished = res.replicate_finished.then(
+      [this](result<raft::replicate_result> r) {
           if (!r) {
               return ret_t(r.error());
           }
-          return ret_t(_translator->to_kafka_offset(r.value().last_offset));
+          return ret_t(raft::replicate_result{
+            _translator->to_kafka_offset(r.value().last_offset)});
       });
+    return res;
 }
 } // namespace kafka

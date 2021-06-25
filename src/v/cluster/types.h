@@ -13,6 +13,7 @@
 
 #include "cluster/errc.h"
 #include "cluster/fwd.h"
+#include "kafka/types.h"
 #include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "model/namespace.h"
@@ -27,16 +28,6 @@
 #include <fmt/format.h>
 
 namespace cluster {
-
-static constexpr model::record_batch_type controller_record_batch_type{3};
-static constexpr model::record_batch_type id_allocator_stm_batch_type{8};
-static constexpr model::record_batch_type tx_prepare_batch_type{9};
-static constexpr model::record_batch_type tx_fence_batch_type{10};
-static constexpr model::record_batch_type tm_update_batch_type{11};
-static constexpr model::record_batch_type group_prepare_tx_batch_type{14};
-static constexpr model::record_batch_type group_commit_tx_batch_type{15};
-static constexpr model::record_batch_type group_abort_tx_batch_type{16};
-
 using consensus_ptr = ss::lw_shared_ptr<raft::consensus>;
 using broker_ptr = ss::lw_shared_ptr<model::broker>;
 
@@ -56,6 +47,9 @@ enum class tx_errc {
     partition_not_found,
     stm_not_found,
     partition_not_exists,
+    // when a request times out a client should not do any assumptions about its
+    // effect. the request may time out before reaching the server, the request
+    // may be successuly processed or may fail and the reply times out
     timeout,
     conflict,
     fenced,
@@ -64,19 +58,19 @@ enum class tx_errc {
     coordinator_not_available,
     preparing_rebalance,
     rebalance_in_progress,
-    coordinator_load_in_progress
+    coordinator_load_in_progress,
+    // an unspecified error happened, the effect of the request is unknown
+    // the error code is very similar to timeout
+    unknown_server_error,
+    // an unspecified error happened, a client may assume it had zero effect on
+    // the target node
+    request_rejected
 };
 struct tx_errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::tx_errc"; }
 
     std::string message(int c) const final {
         switch (static_cast<tx_errc>(c)) {
-        case tx_errc::stale:
-            return "Stale";
-        case tx_errc::fenced:
-            return "Fenced";
-        case tx_errc::conflict:
-            return "Conflict";
         case tx_errc::none:
             return "None";
         case tx_errc::leader_not_found:
@@ -91,6 +85,26 @@ struct tx_errc_category final : public std::error_category {
             return "Partition not exists";
         case tx_errc::timeout:
             return "Timeout";
+        case tx_errc::conflict:
+            return "Conflict";
+        case tx_errc::fenced:
+            return "Fenced";
+        case tx_errc::stale:
+            return "Stale";
+        case tx_errc::not_coordinator:
+            return "Not coordinator";
+        case tx_errc::coordinator_not_available:
+            return "Coordinator not available";
+        case tx_errc::preparing_rebalance:
+            return "Preparing rebalance";
+        case tx_errc::rebalance_in_progress:
+            return "Rebalance in progress";
+        case tx_errc::coordinator_load_in_progress:
+            return "Coordinator load in progress";
+        case tx_errc::unknown_server_error:
+            return "Unknown server error";
+        case tx_errc::request_rejected:
+            return "Request rejected";
         default:
             return "cluster::tx_errc::unknown";
         }
@@ -104,6 +118,106 @@ inline std::error_code make_error_code(tx_errc e) noexcept {
     return std::error_code(static_cast<int>(e), tx_error_category());
 }
 
+struct try_abort_request {
+    model::partition_id tm;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct try_abort_reply {
+    bool commited{false};
+    bool aborted{false};
+    tx_errc ec;
+};
+struct init_tm_tx_request {
+    kafka::transactional_id tx_id;
+    std::chrono::milliseconds transaction_timeout_ms;
+    model::timeout_clock::duration timeout;
+};
+struct init_tm_tx_reply {
+    // partition_not_exists, not_leader, topic_not_exists
+    model::producer_identity pid;
+    tx_errc ec;
+};
+struct add_paritions_tx_request {
+    struct topic {
+        model::topic name{};
+        std::vector<model::partition_id> partitions{};
+    };
+    kafka::transactional_id transactional_id{};
+    kafka::producer_id producer_id{};
+    int16_t producer_epoch{};
+    std::vector<topic> topics{};
+};
+struct add_paritions_tx_reply {
+    struct partition_result {
+        model::partition_id partition_index{};
+        tx_errc error_code{};
+    };
+    struct topic_result {
+        model::topic name{};
+        std::vector<add_paritions_tx_reply::partition_result> results{};
+    };
+    std::vector<add_paritions_tx_reply::topic_result> results{};
+};
+struct add_offsets_tx_request {
+    kafka::transactional_id transactional_id{};
+    kafka::producer_id producer_id{};
+    int16_t producer_epoch{};
+    kafka::group_id group_id{};
+};
+struct add_offsets_tx_reply {
+    tx_errc error_code{};
+};
+struct end_tx_request {
+    kafka::transactional_id transactional_id{};
+    kafka::producer_id producer_id{};
+    int16_t producer_epoch{};
+    bool committed{};
+};
+struct end_tx_reply {
+    tx_errc error_code{};
+};
+struct begin_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    std::chrono::milliseconds transaction_timeout_ms;
+};
+struct begin_tx_reply {
+    model::ntp ntp;
+    model::term_id etag;
+    tx_errc ec;
+};
+struct prepare_tx_request {
+    model::ntp ntp;
+    model::term_id etag;
+    model::partition_id tm;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct prepare_tx_reply {
+    tx_errc ec;
+};
+struct commit_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct commit_tx_reply {
+    tx_errc ec;
+};
+struct abort_tx_request {
+    model::ntp ntp;
+    model::producer_identity pid;
+    model::tx_seq tx_seq;
+    model::timeout_clock::duration timeout;
+};
+struct abort_tx_reply {
+    tx_errc ec;
+};
 struct begin_group_tx_request {
     model::ntp ntp;
     kafka::group_id group_id;
@@ -477,6 +591,21 @@ struct reconciliation_state_request {
 
 struct reconciliation_state_reply {
     std::vector<ntp_reconciliation_state> results;
+};
+
+struct decommission_node_request {
+    model::node_id id;
+};
+
+struct decommission_node_reply {
+    errc error;
+};
+struct recommission_node_request {
+    model::node_id id;
+};
+
+struct recommission_node_reply {
+    errc error;
 };
 
 } // namespace cluster

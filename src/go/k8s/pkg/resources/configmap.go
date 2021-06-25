@@ -11,11 +11,13 @@ package resources
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 
 	"github.com/go-logr/logr"
 	cmetav1 "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
+	"github.com/spf13/afero"
 	redpandav1alpha1 "github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/labels"
 	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
@@ -36,10 +38,15 @@ const (
 	tlsDir   = "/etc/tls/certs"
 	tlsDirCA = "/etc/tls/certs/ca"
 
-	tlsAdminDir = "/etc/tls/certs/admin"
+	tlsAdminDir      = "/etc/tls/certs/admin"
+	tlsPandaproxyDir = "/etc/tls/certs/pandaproxy"
 
 	oneMB          = 1024 * 1024
 	logSegmentSize = 512 * oneMB
+
+	scramUsername       = "pandaproxy_client"
+	scramPasswordLength = 16
+	saslMechanism       = "SCRAM-SHA-256"
 )
 
 var errKeyDoesNotExistInSecretData = errors.New("cannot find key in secret data")
@@ -180,11 +187,10 @@ func (r *ConfigMapResource) createConfiguration(
 	cr.Directory = dataDirectory
 	tlsListener := r.pandaCluster.KafkaTLSListener()
 	if tlsListener != nil {
-		// If external connectivity is enabled the TLS config will be applied to the external listener,
-		// otherwise TLS will be applied to the internal listener. // TODO support multiple TLS configs
+		// Only one TLS listener is supported (restricted by the webhook).
+		// Determine the listener name based on being internal or external.
 		name := InternalListenerName
-		externalListener := r.pandaCluster.ExternalListener()
-		if externalListener != nil {
+		if tlsListener.External.Enabled {
 			name = ExternalListenerName
 		}
 		tls := config.ServerTLS{
@@ -203,6 +209,8 @@ func (r *ConfigMapResource) createConfiguration(
 	}
 	adminAPITLSListener := r.pandaCluster.AdminAPITLS()
 	if adminAPITLSListener != nil {
+		// Only one TLS listener is supported (restricted by the webhook).
+		// Determine the listener name based on being internal or external.
 		name := AdminPortName
 		if adminAPITLSListener.External.Enabled {
 			name = AdminPortExternalName
@@ -253,6 +261,8 @@ func (r *ConfigMapResource) createConfiguration(
 		cr.Other = make(map[string]interface{})
 	}
 	cr.Other["auto_create_topics_enabled"] = r.pandaCluster.Spec.Configuration.AutoCreateTopics
+	cr.Other["enable_idempotence"] = true
+	cr.Other["enable_transactions"] = true
 
 	segmentSize := logSegmentSize
 	cr.LogSegmentSize = &segmentSize
@@ -269,9 +279,27 @@ func (r *ConfigMapResource) createConfiguration(
 	}
 
 	r.preparePandaproxy(cfgRpk)
-	r.preparePandaproxyClient(cfgRpk)
+	r.preparePandaproxyTLS(cfgRpk)
+	err := r.preparePandaproxyClient(ctx, cfgRpk)
+	if err != nil {
+		return nil, err
+	}
 
-	return cfgRpk, nil
+	mgr := config.NewManager(afero.NewOsFs())
+	err = mgr.Merge(cfgRpk)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add arbitrary parameters to configuration
+	for k, v := range r.pandaCluster.Spec.AdditionalConfiguration {
+		err = mgr.Set(k, v, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return mgr.Get()
 }
 
 // calculateExternalPort can calculate external Kafka API port based on the internal Kafka API port
@@ -341,9 +369,11 @@ func (r *ConfigMapResource) preparePandaproxy(cfgRpk *config.Config) {
 	}
 }
 
-func (r *ConfigMapResource) preparePandaproxyClient(cfgRpk *config.Config) {
+func (r *ConfigMapResource) preparePandaproxyClient(
+	ctx context.Context, cfgRpk *config.Config,
+) error {
 	if internal := r.pandaCluster.PandaproxyAPIInternal(); internal == nil {
-		return
+		return nil
 	}
 
 	replicas := *r.pandaCluster.Spec.Replicas
@@ -353,6 +383,85 @@ func (r *ConfigMapResource) preparePandaproxyClient(cfgRpk *config.Config) {
 			Address: fmt.Sprintf("%s-%d.%s", r.pandaCluster.Name, i, r.serviceFQDN),
 			Port:    r.pandaCluster.InternalListener().Port,
 		})
+	}
+
+	if !r.pandaCluster.Spec.EnableSASL {
+		return nil
+	}
+
+	username := scramUsername
+	password, err := generatePassword(scramPasswordLength)
+	if err != nil {
+		return fmt.Errorf("could not generate SASL password: %w", err)
+	}
+
+	// Create secret with SCRAM credentials if it does not exist
+	err = r.createBasicAuthSecret(ctx, username, password)
+	if err != nil {
+		return err
+	}
+
+	// Retrieve SCRAM credentials
+	var secret corev1.Secret
+	err = r.Get(ctx, r.keySASL(), &secret)
+	if err != nil {
+		return err
+	}
+
+	// Populate configuration with SCRAM credentials
+	username = string(secret.Data[corev1.BasicAuthUsernameKey])
+	password = string(secret.Data[corev1.BasicAuthPasswordKey])
+	mechanism := saslMechanism
+	cfgRpk.PandaproxyClient.SCRAMUsername = &username
+	cfgRpk.PandaproxyClient.SCRAMPassword = &password
+	cfgRpk.PandaproxyClient.SASLMechanism = &mechanism
+
+	// Add username as superuser
+	cfgRpk.Redpanda.Superusers = append(cfgRpk.Redpanda.Superusers, username)
+
+	return nil
+}
+
+func (r *ConfigMapResource) createBasicAuthSecret(
+	ctx context.Context, username, password string,
+) error {
+	key := r.keySASL()
+	obj := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+		},
+		Type: corev1.SecretTypeBasicAuth,
+		Data: map[string][]byte{
+			corev1.BasicAuthUsernameKey: []byte(username),
+			corev1.BasicAuthPasswordKey: []byte(password),
+		},
+	}
+
+	_, err := CreateIfNotExists(ctx, r, obj, r.logger)
+	return err
+}
+
+func (r *ConfigMapResource) preparePandaproxyTLS(cfgRpk *config.Config) {
+	tlsListener := r.pandaCluster.PandaproxyAPITLS()
+	if tlsListener != nil {
+		// Only one TLS listener is supported (restricted by the webhook).
+		// Determine the listener name based on being internal or external.
+		name := PandaproxyPortInternalName
+		if tlsListener.External.Enabled {
+			name = PandaproxyPortExternalName
+		}
+		tls := config.ServerTLS{
+			Name:              name,
+			KeyFile:           fmt.Sprintf("%s/%s", tlsPandaproxyDir, corev1.TLSPrivateKeyKey), // tls.key
+			CertFile:          fmt.Sprintf("%s/%s", tlsPandaproxyDir, corev1.TLSCertKey),       // tls.crt
+			Enabled:           true,
+			RequireClientAuth: tlsListener.TLS.RequireClientAuth,
+		}
+		if tlsListener.TLS.RequireClientAuth {
+			tls.TruststoreFile = fmt.Sprintf("%s/%s", tlsPandaproxyDir, cmetav1.TLSCAKey)
+		}
+		cfgRpk.Pandaproxy.PandaproxyAPITLS = []config.ServerTLS{tls}
 	}
 }
 
@@ -386,6 +495,15 @@ func (r *ConfigMapResource) Key() types.NamespacedName {
 	return ConfigMapKey(r.pandaCluster)
 }
 
+// KeySASL returns namespace/name used for the SASL secret of superuser
+func KeySASL(pandaCluster *redpandav1alpha1.Cluster) types.NamespacedName {
+	return types.NamespacedName{Name: pandaCluster.Name + "-sasl", Namespace: pandaCluster.Namespace}
+}
+
+func (r *ConfigMapResource) keySASL() types.NamespacedName {
+	return KeySASL(r.pandaCluster)
+}
+
 // ConfigMapKey provides config map name that derived from redpanda.vectorized.io CR
 func ConfigMapKey(pandaCluster *redpandav1alpha1.Cluster) types.NamespacedName {
 	return types.NamespacedName{Name: pandaCluster.Name + baseSuffix, Namespace: pandaCluster.Namespace}
@@ -394,4 +512,21 @@ func ConfigMapKey(pandaCluster *redpandav1alpha1.Cluster) types.NamespacedName {
 func configMapKind() string {
 	var cfg corev1.ConfigMap
 	return cfg.Kind
+}
+
+// TODO move to utilities
+var letters = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+func generatePassword(length int) (string, error) {
+	bytes := make([]byte, length)
+
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	for i, b := range bytes {
+		bytes[i] = letters[b%byte(len(letters))]
+	}
+
+	return string(bytes), nil
 }

@@ -76,6 +76,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> default_window_sec;
     property<std::chrono::milliseconds> quota_manager_gc_sec;
     property<uint32_t> target_quota_byte_rate;
+    property<std::optional<ss::sstring>> cluster_id;
     property<std::optional<ss::sstring>> rack;
     property<std::optional<ss::sstring>> dashboard_dir;
     property<bool> disable_metrics;
@@ -90,12 +91,14 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> tm_sync_timeout_ms;
     property<model::violation_recovery_policy> tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
+    property<std::chrono::milliseconds> tx_timeout_delay_ms;
     property<model::violation_recovery_policy> rm_violation_recovery_policy;
     property<std::chrono::milliseconds> fetch_reads_debounce_timeout;
     property<std::chrono::milliseconds> alter_topic_cfg_timeout_ms;
     property<model::cleanup_policy_bitflags> log_cleanup_policy;
     property<model::timestamp_type> log_message_timestamp_type;
     property<model::compression> log_compression_type;
+    property<size_t> fetch_max_bytes;
     // same as transactional.id.expiration.ms in kafka
     property<std::chrono::milliseconds> transactional_id_expiration_ms;
     property<bool> enable_idempotence;
@@ -107,6 +110,10 @@ struct configuration final : public config_store {
     property<std::optional<size_t>> retention_bytes;
     property<int32_t> group_topic_partitions;
     property<int16_t> default_topic_replication;
+    property<int16_t> transaction_coordinator_replication;
+    property<int16_t> id_allocator_replication;
+    property<model::cleanup_policy_bitflags>
+      transaction_coordinator_cleanup_policy;
     property<std::chrono::milliseconds> create_topic_timeout_ms;
     property<std::chrono::milliseconds> wait_for_leader_timeout_ms;
     property<int32_t> default_topic_partitions;
@@ -140,6 +147,15 @@ struct configuration final : public config_store {
     property<bool> enable_sasl;
     property<std::chrono::milliseconds>
       controller_backend_housekeeping_interval_ms;
+    property<std::chrono::milliseconds> node_management_operation_timeout_ms;
+    // Compaction controller
+    property<std::chrono::milliseconds> compaction_ctrl_update_interval_ms;
+    property<double> compaction_ctrl_p_coeff;
+    property<double> compaction_ctrl_i_coeff;
+    property<double> compaction_ctrl_d_coeff;
+    property<int16_t> compaction_ctrl_min_shares;
+    property<int16_t> compaction_ctrl_max_shares;
+    property<std::optional<size_t>> compaction_ctrl_backlog_size;
 
     // Archival storage
     property<bool> cloud_storage_enabled;

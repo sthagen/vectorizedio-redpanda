@@ -56,20 +56,21 @@ const (
 // focusing on the management of redpanda cluster
 type StatefulSetResource struct {
 	k8sclient.Client
-	scheme                      *runtime.Scheme
-	pandaCluster                *redpandav1alpha1.Cluster
-	serviceFQDN                 string
-	serviceName                 string
-	nodePortName                types.NamespacedName
-	nodePortSvc                 corev1.Service
-	redpandaCertSecretKey       types.NamespacedName
-	internalClientCertSecretKey types.NamespacedName
-	adminCertSecretKey          types.NamespacedName
-	adminAPINodeCertSecretKey   types.NamespacedName
-	adminAPIClientCertSecretKey types.NamespacedName
-	serviceAccountName          string
-	configuratorTag             string
-	logger                      logr.Logger
+	scheme                         *runtime.Scheme
+	pandaCluster                   *redpandav1alpha1.Cluster
+	serviceFQDN                    string
+	serviceName                    string
+	nodePortName                   types.NamespacedName
+	nodePortSvc                    corev1.Service
+	redpandaCertSecretKey          types.NamespacedName
+	internalClientCertSecretKey    types.NamespacedName
+	adminCertSecretKey             types.NamespacedName // TODO this is unused, can be removed
+	adminAPINodeCertSecretKey      types.NamespacedName
+	adminAPIClientCertSecretKey    types.NamespacedName // TODO this is unused, can be removed
+	pandaproxyAPINodeCertSecretKey types.NamespacedName
+	serviceAccountName             string
+	configuratorTag                string
+	logger                         logr.Logger
 
 	LastObservedState *appsv1.StatefulSet
 }
@@ -87,6 +88,7 @@ func NewStatefulSet(
 	adminCertSecretKey types.NamespacedName,
 	adminAPINodeCertSecretKey types.NamespacedName,
 	adminAPIClientCertSecretKey types.NamespacedName,
+	pandaproxyAPINodeCertSecretKey types.NamespacedName,
 	serviceAccountName string,
 	configuratorTag string,
 	logger logr.Logger,
@@ -104,6 +106,7 @@ func NewStatefulSet(
 		adminCertSecretKey,
 		adminAPINodeCertSecretKey,
 		adminAPIClientCertSecretKey,
+		pandaproxyAPINodeCertSecretKey,
 		serviceAccountName,
 		configuratorTag,
 		logger.WithValues("Kind", statefulSetKind()),
@@ -207,8 +210,6 @@ func preparePVCResource(
 // obj returns resource managed client.Object
 // nolint:funlen // The complexity of obj function will be address in the next version TODO
 func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
-	var configMapDefaultMode int32 = 0754
-
 	var clusterLabels = labels.ForCluster(r.pandaCluster)
 
 	pvc := preparePVCResource(datadirName, r.pandaCluster.Namespace, r.pandaCluster.Spec.Storage, clusterLabels)
@@ -273,7 +274,6 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 									LocalObjectReference: corev1.LocalObjectReference{
 										Name: ConfigMapKey(r.pandaCluster).Name,
 									},
-									DefaultMode: &configMapDefaultMode,
 								},
 							},
 						},
@@ -332,6 +332,10 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								RunAsUser:  pointer.Int64Ptr(userID),
 								RunAsGroup: pointer.Int64Ptr(groupID),
 							},
+							Resources: corev1.ResourceRequirements{
+								Limits:   r.pandaCluster.Spec.Resources.Limits,
+								Requests: r.pandaCluster.Spec.Resources.Requests,
+							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "config-dir",
@@ -353,9 +357,9 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 								"start",
 								"--check=false",
 								r.portsConfiguration(),
-							}, overprovisioned(
+							}, prepareAdditionalArguments(
 								r.pandaCluster.Spec.Configuration.DeveloperMode,
-								r.pandaCluster.Spec.Resources.Limits)...),
+								r.pandaCluster.Spec.Resources.Requests)...),
 							Env: []corev1.EnvVar{
 								{
 									Name:  "REDPANDA_ENVIRONMENT",
@@ -457,27 +461,54 @@ func (r *StatefulSetResource) obj() (k8sclient.Object, error) {
 	return ss, nil
 }
 
-func overprovisioned(developerMode bool, limits corev1.ResourceList) []string {
-	memory, exist := limits["memory"]
-	if !exist {
-		memory = resource.MustParse("2Gi")
-	}
+func prepareAdditionalArguments(
+	developerMode bool, originalRequests corev1.ResourceList,
+) []string {
+	requests := originalRequests.DeepCopy()
+
+	requests.Cpu().RoundUp(0)
+	requestedCores := requests.Cpu().Value()
+	requestedMemory := requests.Memory().Value()
 
 	if developerMode {
-		return []string{
+		args := []string{
 			"--overprovisioned",
 			// sometimes a little bit of memory is consumed by other processes than seastar
 			"--reserve-memory " + redpandav1alpha1.ReserveMemoryString,
-			"--smp=1",
 			"--kernel-page-cache=true",
 			"--default-log-level=debug",
 		}
+		// When smp is not set, all cores are used
+		if requestedCores > 0 {
+			args = append(args, "--smp="+strconv.FormatInt(requestedCores, 10))
+		}
+		return args
 	}
-	return []string{
+
+	args := []string{
 		"--default-log-level=info",
 		"--reserve-memory 0M",
-		"--memory " + strconv.FormatInt(memory.Value(), 10),
 	}
+
+	/*
+	 * Example:
+	 *    in: minimum requirement per core, 2GB
+	 *    in: requestedMemory, 16GB
+	 *    => maxAllowedCores = 8
+	 *    if requestedCores == 8, set smp = 8 (with 2GB per core)
+	 *    if requestedCores == 4, set smp = 4 (with 4GB per core)
+	 */
+
+	// The webhook ensures that the requested memory is >= the per-core requirement
+	maxAllowedCores := requestedMemory / redpandav1alpha1.MinimumMemoryPerCore
+	var smp int64 = maxAllowedCores
+	if requestedCores != 0 && requestedCores < smp {
+		smp = requestedCores
+	}
+	args = append(args, "--smp="+strconv.FormatInt(smp, 10),
+		"--memory="+strconv.FormatInt(requestedMemory, 10))
+
+	return args
 }
 
 func (r *StatefulSetResource) pandaproxyEnvVars() []corev1.EnvVar {
@@ -511,6 +542,12 @@ func (r *StatefulSetResource) secretVolumeMounts() []corev1.VolumeMount {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      "tlsadmincert",
 			MountPath: tlsAdminDir,
+		})
+	}
+	if r.pandaCluster.PandaproxyAPITLS() != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "tlspandaproxycert",
+			MountPath: tlsPandaproxyDir,
 		})
 	}
 	return mounts
@@ -567,6 +604,32 @@ func (r *StatefulSetResource) secretVolumes() []corev1.Volume {
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: r.adminAPINodeCertSecretKey.Name,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  corev1.TLSPrivateKeyKey,
+							Path: corev1.TLSPrivateKeyKey,
+						},
+						{
+							Key:  corev1.TLSCertKey,
+							Path: corev1.TLSCertKey,
+						},
+						{
+							Key:  cmetav1.TLSCAKey,
+							Path: cmetav1.TLSCAKey,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	// When Pandaproxy TLS is enabled, Redpanda needs a keypair certificate.
+	if r.pandaCluster.PandaproxyAPITLS() != nil {
+		vols = append(vols, corev1.Volume{
+			Name: "tlspandaproxycert",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: r.pandaproxyAPINodeCertSecretKey.Name,
 					Items: []corev1.KeyToPath{
 						{
 							Key:  corev1.TLSPrivateKeyKey,

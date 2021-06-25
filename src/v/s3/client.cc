@@ -20,9 +20,12 @@
 #include "ssx/sformat.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/condition-variable.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/net/dns.hh>
@@ -99,9 +102,11 @@ ss::future<configuration> configuration::make_configuration(
     }
     constexpr uint16_t default_port = 443;
     client_cfg.server_addr = unresolved_address(
-      client_cfg.uri(), overrides.port ? *overrides.port : default_port);
+      client_cfg.uri(),
+      overrides.port ? *overrides.port : default_port,
+      ss::net::inet_address::family::INET);
     client_cfg.disable_metrics = disable_metrics;
-    client_cfg._probe = ss::make_lw_shared<client_probe>(
+    client_cfg._probe = ss::make_shared<client_probe>(
       disable_metrics, region(), endpoint_uri);
     co_return client_cfg;
 }
@@ -363,19 +368,27 @@ client::client(const configuration& conf)
 
 client::client(const configuration& conf, const ss::abort_source& as)
   : _requestor(conf)
-  , _client(conf, as)
+  , _client(conf, &as, conf._probe)
   , _probe(conf._probe) {}
 
-ss::future<> client::shutdown() { return _client.shutdown(); }
-ss::future<http::client::response_stream_ref>
-client::get_object(bucket_name const& name, object_key const& key) {
+ss::future<> client::stop() { return _client.stop(); }
+
+ss::future<> client::shutdown() {
+    _client.shutdown();
+    return ss::now();
+}
+
+ss::future<http::client::response_stream_ref> client::get_object(
+  bucket_name const& name,
+  object_key const& key,
+  const ss::lowres_clock::duration& timeout) {
     auto header = _requestor.make_get_object_request(name, key);
     if (!header) {
         return ss::make_exception_future<http::client::response_stream_ref>(
           std::system_error(header.error()));
     }
     vlog(s3_log.trace, "send https request:\n{}", header);
-    return _client.request(std::move(header.value()))
+    return _client.request(std::move(header.value()), timeout)
       .then([](http::client::response_stream_ref&& ref) {
           // here we didn't receive any bytes from the socket and
           // ref->is_header_done() is 'false', we need to prefetch
@@ -403,7 +416,8 @@ ss::future<> client::put_object(
   object_key const& id,
   size_t payload_size,
   ss::input_stream<char>&& body,
-  const std::vector<object_tag>& tags) {
+  const std::vector<object_tag>& tags,
+  const ss::lowres_clock::duration& timeout) {
     auto header = _requestor.make_unsigned_put_object_request(
       name, id, payload_size, tags);
     if (!header) {
@@ -412,8 +426,9 @@ ss::future<> client::put_object(
     vlog(s3_log.trace, "send https request:\n{}", header);
     return ss::do_with(
       std::move(body),
-      [this, header = std::move(header)](ss::input_stream<char>& body) mutable {
-          return _client.request(std::move(header.value()), body)
+      [this, timeout, header = std::move(header)](
+        ss::input_stream<char>& body) mutable {
+          return _client.request(std::move(header.value()), body, timeout)
             .then([](const http::client::response_stream_ref& ref) {
                 return drain_response_stream(ref).then([ref](iobuf&& res) {
                     auto status = ref->get_headers().result();
@@ -437,7 +452,8 @@ ss::future<client::list_bucket_result> client::list_objects_v2(
   const bucket_name& name,
   std::optional<object_key> prefix,
   std::optional<object_key> start_after,
-  std::optional<size_t> max_keys) {
+  std::optional<size_t> max_keys,
+  const ss::lowres_clock::duration& timeout) {
     auto header = _requestor.make_list_objects_v2_request(
       name, std::move(prefix), std::move(start_after), max_keys);
     if (!header) {
@@ -445,7 +461,7 @@ ss::future<client::list_bucket_result> client::list_objects_v2(
           std::system_error(header.error()));
     }
     vlog(s3_log.trace, "send https request:\n{}", header);
-    return _client.request(std::move(header.value()))
+    return _client.request(std::move(header.value()), timeout)
       .then([](const http::client::response_stream_ref& resp) mutable {
           // chunked encoding is used so we don't know output size in
           // advance
@@ -477,14 +493,16 @@ ss::future<client::list_bucket_result> client::list_objects_v2(
       });
 }
 
-ss::future<>
-client::delete_object(const bucket_name& bucket, const object_key& key) {
+ss::future<> client::delete_object(
+  const bucket_name& bucket,
+  const object_key& key,
+  const ss::lowres_clock::duration& timeout) {
     auto header = _requestor.make_delete_object_request(bucket, key);
     if (!header) {
         return ss::make_exception_future<>(std::system_error(header.error()));
     }
     vlog(s3_log.trace, "send https request:\n{}", header);
-    return _client.request(std::move(header.value()))
+    return _client.request(std::move(header.value()), timeout)
       .then([](const http::client::response_stream_ref& ref) {
           return drain_response_stream(ref).then([ref](iobuf&& res) {
               auto status = ref->get_headers().result();
@@ -497,6 +515,71 @@ client::delete_object(const bucket_name& bucket, const object_key& key) {
               return ss::now();
           });
       });
+}
+
+client_pool::client_pool(
+  size_t size, configuration conf, client_pool_overdraft_policy policy)
+  : _size(size)
+  , _config(std::move(conf))
+  , _policy(policy) {
+    init();
+}
+
+ss::future<> client_pool::stop() {
+    _as.request_abort();
+    _cvar.broken();
+    // Wait until all leased objects are returned
+    co_await _gate.close();
+}
+
+/// \brief Acquire http client from the pool.
+///
+/// \note it's guaranteed that the client can only be acquired once
+///       before it gets released (release happens implicitly, when
+///       the lifetime of the pointer ends).
+/// \return client pointer (via future that can wait if all clients
+///         are in use)
+ss::future<client_pool::client_lease> client_pool::acquire() {
+    gate_guard guard(_gate);
+    try {
+        while (_pool.empty() && !_gate.is_closed()) {
+            if (_policy == client_pool_overdraft_policy::wait_if_empty) {
+                co_await _cvar.wait();
+            } else {
+                auto cl = ss::make_shared<client>(_config, _as);
+                _pool.emplace_back(std::move(cl));
+            }
+        }
+    } catch (const ss::broken_condition_variable&) {
+    }
+    if (_gate.is_closed() || _as.abort_requested()) {
+        throw ss::gate_closed_exception();
+    }
+    vassert(!_pool.empty(), "'acquire' invariant is broken");
+    auto client = _pool.back();
+    _pool.pop_back();
+    co_return client_lease{
+      .client = client,
+      .deleter = ss::make_deleter(
+        [pool = weak_from_this(), client, g = std::move(guard)] {
+            if (pool) {
+                pool->release(client);
+            }
+        })};
+}
+size_t client_pool::size() const noexcept { return _pool.size(); }
+void client_pool::init() {
+    for (size_t i = 0; i < _size; i++) {
+        auto cl = ss::make_shared<client>(_config, _as);
+        _pool.emplace_back(std::move(cl));
+    }
+}
+void client_pool::release(ss::shared_ptr<client> leased) {
+    if (_pool.size() == _size) {
+        return;
+    }
+    _pool.emplace_back(std::move(leased));
+    _cvar.signal();
 }
 
 } // namespace s3

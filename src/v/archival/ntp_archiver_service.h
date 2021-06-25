@@ -10,18 +10,24 @@
 
 #pragma once
 #include "archival/archival_policy.h"
-#include "archival/manifest.h"
+#include "archival/probe.h"
 #include "archival/types.h"
+#include "cloud_storage/manifest.h"
+#include "cloud_storage/remote.h"
+#include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "s3/client.h"
 #include "storage/fwd.h"
 #include "storage/segment.h"
+#include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/semaphore.hh>
+#include <seastar/core/shared_ptr.hh>
 
+#include <functional>
 #include <map>
 
 namespace archival {
@@ -40,6 +46,10 @@ struct configuration {
     ss::lowres_clock::duration gc_interval;
     /// Number of simultaneous S3 uploads
     s3_connection_limit connection_limit;
+    /// Flag that indicates that service level metrics are disabled
+    service_metrics_disabled svc_metrics_disabled;
+    /// Flag that indicates that ntp-archiver level metrics are disabled
+    per_ntp_metrics_disabled ntp_metrics_disabled;
 };
 
 std::ostream& operator<<(std::ostream& o, const configuration& cfg);
@@ -53,6 +63,11 @@ std::ostream& operator<<(std::ostream& o, const configuration& cfg);
 /// generation of per-ntp candidate set. The actual file uploads are
 /// handled by 'archiver_service'.
 class ntp_archiver {
+    /// Timeout value used for manifest uploads and downloads.
+    static constexpr ss::lowres_clock::duration manifest_upload_timeout = 10s;
+    /// Timeout value used for segment uploads.
+    static constexpr ss::lowres_clock::duration segment_upload_timeout = 30s;
+
 public:
     /// Iterator type used to retrieve candidates for upload
     using back_insert_iterator
@@ -62,8 +77,13 @@ public:
     ///
     /// \param ntp is an ntp that archiver is responsible for
     /// \param conf is an S3 client configuration
-    /// \param bucket is an S3 bucket that should be used to store the data
-    ntp_archiver(const storage::ntp_config& ntp, const configuration& conf);
+    /// \param remote is an object used to send/recv data
+    /// \param svc_probe is a service level probe (optional)
+    ntp_archiver(
+      const storage::ntp_config& ntp,
+      const configuration& conf,
+      cloud_storage::remote& remote,
+      service_probe& svc_probe);
 
     /// Stop archiver.
     ///
@@ -83,12 +103,14 @@ public:
     /// Download manifest from pre-defined S3 locatnewion
     ///
     /// \return future that returns true if the manifest was found in S3
-    ss::future<download_manifest_result> download_manifest();
+    ss::future<cloud_storage::download_result>
+    download_manifest(retry_chain_node& parent);
 
     /// Upload manifest to the pre-defined S3 location
-    ss::future<> upload_manifest();
+    ss::future<cloud_storage::upload_result>
+    upload_manifest(retry_chain_node& parent);
 
-    const manifest& get_remote_manifest() const;
+    const cloud_storage::manifest& get_remote_manifest() const;
 
     struct batch_result {
         size_t num_succeded;
@@ -100,27 +122,28 @@ public:
     /// will pick not more than '_concurrency' candidates and start
     /// uploading them.
     ///
-    /// \param req_limit is used to limit number of parallel uploads
     /// \param lm is a log manager instance
     /// \return future that returns number of uploaded/failed segments
     ss::future<batch_result>
-    upload_next_candidates(ss::semaphore& req_limit, storage::log_manager& lm);
+    upload_next_candidates(storage::log_manager& lm, retry_chain_node& parent);
 
 private:
     /// Upload individual segment to S3.
     ///
     /// \return true on success and false otherwise
-    ss::future<bool>
-    upload_segment(ss::semaphore& req_limit, upload_candidate candidate);
+    ss::future<cloud_storage::upload_result>
+    upload_segment(upload_candidate candidate, retry_chain_node& fib);
 
+    service_probe& _svc_probe;
+    ntp_level_probe _probe;
     model::ntp _ntp;
     model::revision_id _rev;
-    s3::configuration _client_conf;
+    cloud_storage::remote& _remote;
     archival_policy _policy;
     s3::bucket_name _bucket;
     /// Remote manifest contains representation of the data stored in S3 (it
     /// gets uploaded to the remote location)
-    manifest _remote;
+    cloud_storage::manifest _manifest;
     ss::gate _gate;
     ss::abort_source _as;
     ss::semaphore _mutex{1};

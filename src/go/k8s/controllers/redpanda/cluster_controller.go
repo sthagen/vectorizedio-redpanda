@@ -15,12 +15,15 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	redpandav1alpha1 "github.com/vectorizedio/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/labels"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/resources"
 	"github.com/vectorizedio/redpanda/src/go/k8s/pkg/resources/certmanager"
+	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/api/admin"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,7 +58,8 @@ type ClusterReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
-//+kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates;clusterissuers,verbs=create;get;list;watch;patch;delete;
+//+kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates;clusterissuers,verbs=create;get;list;watch;patch;delete;update;
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=create;get;list;watch;patch;delete;update;
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -123,6 +127,23 @@ func (r *ClusterReconciler) Reconcile(
 	headlessSvc := resources.NewHeadlessService(r.Client, &redpandaCluster, r.Scheme, headlessPorts, log)
 	nodeportSvc := resources.NewNodePortService(r.Client, &redpandaCluster, r.Scheme, nodeports, log)
 
+	clusterPorts := []resources.NamedServicePort{}
+	if proxyAPIExternal != nil && proxyAPIInternal != nil {
+		clusterPorts = append(clusterPorts, resources.NamedServicePort{Name: resources.PandaproxyPortExternalName, Port: proxyAPIInternal.Port + 1})
+	}
+	clusterSvc := resources.NewClusterService(r.Client, &redpandaCluster, r.Scheme, clusterPorts, log)
+	subdomain := ""
+	if proxyAPIExternal != nil {
+		subdomain = proxyAPIExternal.External.Subdomain
+	}
+	ingress := resources.NewIngress(r.Client,
+		&redpandaCluster,
+		r.Scheme,
+		subdomain,
+		clusterSvc.Key().Name,
+		resources.PandaproxyPortExternalName,
+		log)
+
 	pki := certmanager.NewPki(r.Client, &redpandaCluster, headlessSvc.HeadlessServiceFQDN(), r.Scheme, log)
 	sa := resources.NewServiceAccount(r.Client, &redpandaCluster, r.Scheme, log)
 	sts := resources.NewStatefulSet(
@@ -137,12 +158,15 @@ func (r *ClusterReconciler) Reconcile(
 		pki.AdminCert(),
 		pki.AdminAPINodeCert(),
 		pki.AdminAPIClientCert(),
+		pki.PandaproxyAPINodeCert(),
 		sa.Key().Name,
 		r.configuratorTag,
 		log)
 	toApply := []resources.Reconciler{
 		headlessSvc,
+		clusterSvc,
 		nodeportSvc,
+		ingress,
 		resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme, headlessSvc.HeadlessServiceFQDN(), log),
 		pki,
 		sa,
@@ -163,6 +187,37 @@ func (r *ClusterReconciler) Reconcile(
 		if err != nil {
 			log.Error(err, "Failed to reconcile resource")
 			return ctrl.Result{}, err
+		}
+	}
+
+	// When pandaproxy and SASL are enabled we need to create a user for the
+	// pandaproxy client. We use the superuser usename added to the configuration
+	// by the operator to create a user.
+	if internal := redpandaCluster.PandaproxyAPIInternal(); internal != nil && redpandaCluster.Spec.EnableSASL {
+		var secret corev1.Secret
+		err := r.Get(ctx, resources.KeySASL(&redpandaCluster), &secret)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		username := string(secret.Data[corev1.BasicAuthUsernameKey])
+		password := string(secret.Data[corev1.BasicAuthPasswordKey])
+
+		var urls []string
+		replicas := *redpandaCluster.Spec.Replicas
+		for i := int32(0); i < replicas; i++ {
+			urls = append(urls, fmt.Sprintf("%s-%d.%s:%d", redpandaCluster.Name, i, headlessSvc.HeadlessServiceFQDN(), redpandaCluster.AdminAPIInternal().Port))
+		}
+
+		adminAPI, err := admin.NewAdminAPI(urls, nil)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		err = adminAPI.CreateUser(username, password)
+		// {"message": "Creating user: User already exists", "code": 400}
+		if err != nil && !strings.Contains(err.Error(), "already exists") { // TODO if user already exists, we only receive "400". Check for specific error code when available.
+			log.Info("Could not create user: " + err.Error())
+			return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 		}
 	}
 
@@ -206,7 +261,7 @@ func (r *ClusterReconciler) reportStatus(
 		observedNodesInternal = append(observedNodesInternal, fmt.Sprintf("%s.%s", item.Name, internalFQDN))
 	}
 
-	observedNodesExternal, observedExternalAdmin, observedExternalProxy, err := r.createExternalNodesList(ctx, observedPods.Items, redpandaCluster, nodeportSvcName)
+	observedNodesExternal, observedExternalAdmin, observedExternalProxy, proxyIngress, err := r.createExternalNodesList(ctx, observedPods.Items, redpandaCluster, nodeportSvcName)
 	if err != nil {
 		return fmt.Errorf("failed to construct external node list: %w", err)
 	}
@@ -230,6 +285,9 @@ func (r *ClusterReconciler) reportStatus(
 			cluster.Status.Nodes.External = observedNodesExternal
 			cluster.Status.Nodes.ExternalAdmin = observedExternalAdmin
 			cluster.Status.Nodes.ExternalPandaproxy = observedExternalProxy
+			if len(proxyIngress) > 0 {
+				cluster.Status.Nodes.PandaproxyIngress = &proxyIngress
+			}
 			cluster.Status.Replicas = lastObservedSts.Status.ReadyReplicas
 
 			return r.Status().Update(ctx, &cluster)
@@ -265,22 +323,26 @@ func (r *ClusterReconciler) createExternalNodesList(
 	pods []corev1.Pod,
 	pandaCluster *redpandav1alpha1.Cluster,
 	nodePortName types.NamespacedName,
-) (external, externalAdmin, externalProxy []string, err error) {
+) (
+	external, externalAdmin, externalProxy []string,
+	proxyIngress string,
+	err error,
+) {
 	externalKafkaListener := pandaCluster.ExternalListener()
 	externalAdminListener := pandaCluster.AdminAPIExternal()
 	externalProxyListener := pandaCluster.PandaproxyAPIExternal()
 	if externalKafkaListener == nil && externalAdminListener == nil {
-		return []string{}, []string{}, []string{}, nil
+		return []string{}, []string{}, []string{}, "", nil
 	}
 
 	var nodePortSvc corev1.Service
 	if err := r.Get(ctx, nodePortName, &nodePortSvc); err != nil {
-		return []string{}, []string{}, []string{}, fmt.Errorf("failed to retrieve node port service %s: %w", nodePortName, err)
+		return []string{}, []string{}, []string{}, "", fmt.Errorf("failed to retrieve node port service %s: %w", nodePortName, err)
 	}
 
 	for _, port := range nodePortSvc.Spec.Ports {
 		if port.NodePort == 0 {
-			return []string{}, []string{}, []string{}, fmt.Errorf("node port service %s, port %s is 0: %w", nodePortName, port.Name, errNodePortMissing)
+			return []string{}, []string{}, []string{}, "", fmt.Errorf("node port service %s, port %s is 0: %w", nodePortName, port.Name, errNodePortMissing)
 		}
 	}
 
@@ -295,7 +357,7 @@ func (r *ClusterReconciler) createExternalNodesList(
 		if externalKafkaListener != nil && needExternalIP(externalKafkaListener.External) ||
 			externalAdminListener != nil && needExternalIP(externalAdminListener.External) {
 			if err := r.Get(ctx, types.NamespacedName{Name: pods[i].Spec.NodeName}, &node); err != nil {
-				return []string{}, []string{}, []string{}, fmt.Errorf("failed to retrieve node %s: %w", pods[i].Spec.NodeName, err)
+				return []string{}, []string{}, []string{}, "", fmt.Errorf("failed to retrieve node %s: %w", pods[i].Spec.NodeName, err)
 			}
 		}
 
@@ -330,7 +392,12 @@ func (r *ClusterReconciler) createExternalNodesList(
 				))
 		}
 	}
-	return observedNodesExternal, observedNodesExternalAdmin, observedNodesExternalProxy, nil
+
+	if externalProxyListener != nil && len(externalProxyListener.External.Subdomain) > 0 {
+		proxyIngress = externalProxyListener.External.Subdomain
+	}
+
+	return observedNodesExternal, observedNodesExternalAdmin, observedNodesExternalProxy, proxyIngress, nil
 }
 
 func needExternalIP(external redpandav1alpha1.ExternalConnectivityConfig) bool {

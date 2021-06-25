@@ -99,9 +99,9 @@ export class ProcessBatchServer extends SupervisorServer {
     if (failRequest) {
       return this.fireException("Bad request: request without coprocessor ids");
     } else {
-      return Promise.all(
-        input.requests.map(this.applyCoprocessor)
-      ).then((result) => ({ result: result.flat() }));
+      return Promise.all(input.requests.map(this.applyCoprocessor)).then(
+        (result) => ({ result: result.flat() })
+      );
     }
   }
 
@@ -172,7 +172,7 @@ export class ProcessBatchServer extends SupervisorServer {
         return errors.createResponseScriptWithoutTopics(handle);
       }
       const validTopics = handle.coprocessor.inputTopics.reduce(
-        (prev, topic) => errors.validateKafkaTopicName(topic) && prev,
+        (prev, [topic, _]) => errors.validateKafkaTopicName(topic) && prev,
         true
       );
       if (!validTopics) {
@@ -194,7 +194,8 @@ export class ProcessBatchServer extends SupervisorServer {
      * from a string, the first and second arguments are the parameter for
      * that function and the last one is the js string program.
      */
-    const loadScript = Function("module", "require", script.toString());
+    const loadScript = (module, requireNative) =>
+      Function("module", "require", script.toString())(module, requireNative);
     /**
      * Create a custom type for result function, as coprocessor script return
      * a exports.default value, ResultFunction type represents that result.
@@ -224,6 +225,9 @@ export class ProcessBatchServer extends SupervisorServer {
       );
       return undefined;
     }
+    if (!errors.validateWasmAttributes(handle, id, this.logger)) {
+      return [undefined, errors.validateLoadScriptError(null, id, script)];
+    }
     handle.globalId = id;
     return [handle, undefined];
   }
@@ -248,7 +252,7 @@ export class ProcessBatchServer extends SupervisorServer {
       (coprocessorResults) => groupByTopic(coprocessorResults.flat()),
       (e) => {
         this.logger.error(e);
-        return Logging.close().then(() => process.exit(1));
+        return [];
       }
     );
   }

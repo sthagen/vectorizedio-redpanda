@@ -49,7 +49,7 @@ public:
     ss::future<result<model::offset>>
       replicate(model::record_batch_reader, raft::replicate_options);
 
-    ss::future<checked<model::offset, kafka::error_code>> replicate(
+    raft::replicate_stages replicate(
       model::batch_identity,
       model::record_batch_reader&&,
       raft::replicate_options);
@@ -58,7 +58,25 @@ public:
       storage::log_reader_config cfg,
       std::optional<model::timeout_clock::time_point>) final;
 
-    cluster::partition_probe& probe() { return _partition->probe(); }
+    ss::future<std::vector<cluster::rm_stm::tx_range>>
+    aborted_transactions(model::offset base, model::offset last) final {
+        auto source = co_await _partition->aborted_transactions(
+          _translator->from_kafka_offset(base),
+          _translator->from_kafka_offset(last));
+
+        std::vector<cluster::rm_stm::tx_range> target;
+        target.reserve(source.size());
+        for (const auto& range : source) {
+            target.push_back(cluster::rm_stm::tx_range{
+              .pid = range.pid,
+              .first = _translator->to_kafka_offset(range.first),
+              .last = _translator->to_kafka_offset(range.last)});
+        }
+
+        co_return target;
+    }
+
+    cluster::partition_probe& probe() final { return _partition->probe(); }
 
 private:
     ss::lw_shared_ptr<cluster::partition> _partition;

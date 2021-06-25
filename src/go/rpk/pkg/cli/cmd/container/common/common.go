@@ -36,9 +36,10 @@ var (
 )
 
 const (
-	redpandaNetwork = "redpanda"
+	redpandaNetwork   = "redpanda"
+	externalKafkaPort = 9093
 
-	defaultDockerClientTimeout = 10 * time.Second
+	defaultDockerClientTimeout = 60 * time.Second
 )
 
 type NodeState struct {
@@ -56,9 +57,21 @@ func HostAddr(port uint) string {
 	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
+func ListenAddresses(ip string, internalPort, externalPort uint) string {
+	return fmt.Sprintf("internal://0.0.0.0:%d,external://%s:%d", internalPort, ip, externalPort)
+}
+
+func AdvertiseAddresses(ip string, internalPort, externalPort uint) string {
+	return fmt.Sprintf("internal://%s:%d,external://127.0.0.1:%d", ip, internalPort, externalPort)
+}
+
 // Returns the container name for the given node ID.
 func Name(nodeID uint) string {
 	return fmt.Sprintf("rp-node-%d", nodeID)
+}
+
+func DefaultImage() string {
+	return redpandaImageBase
 }
 
 func DefaultCtx() (context.Context, context.CancelFunc) {
@@ -122,7 +135,7 @@ func GetState(c Client, nodeID uint) (*NodeState, error) {
 		return nil, err
 	}
 	hostKafkaPort, err := getHostPort(
-		config.DefaultKafkaPort,
+		externalKafkaPort,
 		containerJSON,
 	)
 	if err != nil {
@@ -200,7 +213,7 @@ func RemoveNetwork(c Client) error {
 func CreateNode(
 	c Client,
 	nodeID, kafkaPort, proxyPort, rpcPort, metricsPort uint,
-	netID string,
+	netID, image string,
 	args ...string,
 ) (*NodeState, error) {
 	rPort, err := nat.NewPort(
@@ -212,7 +225,7 @@ func CreateNode(
 	}
 	kPort, err := nat.NewPort(
 		"tcp",
-		strconv.Itoa(config.DefaultKafkaPort),
+		strconv.Itoa(int(externalKafkaPort)),
 	)
 	if err != nil {
 		return nil, err
@@ -241,21 +254,21 @@ func CreateNode(
 		"--node-id",
 		fmt.Sprintf("%d", nodeID),
 		"--kafka-addr",
-		fmt.Sprintf("%s:%d", ip, config.DefaultKafkaPort),
+		ListenAddresses(ip, config.DefaultKafkaPort, externalKafkaPort),
 		"--pandaproxy-addr",
-		fmt.Sprintf("%s:%d", ip, config.DefaultProxyPort),
+		ListenAddresses(ip, config.DefaultProxyPort, proxyPort),
 		"--rpc-addr",
 		fmt.Sprintf("%s:%d", ip, config.Default().Redpanda.RPCServer.Port),
 		"--advertise-kafka-addr",
-		HostAddr(kafkaPort),
+		AdvertiseAddresses(ip, config.DefaultKafkaPort, kafkaPort),
 		"--advertise-pandaproxy-addr",
-		HostAddr(proxyPort),
+		AdvertiseAddresses(ip, config.DefaultProxyPort, proxyPort),
 		"--advertise-rpc-addr",
 		fmt.Sprintf("%s:%d", ip, config.Default().Redpanda.RPCServer.Port),
 		"--smp 1 --memory 1G --reserve-memory 0M",
 	}
 	containerConfig := container.Config{
-		Image:    redpandaImageBase,
+		Image:    image,
 		Hostname: hostname,
 		Cmd:      append(cmd, args...),
 		ExposedPorts: nat.PortSet{
@@ -301,6 +314,7 @@ func CreateNode(
 		&containerConfig,
 		&hostConfig,
 		&networkConfig,
+		nil,
 		hostname,
 	)
 	if err != nil {
@@ -314,9 +328,10 @@ func CreateNode(
 	}, nil
 }
 
-func PullImage(c Client) error {
+func PullImage(c Client, image string) error {
+	log.Debugf("Pulling image: %s", image)
 	ctx, _ := context.WithTimeout(context.Background(), 5*time.Minute)
-	res, err := c.ImagePull(ctx, redpandaImage, types.ImagePullOptions{})
+	res, err := c.ImagePull(ctx, image, types.ImagePullOptions{})
 	if res != nil {
 		defer res.Close()
 		buf := bytes.Buffer{}
@@ -329,10 +344,10 @@ func PullImage(c Client) error {
 	return ctx.Err()
 }
 
-func CheckIfImgPresent(c Client) (bool, error) {
+func CheckIfImgPresent(c Client, image string) (bool, error) {
 	ctx, _ := DefaultCtx()
 	filters := filters.NewArgs(
-		filters.Arg("reference", redpandaImageBase),
+		filters.Arg("reference", image),
 	)
 	imgs, err := c.ImageList(ctx, types.ImageListOptions{
 		Filters: filters,

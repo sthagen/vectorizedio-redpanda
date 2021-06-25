@@ -36,7 +36,7 @@ func TestValidateUpdate(t *testing.T) {
 			Replicas:      pointer.Int32Ptr(replicas2),
 			Configuration: v1alpha1.RedpandaConfig{},
 			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
+				Requests: corev1.ResourceList{
 					corev1.ResourceMemory: resource.MustParse("1Gi"),
 				},
 			},
@@ -72,7 +72,7 @@ func TestValidateUpdate(t *testing.T) {
 	statusError := err.(*apierrors.StatusError)
 	expectedFields := []string{
 		field.NewPath("spec").Child("replicas").String(),
-		field.NewPath("spec").Child("resources").Child("limits").Child("memory").String(),
+		field.NewPath("spec").Child("resources").Child("requests").Child("memory").String(),
 		field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(0).Child("tls").Child("requireclientauth").String(),
 		field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(0).Child("tls").Child("nodeSecretRef").String(),
 	}
@@ -108,8 +108,9 @@ func TestValidateUpdate_NoError(t *testing.T) {
 				RPCServer: v1alpha1.SocketAddress{Port: 126},
 			},
 			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
+				Requests: corev1.ResourceList{
 					corev1.ResourceMemory: resource.MustParse("2Gi"),
+					corev1.ResourceCPU:    resource.MustParse("1"),
 				},
 			},
 		},
@@ -320,6 +321,15 @@ func TestValidateUpdate_NoError(t *testing.T) {
 
 		assert.Error(t, err)
 	})
+
+	t.Run("pandaproxy tls disabled with client auth enabled", func(t *testing.T) {
+		tls := redpandaCluster.DeepCopy()
+		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI,
+			v1alpha1.PandaproxyAPI{TLS: v1alpha1.PandaproxyAPITLS{Enabled: false, RequireClientAuth: true}})
+
+		err := tls.ValidateUpdate(redpandaCluster)
+		assert.Error(t, err)
+	})
 }
 
 //nolint:funlen // this is ok for a test
@@ -336,8 +346,9 @@ func TestCreation(t *testing.T) {
 				RPCServer: v1alpha1.SocketAddress{Port: 126},
 			},
 			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					corev1.ResourceMemory: resource.MustParse("2G"),
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+					corev1.ResourceCPU:    resource.MustParse("1"),
 				},
 			},
 		},
@@ -409,8 +420,9 @@ func TestCreation(t *testing.T) {
 	t.Run("incorrect memory", func(t *testing.T) {
 		memory := redpandaCluster.DeepCopy()
 		memory.Spec.Resources = corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
+			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resource.MustParse("1Gi"),
+				corev1.ResourceCPU:    resource.MustParse("2"),
 			},
 		}
 
@@ -524,6 +536,15 @@ func TestCreation(t *testing.T) {
 			v1alpha1.PandaproxyAPI{Port: 321})
 		err := multiPort.ValidateCreate()
 
+		assert.Error(t, err)
+	})
+
+	t.Run("pandaproxy tls disabled but client auth enabled", func(t *testing.T) {
+		tls := redpandaCluster.DeepCopy()
+		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI,
+			v1alpha1.PandaproxyAPI{TLS: v1alpha1.PandaproxyAPITLS{Enabled: false, RequireClientAuth: true}})
+
+		err := tls.ValidateCreate()
 		assert.Error(t, err)
 	})
 }

@@ -38,6 +38,11 @@ enum class errc : int16_t {
     update_in_progress,
     user_exists,
     user_does_not_exist,
+    invalid_producer_epoch,
+    sequence_out_of_order,
+    generic_tx_error,
+    node_does_not_exists,
+    invalid_node_opeartion
 };
 struct errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::errc"; }
@@ -96,9 +101,18 @@ struct errc_category final : public std::error_category {
             return "User already exists";
         case errc::user_does_not_exist:
             return "User does not exist";
-        default:
-            return "cluster::errc::unknown";
+        case errc::invalid_producer_epoch:
+            return "Invalid idempotent producer epoch";
+        case errc::sequence_out_of_order:
+            return "Producer sequence ID out of order";
+        case errc::generic_tx_error:
+            return "Generic error when processing transactional requests";
+        case errc::node_does_not_exists:
+            return "Requested node does not exists";
+        case errc::invalid_node_opeartion:
+            return "Requested node opeartion is invalid";
         }
+        return "cluster::errc::unknown";
     }
 };
 inline const std::error_category& error_category() noexcept {

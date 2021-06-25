@@ -12,13 +12,16 @@
 #pragma once
 #include "cluster/fwd.h"
 #include "cluster/partition.h"
+#include "cluster/tx_utils.h"
 #include "kafka/protocol/fwd.h"
+#include "kafka/protocol/offset_commit.h"
 #include "kafka/server/logger.h"
 #include "kafka/server/member.h"
 #include "kafka/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "seastarx.h"
+#include "utils/mutex.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -107,12 +110,25 @@ public:
     using clock_type = ss::lowres_clock;
     using duration_type = clock_type::duration;
 
-    static constexpr model::control_record_version fence_control_record_version{
-      0};
-    static constexpr model::control_record_version prepared_tx_record_version{
-      0};
-    static constexpr model::control_record_version commit_tx_record_version{0};
-    static constexpr model::control_record_version aborted_tx_record_version{0};
+    static constexpr int8_t fence_control_record_version{0};
+    static constexpr int8_t prepared_tx_record_version{0};
+    static constexpr int8_t commit_tx_record_version{0};
+    static constexpr int8_t aborted_tx_record_version{0};
+
+    struct offset_commit_stages {
+        explicit offset_commit_stages(offset_commit_response resp)
+          : dispatched(ss::now())
+          , committed(
+              ss::make_ready_future<offset_commit_response>(std::move(resp))) {}
+
+        offset_commit_stages(
+          ss::future<> dispatched, ss::future<offset_commit_response> resp)
+          : dispatched(std::move(dispatched))
+          , committed(std::move(resp)) {}
+
+        ss::future<> dispatched;
+        ss::future<offset_commit_response> committed;
+    };
 
     struct offset_metadata {
         model::offset log_offset;
@@ -122,15 +138,10 @@ public:
         // https://github.com/vectorizedio/redpanda/issues/1181
     };
 
-    struct group_prepared_tx {
+    struct prepared_tx {
         model::producer_identity pid;
-        kafka::group_id group_id;
-        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
-    };
-
-    struct aborted_tx {
-        kafka::group_id group_id;
         model::tx_seq tx_seq;
+        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
     };
 
     group(
@@ -241,7 +252,7 @@ public:
      * specifies at least one protocol that is supported by all members of
      * the group.
      */
-    bool supports_protocols(const join_group_request& r);
+    bool supports_protocols(const join_group_request& r) const;
 
     /**
      * \brief Add a member to the group.
@@ -435,7 +446,7 @@ public:
     ss::future<txn_offset_commit_response>
     store_txn_offsets(txn_offset_commit_request r);
 
-    ss::future<offset_commit_response> store_offsets(offset_commit_request&& r);
+    offset_commit_stages store_offsets(offset_commit_request&& r);
 
     ss::future<txn_offset_commit_response>
     handle_txn_offset_commit(txn_offset_commit_request r);
@@ -449,8 +460,7 @@ public:
     ss::future<cluster::abort_group_tx_reply>
     handle_abort_tx(cluster::abort_group_tx_request r);
 
-    ss::future<offset_commit_response>
-    handle_offset_commit(offset_commit_request&& r);
+    offset_commit_stages handle_offset_commit(offset_commit_request&& r);
 
     ss::future<cluster::commit_group_tx_reply>
     handle_commit_tx(cluster::commit_group_tx_request r);
@@ -471,7 +481,14 @@ public:
         return inserted;
     }
 
-    void insert_prepared(group_prepared_tx);
+    void insert_prepared(prepared_tx);
+
+    void try_set_fence(model::producer_id id, model::producer_epoch epoch) {
+        auto [fence_it, _] = _fence_pid_epoch.try_emplace(id, epoch);
+        if (fence_it->second < epoch) {
+            fence_it->second = epoch;
+        }
+    }
 
     // helper for the kafka api: describe groups
     described_group describe() const;
@@ -494,7 +511,48 @@ private:
 
     friend std::ostream& operator<<(std::ostream&, const group&);
 
+    class ctx_log {
+    public:
+        explicit ctx_log(const group& group)
+          : _group(group) {}
+
+        template<typename... Args>
+        void info(const char* format, Args&&... args) const {
+            log(ss::log_level::info, format, std::forward<Args>(args)...);
+        }
+
+        template<typename... Args>
+        void debug(const char* format, Args&&... args) const {
+            log(ss::log_level::debug, format, std::forward<Args>(args)...);
+        }
+
+        template<typename... Args>
+        void trace(const char* format, Args&&... args) const {
+            log(ss::log_level::trace, format, std::forward<Args>(args)...);
+        }
+
+        template<typename... Args>
+        void log(ss::log_level lvl, const char* format, Args&&... args) const {
+            if (unlikely(klog.is_enabled(lvl))) {
+                auto line_fmt = ss::sstring("[N:{} S:{} G:{}] ") + format;
+                klog.log(
+                  lvl,
+                  line_fmt.c_str(),
+                  _group.id()(),
+                  _group.state(),
+                  _group.generation(),
+                  std::forward<Args>(args)...);
+            }
+        }
+
+    private:
+        const group& _group;
+    };
+
     model::record_batch checkpoint(const assignments_type& assignments);
+
+    cluster::abort_origin
+    get_abort_origin(const model::producer_identity&, model::tx_seq) const;
 
     kafka::group_id _id;
     group_state _state;
@@ -512,8 +570,13 @@ private:
     config::configuration& _conf;
     ss::lw_shared_ptr<cluster::partition> _partition;
     absl::node_hash_map<model::topic_partition, offset_metadata> _offsets;
+    model::violation_recovery_policy _recovery_policy;
+    ctx_log _ctxlog;
 
+    mutex _tx_mutex;
     model::term_id _term;
+    absl::node_hash_map<model::producer_id, model::producer_epoch>
+      _fence_pid_epoch;
     absl::node_hash_map<model::topic_partition, offset_metadata>
       _pending_offset_commits;
 
@@ -524,11 +587,8 @@ private:
     };
 
     struct volatile_tx {
+        model::tx_seq tx_seq;
         absl::node_hash_map<model::topic_partition, volatile_offset> offsets;
-    };
-
-    struct prepared_tx {
-        absl::node_hash_map<model::topic_partition, offset_metadata> offsets;
     };
 
     absl::node_hash_map<model::producer_identity, volatile_tx> _volatile_txs;

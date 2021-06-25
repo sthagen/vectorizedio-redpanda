@@ -2,6 +2,7 @@
 title: Docker Quick Start Guide
 order: 0
 ---
+
 # Docker Quick Start Guide
 
 Redpanda is a modern [streaming platform](/blog/intelligent-data-api/) for mission critical workloads.
@@ -30,7 +31,7 @@ With a 1-node cluster you can test out a simple implementation of Redpanda.
 ```bash
 docker run -d --pull=always --name=redpanda-1 --rm \
 -p 9092:9092 \
-vectorized/redpanda:latest \
+docker.vectorized.io/vectorized/redpanda:latest \
 start \
 --overprovisioned \
 --smp 1  \
@@ -73,7 +74,7 @@ docker run -d \
 -p 8082:8082 \
 -p 9092:9092 \
 -v "redpanda1:/var/lib/redpanda/data" \
-vectorized/redpanda start \
+docker.vectorized.io/vectorized/redpanda start \
 --smp 1  \
 --memory 1G  \
 --reserve-memory 0M \
@@ -94,7 +95,7 @@ docker run -d \
 --net=redpandanet \
 -p 9093:9093 \
 -v "redpanda2:/var/lib/redpanda/data" \
-vectorized/redpanda start \
+docker.vectorized.io/vectorized/redpanda start \
 --smp 1  \
 --memory 1G  \
 --reserve-memory 0M \
@@ -116,7 +117,7 @@ docker run -d \
 --net=redpandanet \
 -p 9094:9094 \
 -v "redpanda3:/var/lib/redpanda/data" \
-vectorized/redpanda start \
+docker.vectorized.io/vectorized/redpanda start \
 --smp 1  \
 --memory 1G  \
 --reserve-memory 0M \
@@ -174,7 +175,7 @@ You can easily try out different docker configuration parameters with a docker-c
         - --advertise-kafka-addr
         - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
         # NOTE: Please use the latest version here!
-        image: vectorized/redpanda:v21.4.13
+        image: docker.vectorized.io/vectorized/redpanda:v21.4.13
         container_name: redpanda-1
         ports:
         - 9092:9092
@@ -254,3 +255,5 @@ docker network rm redpandanet
 - Get a multi-node cluster up and running using [`rpk container`](/docs/guide-rpk-container).
 - Use the [Quick Start Docker Guide](/docs/quick-start-docker) to try out Redpanda using Docker.
 - Want to setup a production cluster? Check out our [Production Deployment Guide](/docs/production-deployment).
+
+<img src="https://static.scarf.sh/a.png?x-pxid=3c187215-e862-4b67-8057-45aa9a779055" />

@@ -423,9 +423,11 @@ struct producer_identity {
     int64_t id{-1};
     int16_t epoch{0};
 
-    model::producer_id get_id() { return model::producer_id(id); }
+    model::producer_id get_id() const { return model::producer_id(id); }
 
-    model::producer_epoch get_epoch() { return model::producer_epoch(epoch); }
+    model::producer_epoch get_epoch() const {
+        return model::producer_epoch(epoch);
+    }
 
     auto operator<=>(const producer_identity&) const = default;
 
@@ -473,7 +475,7 @@ constexpr uint32_t packed_record_batch_header_size
   = sizeof(model::record_batch_header::header_crc)          // 4
     + sizeof(model::record_batch_header::size_bytes)        // 4
     + sizeof(model::record_batch_header::base_offset)       // 8
-    + sizeof(model::record_batch_type::type)                // 1
+    + sizeof(model::record_batch_type)                      // 1
     + sizeof(model::record_batch_header::crc)               // 4
     + sizeof(model::record_batch_attributes::type)          // 2
     + sizeof(model::record_batch_header::last_offset_delta) // 4
