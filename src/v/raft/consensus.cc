@@ -43,7 +43,7 @@ consensus::consensus(
   group_configuration initial_cfg,
   timeout_jitter jit,
   storage::log l,
-  ss::io_priority_class io_priority,
+  scheduling_config scheduling_config,
   model::timeout_clock::duration disk_timeout,
   consensus_client_protocol client,
   consensus::leader_cb_t cb,
@@ -52,7 +52,7 @@ consensus::consensus(
   , _group(group)
   , _jit(std::move(jit))
   , _log(l)
-  , _io_priority(io_priority)
+  , _scheduling(scheduling_config)
   , _disk_timeout(disk_timeout)
   , _client_protocol(client)
   , _leader_notification(std::move(cb))
@@ -68,7 +68,7 @@ consensus::consensus(
   , _snapshot_mgr(
       std::filesystem::path(_log.config().work_directory()),
       storage::snapshot_manager::default_snapshot_filename,
-      _io_priority)
+      _scheduling.default_iopc)
   , _configuration_manager(std::move(initial_cfg), _group, _storage, _ctxlog)
   , _append_requests_buffer(*this, 256) {
     setup_metrics();
@@ -415,7 +415,7 @@ void consensus::dispatch_recovery(follower_index_metadata& idx) {
     // background
     (void)with_gate(_bg, [this, node_id = idx.node_id] {
         auto recovery = std::make_unique<recovery_stm>(
-          this, node_id, _io_priority);
+          this, node_id, _scheduling);
         auto ptr = recovery.get();
         return ptr->apply()
           .handle_exception([this, node_id](const std::exception_ptr& e) {
@@ -929,11 +929,6 @@ ss::future<> consensus::start() {
                   _term = lstats.dirty_offset_term;
                   _voted_for = {};
               }
-              vlog(
-                _ctxlog.info,
-                "Recovered, log offsets: {}, term:{}",
-                lstats,
-                _term);
               /**
                * The configuration manager state may be divereged from the log
                * state, as log is flushed lazily, we have to make sure that the
@@ -994,7 +989,15 @@ ss::future<> consensus::start() {
               start_dispatching_disk_append_events();
               return _event_manager.start();
           })
-          .then([this] { _append_requests_buffer.start(); });
+          .then([this] { _append_requests_buffer.start(); })
+          .then([this] {
+              vlog(
+                _ctxlog.info,
+                "started raft, log offsets: {}, term: {}, configuration: {}",
+                _log.offsets(),
+                _term,
+                _configuration_manager.get_latest());
+          });
     });
 }
 
@@ -1412,7 +1415,9 @@ consensus::do_append_entries(append_entries_request&& r) {
             vlog(
               _ctxlog.info,
               "Stale append entries request processed, entry is already "
-              "present");
+              "present, request: {}, current state: {}",
+              r.meta,
+              meta());
             return ss::make_ready_future<append_entries_reply>(
               std::move(reply));
         }
@@ -1429,7 +1434,8 @@ consensus::do_append_entries(append_entries_request&& r) {
           truncate_at);
         _probe.log_truncated();
         return _log
-          .truncate(storage::truncate_config(truncate_at, _io_priority))
+          .truncate(
+            storage::truncate_config(truncate_at, _scheduling.default_iopc))
           .then([this, truncate_at] {
               _last_quorum_replicated_index = std::min(
                 details::prev_offset(truncate_at),
@@ -1524,7 +1530,8 @@ ss::future<> consensus::truncate_to_latest_snapshot() {
     return _configuration_manager.prefix_truncate(_last_snapshot_index)
       .then([this] {
           return _log.truncate_prefix(storage::truncate_prefix_config(
-            details::next_offset(_last_snapshot_index), _io_priority));
+            details::next_offset(_last_snapshot_index),
+            _scheduling.default_iopc));
       });
 }
 
@@ -1791,7 +1798,7 @@ ss::future<storage::append_result> consensus::disk_append(
       // no fsync explicit on a per write, we verify at the end to
       // batch fsync
       storage::log_append_config::fsync::no,
-      _io_priority,
+      _scheduling.default_iopc,
       model::timeout_clock::now() + _disk_timeout};
     return details::for_each_ref_extract_configuration(
              _log.offsets().dirty_offset,
@@ -1888,6 +1895,11 @@ void consensus::maybe_update_leader_commit_idx() {
     (void)with_gate(_bg, [this] {
         return _op_lock.get_units().then(
           [this](ss::semaphore_units<> u) mutable {
+              // do not update committed index if not the leader, this check has
+              // to be done under the semaphore
+              if (!is_leader()) {
+                  return ss::now();
+              }
               return do_maybe_update_leader_commit_idx(std::move(u));
           });
     }).handle_exception([this](const std::exception_ptr& e) {

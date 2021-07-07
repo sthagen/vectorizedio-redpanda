@@ -156,6 +156,7 @@ struct configuration final : public config_store {
     property<int16_t> compaction_ctrl_min_shares;
     property<int16_t> compaction_ctrl_max_shares;
     property<std::optional<size_t>> compaction_ctrl_backlog_size;
+    property<std::chrono::milliseconds> members_backend_retry_ms;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
@@ -169,6 +170,11 @@ struct configuration final : public config_store {
     property<bool> cloud_storage_disable_tls;
     property<int16_t> cloud_storage_api_endpoint_port;
     property<std::optional<ss::sstring>> cloud_storage_trust_file;
+    property<std::chrono::milliseconds> cloud_storage_initial_backoff_ms;
+    property<std::chrono::milliseconds> cloud_storage_segment_upload_timeout_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_manifest_upload_timeout_ms;
+
     one_or_many_property<ss::sstring> superusers;
 
     // kakfa queue depth control: latency ewma

@@ -148,6 +148,14 @@ scheduler_service_impl::get_archival_service_config() {
       = config::shard_local_cfg().cloud_storage_reconciliation_ms.value(),
       .connection_limit = s3_connection_limit(
         config::shard_local_cfg().cloud_storage_max_connections.value()),
+      .initial_backoff
+      = config::shard_local_cfg().cloud_storage_initial_backoff_ms.value(),
+      .segment_upload_timeout
+      = config::shard_local_cfg()
+          .cloud_storage_segment_upload_timeout_ms.value(),
+      .manifest_upload_timeout
+      = config::shard_local_cfg()
+          .cloud_storage_manifest_upload_timeout_ms.value(),
       .svc_metrics_disabled = service_metrics_disabled(
         static_cast<bool>(disable_metrics)),
       .ntp_metrics_disabled = per_ntp_metrics_disabled(
@@ -170,7 +178,9 @@ scheduler_service_impl::scheduler_service_impl(
   , _stop_limit(conf.connection_limit())
   , _rtcnode(_as)
   , _probe(conf.svc_metrics_disabled)
-  , _remote(conf.connection_limit, conf.client_config, _probe) {}
+  , _remote(conf.connection_limit, conf.client_config, _probe)
+  , _topic_manifest_upload_timeout(conf.manifest_upload_timeout)
+  , _initial_backoff(conf.initial_backoff) {}
 
 scheduler_service_impl::scheduler_service_impl(
   ss::sharded<storage::api>& api,
@@ -241,7 +251,7 @@ ss::future<> scheduler_service_impl::upload_topic_manifest(
         while (!uploaded && !_gate.is_closed()) {
             // This runs asynchronously so we can just retry indefinetly
             retry_chain_node fib(
-              max_topic_manifest_upload_backoff, 100ms, &_rtcnode);
+              _topic_manifest_upload_timeout, _initial_backoff, &_rtcnode);
             vlog(
               archival_log.info,
               "{} Uploading topic manifest {}",
@@ -312,9 +322,13 @@ ss::future<ss::stop_iteration> scheduler_service_impl::add_ntp_archiver(
                 archiver->get_ntp());
               // Start topic manifest upload
               // asynchronously
-              (void)upload_topic_manifest(
-                model::topic_namespace(ntp.ns, ntp.tp.topic),
-                archiver->get_revision_id());
+              if (ntp.tp.partition == 0) {
+                  // Upload manifest once per topic. GCS has strict
+                  // limits for single object updates.
+                  (void)upload_topic_manifest(
+                    model::topic_namespace(ntp.ns, ntp.tp.topic),
+                    archiver->get_revision_id());
+              }
               _probe.start_archiving_ntp();
               return ss::make_ready_future<ss::stop_iteration>(
                 ss::stop_iteration::yes);
@@ -423,10 +437,12 @@ ss::future<> scheduler_service_impl::reconcile_archivers() {
         if (remove_fut.failed()) {
             vlog(
               archival_log.error, "{} Failed to remove archivers", _rtcnode());
+            remove_fut.ignore_ready_future();
         }
         if (create_fut.failed()) {
             vlog(
               archival_log.error, "{} Failed to create archivers", _rtcnode());
+            create_fut.ignore_ready_future();
         }
     }
 }
@@ -434,8 +450,8 @@ ss::future<> scheduler_service_impl::reconcile_archivers() {
 ss::future<> scheduler_service_impl::run_uploads() {
     gate_guard g(_gate);
     try {
-        const ss::lowres_clock::duration initial_backoff = 10ms;
-        const ss::lowres_clock::duration max_backoff = 5s;
+        static constexpr ss::lowres_clock::duration initial_backoff = 100ms;
+        static constexpr ss::lowres_clock::duration max_backoff = 10s;
         ss::lowres_clock::duration backoff = initial_backoff;
         while (!_gate.is_closed()) {
             int quota = _queue.size();
@@ -472,10 +488,30 @@ ss::future<> scheduler_service_impl::run_uploads() {
                     .num_failed = lhs.num_failed + rhs.num_failed};
               });
 
-            if (total.num_succeded == 0 && total.num_failed == 0) {
+            _probe.successful_upload(total.num_succeded);
+            _probe.failed_upload(total.num_failed);
+
+            if (total.num_failed != 0) {
+                vlog(
+                  archival_log.error,
+                  "Failed to upload {} segments out of {}",
+                  total.num_failed,
+                  total.num_succeded + total.num_failed);
+            } else if (total.num_succeded != 0) {
+                vlog(
+                  archival_log.debug,
+                  "Successfuly upload {} segments",
+                  total.num_succeded);
+            }
+
+            if (total.num_succeded == 0) {
                 // The backoff algorithm here is used to prevent high CPU
                 // utilization when redpanda is not receiving any data and there
-                // is nothing to update. We want to limit max backoff duration
+                // is nothing to update. Also, we want to limit amount of
+                // logging if nothing is uploaded because of bad configuration
+                // or some other problem.
+                //
+                // We want to limit max backoff duration
                 // to some reasonable value (e.g. 5s) because otherwise it can
                 // grow very large disabling the archival storage
                 vlog(
@@ -488,20 +524,7 @@ ss::future<> scheduler_service_impl::run_uploads() {
                     backoff = max_backoff;
                 }
                 continue;
-            } else if (total.num_failed != 0) {
-                vlog(
-                  archival_log.error,
-                  "Failed to upload {} segments out of {}",
-                  total.num_failed,
-                  total.num_succeded);
-            } else {
-                vlog(
-                  archival_log.debug,
-                  "Successfuly upload {} segments",
-                  total.num_succeded);
             }
-            _probe.successful_upload(total.num_succeded);
-            _probe.failed_upload(total.num_failed);
         }
     } catch (const ss::sleep_aborted&) {
         vlog(archival_log.debug, "Upload loop aborted");

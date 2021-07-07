@@ -626,6 +626,12 @@ configuration::configuration()
       "target compaction backlog would be equal to ",
       required::no,
       std::nullopt)
+  , members_backend_retry_ms(
+      *this,
+      "members_backend_retry_ms",
+      "Time between members backend reconciliation loop retries ",
+      required::no,
+      5s)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",
@@ -693,6 +699,24 @@ configuration::configuration()
       "during TLS handshake",
       required::no,
       std::nullopt)
+  , cloud_storage_initial_backoff_ms(
+      *this,
+      "cloud_storage_initial_backoff_ms",
+      "Initial backoff time for exponetial backoff algorithm (ms)",
+      required::no,
+      100ms)
+  , cloud_storage_segment_upload_timeout_ms(
+      *this,
+      "cloud_storage_segment_upload_timeout_ms",
+      "Log segment upload timeout (ms)",
+      required::no,
+      30s)
+  , cloud_storage_manifest_upload_timeout_ms(
+      *this,
+      "cloud_storage_manifest_upload_timeout_ms",
+      "Manifest upload timeout (ms)",
+      required::no,
+      10s)
   , superusers(
       *this, "superusers", "List of superuser usernames", required::no, {})
   , kafka_qdc_latency_alpha(
