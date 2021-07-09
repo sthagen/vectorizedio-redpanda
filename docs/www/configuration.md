@@ -5,18 +5,25 @@ order: 5
 # Custom configuration
 
 The redpanda configuration is by default loaded from and persisted to
-`/etc/redpanda/redpanda.yaml`. It is broadly divided into 2 sections, `redpanda`
-and `rpk`.
+`/etc/redpanda/redpanda.yaml`. It is broadly divided into a few sections:
 
-The `redpanda` section contains all the runtime configuration, such as the
-cluster member IPs, the node ID, data directory, and so on. The `rpk` section
-contains configuration related to tuning the machine that redpanda will run on.
+- `redpanda` - The runtime configuration parameters, such as the cluster member IPs, the node ID, data directory
+- `pandaproxy` - Parameters for the Redpanda REST API
+- `pandaproxy_client` - Parameters for the REST API client that Redpanda uses to make calls to other nodes
+- `rpk` - Configuration related to tuning the container that redpanda
+
+To create a simple config file that you can customize, run:
+
+```
+rpk config init
+```
 
 ## Sample configuration
 
 Here’s a sample of the config. The [configuration reference](#config-parameter-reference) shows a more complete list of the configuration options.
 
-Only include in your `redpanda.yaml` file the sections that you want to customize.
+This is not a valid Redpanda configuration file, but it shows the parameters that you can configure in the config file.
+Only include the sections that you want to customize.
 
 ```yaml
 # organization and cluster_id help Vectorized identify your system.
@@ -465,7 +472,50 @@ pandaproxy_client:
   # Default: ""
   scram_password: ""
 
+# The Schema Registry provides a RESTful interface for Schema storage, retrieval, and compatibility.
+# To disable the Schema Registry, remove this top-level config node
+schema_registry:
+  # A list of address and port to listen for Schema Registry API requests.
+  # Default: 0.0.0.0:8082
+  schema_registry_api: 
+  - address: "0.0.0.0"
+    name: internal
+    port: 8081
+  - address: "0.0.0.0"
+    name: external
+    port: 18081
+
+  # A list of TLS configurations for the Schema Registry API.
+  # Default: null
+  schema_registry_api_tls:
+  - name: external
+    # Whether to enable TLS.
+    enabled: false
+    # Require client authentication
+    require_client_auth: false
+    # The path to the server certificate PEM file.
+    cert_file: ""
+    # The path to the server key PEM file
+    key_file: ""
+    # The path to the truststore PEM file. Only required if client
+    # authentication is enabled.
+    truststore_file: ""
+  - name: internal
+    enabled: false
+
+# The Schema Registry client config
+# See pandaproxy_client for a list of options
+schema_registry_client:
+
 rpk:
+  # Add optional flags to have rpk start redpanda with specific parameters.
+  # The available start flags are found in: /src/v/config/configuration.cc
+  additional_start_flags:
+    - "--overprovisioned"
+    - "--smp=2"
+    - "--memory=4G"
+    - "--default-log-level=info"
+
   # TLS configuration to allow rpk to make requests to the redpanda API.
   tls:
     # The path to the root CA certificate (PEM).
