@@ -123,9 +123,18 @@ public:
         return r;
     }
 
+    std::optional<tm_transaction> get_tx_by_id(kafka::transactional_id id) {
+        auto tx_it = _tx_table.find(id);
+        std::optional<tm_transaction> r;
+        if (tx_it != _tx_table.end()) {
+            r = tx_it->second;
+        }
+        return r;
+    }
+
     ss::future<bool> barrier();
 
-    ss::future<std::optional<tm_transaction>>
+    ss::future<checked<tm_transaction, tm_stm::op_status>>
       get_actual_tx(kafka::transactional_id);
     ss::future<checked<tm_transaction, tm_stm::op_status>>
       mark_tx_ready(kafka::transactional_id);
@@ -158,7 +167,7 @@ public:
     std::vector<kafka::transactional_id> get_expired_txs();
 
 private:
-    ss::future<> load_snapshot(stm_snapshot_header, iobuf&&) override;
+    ss::future<> apply_snapshot(stm_snapshot_header, iobuf&&) override;
     ss::future<stm_snapshot> take_snapshot() override;
 
     std::chrono::milliseconds _sync_timeout;

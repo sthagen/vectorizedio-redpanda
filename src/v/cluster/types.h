@@ -64,7 +64,9 @@ enum class tx_errc {
     unknown_server_error,
     // an unspecified error happened, a client may assume it had zero effect on
     // the target node
-    request_rejected
+    request_rejected,
+    invalid_producer_id_mapping,
+    invalid_txn_state
 };
 struct tx_errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::tx_errc"; }
@@ -310,8 +312,8 @@ struct topic_properties {
     std::optional<model::compaction_strategy> compaction_strategy;
     std::optional<model::timestamp_type> timestamp_type;
     std::optional<size_t> segment_size;
-    tristate<size_t> retention_bytes;
-    tristate<std::chrono::milliseconds> retention_duration;
+    tristate<size_t> retention_bytes{std::nullopt};
+    tristate<std::chrono::milliseconds> retention_duration{std::nullopt};
 
     bool is_compacted() const;
     bool has_overrides() const;
