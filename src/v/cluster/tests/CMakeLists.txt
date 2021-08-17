@@ -36,6 +36,7 @@ set(srcs
     controller_api_tests.cc
     decommissioning_tests.cc
     replicas_rebalancing_tests.cc
+    create_partitions_test.cc
     id_allocator_stm_test.cc)
 
 rp_test(
@@ -59,5 +60,14 @@ rp_test(
   SOURCES partition_moving_test.cc
   LIBRARIES v::seastar_testing_main v::application v::storage_test_utils
   DEFINITIONS SEASTAR_TESTING_MAIN
+  LABELS cluster
+)
+
+rp_test(
+  UNIT_TEST
+  BINARY_NAME leader_balancer_test
+  SOURCES leader_balancer_test.cc
+  DEFINITIONS BOOST_TEST_DYN_LINK
+  LIBRARIES Boost::unit_test_framework v::cluster
   LABELS cluster
 )
