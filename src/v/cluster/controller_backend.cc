@@ -130,18 +130,6 @@ std::error_code check_configuration_update(
     for (auto& id : group_cfg.current_config().voters) {
         all_ids.emplace(id.id());
     }
-    /**
-     * if current configuration doesn't include current node it may not be fully
-     * updated as current node may stop receiving updates. Therefore we use
-     * learners to calculate is replica set is up to date. (If configuration
-     * contains current node it will receive all updates so eventually all the
-     * nodes will become a voters)
-     */
-    if (!includes_self) {
-        for (auto& id : group_cfg.current_config().learners) {
-            all_ids.emplace(id.id());
-        }
-    }
 
     // there is different number of brokers in group configuration
     if (all_ids.size() != bs.size()) {
@@ -856,17 +844,11 @@ ss::future<> controller_backend::add_to_shard_table(
   uint32_t shard,
   model::revision_id revision) {
     // update shard_table: broadcast
-
+    vlog(
+      clusterlog.trace, "adding {} to shard table at {}", revision, ntp, shard);
     return _shard_table.invoke_on_all(
-      [self = _self, ntp = std::move(ntp), raft_group, shard, revision](
+      [ntp = std::move(ntp), raft_group, shard, revision](
         shard_table& s) mutable {
-          vlog(
-            clusterlog.trace,
-            "[n: {}, r: {}] adding {} to shard table at {}",
-            self,
-            revision,
-            ntp,
-            shard);
           s.update(ntp, raft_group, shard, revision);
       });
 }

@@ -156,11 +156,15 @@ ss::future<> controller::start() {
           });
       })
       .then([this] {
-          return _stm.invoke_on(controller_stm_shard, &controller_stm::start);
-      })
-      .then([this] {
           return _members_manager.invoke_on(
             members_manager::shard, &members_manager::start);
+      })
+      .then([this] {
+          /**
+           * Controller state machine MUST be started after all entities that
+           * receives `apply_update` notifications
+           */
+          return _stm.invoke_on(controller_stm_shard, &controller_stm::start);
       })
       .then([this] {
           return _stm.invoke_on(controller_stm_shard, [](controller_stm& stm) {
@@ -198,6 +202,7 @@ ss::future<> controller::start() {
             std::ref(_as),
             config::shard_local_cfg().leader_balancer_idle_timeout(),
             config::shard_local_cfg().leader_balancer_mute_timeout(),
+            config::shard_local_cfg().leader_balancer_node_mute_timeout(),
             _raft0);
           return _leader_balancer->start();
       });

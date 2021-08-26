@@ -259,6 +259,12 @@ public:
 
     model::offset start_offset() const { return _log.offsets().start_offset; }
 
+    model::offset dirty_offset() const { return _log.offsets().dirty_offset; }
+
+    ss::condition_variable& commit_index_updated() {
+        return _commit_index_updated;
+    }
+
     event_manager& events() { return _event_manager; }
 
     ss::future<model::offset> monitor_log_eviction(ss::abort_source& as) {
@@ -338,6 +344,12 @@ private:
     do_append_entries(append_entries_request&&);
     ss::future<install_snapshot_reply>
     do_install_snapshot(install_snapshot_request&& r);
+    ss::future<> do_start();
+
+    ss::future<result<replicate_result>> dispatch_replicate(
+      append_entries_request,
+      std::vector<ss::semaphore_units<>>,
+      absl::flat_hash_map<vnode, follower_req_seq>);
     /**
      * Hydrate the consensus state with the data from the snapshot
      */

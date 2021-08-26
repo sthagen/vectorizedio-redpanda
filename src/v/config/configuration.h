@@ -182,6 +182,8 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_segment_upload_timeout_ms;
     property<std::chrono::milliseconds>
       cloud_storage_manifest_upload_timeout_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_max_connection_idle_time_ms;
 
     one_or_many_property<ss::sstring> superusers;
 
@@ -205,6 +207,7 @@ struct configuration final : public config_store {
     property<bool> enable_leader_balancer;
     property<std::chrono::milliseconds> leader_balancer_idle_timeout;
     property<std::chrono::milliseconds> leader_balancer_mute_timeout;
+    property<std::chrono::milliseconds> leader_balancer_node_mute_timeout;
 
     configuration();
 

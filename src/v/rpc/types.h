@@ -11,9 +11,11 @@
 
 #pragma once
 
+#include "bytes/iobuf.h"
 #include "likely.h"
 #include "outcome.h"
 #include "seastarx.h"
+#include "utils/hdr_hist.h"
 #include "utils/unresolved_address.h"
 
 #include <seastar/core/future.hh>
@@ -21,6 +23,7 @@
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/net/api.hh>
 #include <seastar/net/socket_defs.hh>
@@ -34,8 +37,9 @@
 #include <type_traits>
 #include <vector>
 
+using namespace std::chrono_literals;
+
 namespace rpc {
-class netbuf;
 
 using clock_type = ss::lowres_clock;
 using duration_type = typename clock_type::duration;
@@ -100,13 +104,17 @@ static_assert(
 uint32_t checksum_header_only(const header& h);
 
 struct client_opts {
+    using resource_units_t
+      = ss::foreign_ptr<ss::lw_shared_ptr<std::vector<ss::semaphore_units<>>>>;
     client_opts(
       clock_type::time_point client_send_timeout,
       compression_type ct,
-      size_t compression_bytes) noexcept
+      size_t compression_bytes,
+      resource_units_t resource_u = nullptr) noexcept
       : timeout(client_send_timeout)
       , compression(ct)
-      , min_compression_bytes(compression_bytes) {}
+      , min_compression_bytes(compression_bytes)
+      , resource_units(std::move(resource_u)) {}
 
     explicit client_opts(clock_type::time_point client_send_timeout) noexcept
       : client_opts(client_send_timeout, compression_type::none, 1024) {}
@@ -124,6 +132,12 @@ struct client_opts {
     clock_type::time_point timeout;
     compression_type compression;
     size_t min_compression_bytes;
+    /**
+     * Resource protecting semaphore units, those units will be relased after
+     * data are sent over the wire and send buffer is released. May be helpful
+     * to control caller resources.
+     */
+    resource_units_t resource_units;
 };
 
 /// \brief used to pass environment context to the class
@@ -157,10 +171,64 @@ private:
     std::vector<ss::semaphore_units<>> _reservations;
 };
 
+class netbuf {
+public:
+    /// \brief used to send the bytes down the wire
+    /// we re-compute the header-checksum on every call
+    ss::scattered_message<char> as_scattered() &&;
+
+    void set_status(rpc::status);
+    void set_correlation_id(uint32_t);
+    void set_compression(rpc::compression_type c);
+    void set_service_method_id(uint32_t);
+    void set_min_compression_bytes(size_t);
+    iobuf& buffer();
+
+private:
+    size_t _min_compression_bytes{1024};
+    header _hdr;
+    iobuf _out;
+};
+
+inline iobuf& netbuf::buffer() { return _out; }
+inline void netbuf::set_compression(rpc::compression_type c) {
+    vassert(
+      c >= compression_type::min && c <= compression_type::max,
+      "invalid compression type: {}",
+      int(c));
+    _hdr.compression = c;
+}
+inline void netbuf::set_status(rpc::status st) {
+    _hdr.meta = std::underlying_type_t<rpc::status>(st);
+}
+inline void netbuf::set_correlation_id(uint32_t x) { _hdr.correlation_id = x; }
+inline void netbuf::set_service_method_id(uint32_t x) { _hdr.meta = x; }
+inline void netbuf::set_min_compression_bytes(size_t min) {
+    _min_compression_bytes = min;
+}
+
+class method_probes {
+public:
+    hdr_hist& latency_hist() { return _latency_hist; }
+    const hdr_hist& latency_hist() const { return _latency_hist; }
+
+private:
+    // roughly 2024 bytes
+    hdr_hist _latency_hist{120s, 1ms};
+};
+
 /// \brief most method implementations will be codegenerated
 /// by $root/tools/rpcgen.py
-using method = ss::noncopyable_function<ss::future<netbuf>(
-  ss::input_stream<char>&, streaming_context&)>;
+struct method {
+    using handler = ss::noncopyable_function<ss::future<netbuf>(
+      ss::input_stream<char>&, streaming_context&)>;
+
+    handler handle;
+    method_probes probes;
+
+    explicit method(handler h)
+      : handle(std::move(h)) {}
+};
 
 /// \brief used in returned types for client::send_typed() calls
 template<typename T>

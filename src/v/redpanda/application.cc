@@ -87,6 +87,23 @@ static void set_local_kafka_client_config(
     }
 }
 
+static void set_sr_local_kafka_client_config(
+  std::optional<kafka::client::configuration>& client_config,
+  const config::configuration& config) {
+    set_local_kafka_client_config(client_config, config);
+    if (client_config.has_value()) {
+        if (!client_config->produce_batch_delay.is_overriden()) {
+            client_config->produce_batch_delay.set_value(0ms);
+        }
+        if (!client_config->produce_batch_record_count.is_overriden()) {
+            client_config->produce_batch_record_count.set_value(int32_t(0));
+        }
+        if (!client_config->produce_batch_size_bytes.is_overriden()) {
+            client_config->produce_batch_size_bytes.set_value(int32_t(0));
+        }
+    }
+}
+
 application::application(ss::sstring logger_name)
   : _log(std::move(logger_name))
   , _rm_group_proxy(std::ref(rm_group_frontend)){
@@ -311,7 +328,7 @@ void application::hydrate_config(const po::variables_map& cfg) {
         if (config["schema_registry_client"]) {
             _schema_reg_client_config.emplace(config["schema_registry_client"]);
         } else {
-            set_local_kafka_client_config(
+            set_sr_local_kafka_client_config(
               _schema_reg_client_config, config::shard_local_cfg());
         }
         _schema_reg_config->for_each(config_printer("schema_registry"));
@@ -797,6 +814,19 @@ void application::wire_up_redpanda_services() {
       fetch_session_cache,
       config::shard_local_cfg().fetch_session_eviction_timeout_ms())
       .get();
+    /**
+     * When redpanda stops we need to shutdown all partitions to prevent it
+     * accepting new requests and additionally we need to finish/fail all
+     * ongoing requests before trying to stop kafka RPC. We need this
+     * additionall action in stop sequence since it is required to have
+     * `ss::sharded` instance of partition manager before kafka server is
+     * started.
+     */
+    _deferred.emplace_back([this] {
+        partition_manager
+          .invoke_on_all(&cluster::partition_manager::shutdown_all)
+          .get();
+    });
     construct_service(
       _compaction_controller,
       std::ref(storage),
@@ -923,6 +953,9 @@ void application::start_redpanda() {
             _scheduling_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
             std::ref(controller->get_partition_leaders()));
+          if (!config::shard_local_cfg().disable_metrics()) {
+              proto->setup_metrics();
+          }
           s.set_protocol(std::move(proto));
       })
       .get();

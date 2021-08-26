@@ -16,7 +16,6 @@
 #include "rpc/batched_output_stream.h"
 #include "rpc/client_probe.h"
 #include "rpc/errc.h"
-#include "rpc/netbuf.h"
 #include "rpc/parse_utils.h"
 #include "rpc/response_handler.h"
 #include "rpc/types.h"
@@ -108,8 +107,12 @@ public:
 
 private:
     using sequence_t = named_type<uint64_t, struct sequence_tag>;
+    struct entry {
+        std::unique_ptr<netbuf> buffer;
+        client_opts::resource_units_t resource_units;
+    };
     using requests_queue_t
-      = absl::btree_map<sequence_t, std::unique_ptr<netbuf>>;
+      = absl::btree_map<sequence_t, std::unique_ptr<entry>>;
     friend client_context_impl;
     ss::future<> do_reads();
     ss::future<> dispatch(header);

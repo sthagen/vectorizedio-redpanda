@@ -20,6 +20,7 @@
 #include "raft/logger.h"
 #include "raft/prevote_stm.h"
 #include "raft/recovery_stm.h"
+#include "raft/replicate_entries_stm.h"
 #include "raft/rpc_client_protocol.h"
 #include "raft/types.h"
 #include "raft/vote_stm.h"
@@ -156,8 +157,8 @@ ss::future<> consensus::stop() {
 
     return _event_manager.stop()
       .then([this] { return _append_requests_buffer.stop(); })
-      .then([this] { return _bg.close(); })
       .then([this] { return _batcher.stop(); })
+      .then([this] { return _bg.close(); })
       .then([this] {
           // close writer if we have to
           if (likely(!_snapshot_writer)) {
@@ -235,7 +236,7 @@ consensus::success_reply consensus::update_follower_index(
       && reply.last_dirty_log_index < _log.offsets().dirty_offset) {
         vlog(
           _ctxlog.trace,
-          "ignorring reordered reply {} from node {} - last: {} current: {} ",
+          "ignoring reordered reply {} from node {} - last: {} current: {} ",
           reply,
           reply.node_id,
           idx.last_received_seq,
@@ -266,7 +267,7 @@ consensus::success_reply consensus::update_follower_index(
 
     // check preconditions for processing the reply
     if (!is_leader()) {
-        vlog(_ctxlog.debug, "ignorring append entries reply, not leader");
+        vlog(_ctxlog.debug, "ignoring append entries reply, not leader");
         return success_reply::no;
     }
     // If RPC request or response contains term T > currentTerm:
@@ -390,7 +391,7 @@ void consensus::successfull_append_entries_reply(
     idx.next_index = details::next_offset(idx.last_dirty_log_index);
     vlog(
       _ctxlog.trace,
-      "Updated node {} match {} and next {} indicies",
+      "Updated node {} match {} and next {} indices",
       idx.node_id,
       idx.match_index,
       idx.next_index);
@@ -511,11 +512,15 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
         });
     };
 
-    // we do not hold the lock while waiting
-    co_await _follower_reply.wait(
-      [this, snapshot, &majority_sequences_updated] {
-          return majority_sequences_updated() || _term != snapshot.term;
-      });
+    try {
+        // we do not hold the lock while waiting
+        co_await _follower_reply.wait(
+          [this, snapshot, &majority_sequences_updated] {
+              return majority_sequences_updated() || _term != snapshot.term;
+          });
+    } catch (const ss::broken_condition_variable& e) {
+        co_return ret_t(make_error_code(errc::shutting_down));
+    }
 
     // term have changed, not longer a leader
     if (snapshot.term != _term) {
@@ -524,20 +529,45 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     co_return ret_t(snapshot.linearizable_offset);
 }
 
+ss::future<result<replicate_result>> chain_stages(replicate_stages stages) {
+    return stages.request_enqueued.then_wrapped(
+      [f = std::move(stages.replicate_finished)](
+        ss::future<> enqueued) mutable {
+          if (enqueued.failed()) {
+              return enqueued
+                .handle_exception([](const std::exception_ptr& e) {
+                    vlog(
+                      raftlog.debug, "replicate first stage exception - {}", e);
+                })
+                .then([f = std::move(f)]() mutable {
+                    return f.discard_result()
+                      .handle_exception([](const std::exception_ptr& e) {
+                          vlog(
+                            raftlog.debug,
+                            "ignoring replicate second stage exception - {}",
+                            e);
+                      })
+                      .then([] {
+                          return result<replicate_result>(make_error_code(
+                            errc::replicate_first_stage_exception));
+                      });
+                });
+          }
+
+          return std::move(f);
+      });
+}
+
 ss::future<result<replicate_result>>
 consensus::replicate(model::record_batch_reader&& rdr, replicate_options opts) {
-    auto r = do_replicate({}, std::move(rdr), opts);
-    return r.request_enqueued.then(
-      [f = std::move(r.replicate_finished)]() mutable { return std::move(f); });
+    return chain_stages(do_replicate({}, std::move(rdr), opts));
 }
 
 ss::future<result<replicate_result>> consensus::replicate(
   model::term_id expected_term,
   model::record_batch_reader&& rdr,
   replicate_options opts) {
-    auto r = do_replicate(expected_term, std::move(rdr), opts);
-    return r.request_enqueued.then(
-      [f = std::move(r.replicate_finished)]() mutable { return std::move(f); });
+    return chain_stages(do_replicate(expected_term, std::move(rdr), opts));
 }
 
 replicate_stages consensus::replicate_in_stages(
@@ -673,17 +703,19 @@ consensus::do_make_reader(storage::log_reader_config config) {
 ss::future<model::record_batch_reader> consensus::make_reader(
   storage::log_reader_config config,
   std::optional<clock_type::time_point> debounce_timeout) {
-    if (!debounce_timeout) {
-        // fast path, do not wait
-        return do_make_reader(config);
-    }
+    return ss::try_with_gate(_bg, [this, config, debounce_timeout] {
+        if (!debounce_timeout) {
+            // fast path, do not wait
+            return do_make_reader(config);
+        }
 
-    return _consumable_offset_monitor
-      .wait(
-        details::next_offset(_majority_replicated_index),
-        *debounce_timeout,
-        _as)
-      .then([this, config]() mutable { return do_make_reader(config); });
+        return _consumable_offset_monitor
+          .wait(
+            details::next_offset(_majority_replicated_index),
+            *debounce_timeout,
+            _as)
+          .then([this, config]() mutable { return do_make_reader(config); });
+    });
 }
 
 bool consensus::should_skip_vote(bool ignore_heartbeat) {
@@ -909,6 +941,10 @@ ss::future<std::error_code> consensus::replace_configuration(
 }
 
 ss::future<> consensus::start() {
+    return ss::try_with_gate(_bg, [this] { return do_start(); });
+}
+
+ss::future<> consensus::do_start() {
     vlog(_ctxlog.info, "Starting");
     return _op_lock.with([this] {
         read_voted_for();
@@ -1244,7 +1280,7 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
     if (n_priority < _target_priority && !r.leadership_transfer) {
         vlog(
           _ctxlog.info,
-          "not grainting vote to node {}, it has priority {} which is lower "
+          "not granting vote to node {}, it has priority {} which is lower "
           "than current target priority {}",
           r.node_id,
           n_priority,
@@ -1428,7 +1464,7 @@ consensus::do_append_entries(append_entries_request&& r) {
       && r.meta.prev_log_term != last_log_term) {
         vlog(
           _ctxlog.debug,
-          "Rejecting append entries. missmatching entry term at offset: "
+          "Rejecting append entries. mismatching entry term at offset: "
           "{}, current term: {} request term: {}",
           r.meta.prev_log_index,
           last_log_term,
@@ -1816,15 +1852,46 @@ ss::future<std::error_code> consensus::replicate_configuration(
             meta(),
             model::make_memory_record_batch_reader(std::move(batches)));
           /**
-           * We use replicate_batcher::do_flush directly as we already hold the
+           * We use dispatch_replicate directly as we already hold the
            * _op_lock mutex when replicating configuration
            */
           std::vector<ss::semaphore_units<>> units;
           units.push_back(std::move(u));
-          return _batcher
-            .do_flush({}, std::move(req), std::move(units), std::move(seqs))
-            .then([] { return std::error_code(errc::success); });
+          return dispatch_replicate(
+                   std::move(req), std::move(units), std::move(seqs))
+            .then([](result<replicate_result> res) {
+                if (res) {
+                    return make_error_code(errc::success);
+                }
+                return res.error();
+            });
       });
+}
+
+ss::future<result<replicate_result>> consensus::dispatch_replicate(
+  append_entries_request req,
+  std::vector<ss::semaphore_units<>> u,
+  absl::flat_hash_map<vnode, follower_req_seq> seqs) {
+    auto stm = ss::make_lw_shared<replicate_entries_stm>(
+      this, std::move(req), std::move(seqs));
+
+    return stm->apply(std::move(u)).finally([this, stm] {
+        auto f = stm->wait().finally([stm] {});
+        // if gate is closed wait for all futures
+        if (_bg.is_closed()) {
+            _ctxlog.info("gate-closed, waiting to finish background requests");
+            return f;
+        }
+        // background
+        (void)with_gate(_bg, [this, stm, f = std::move(f)]() mutable {
+            return std::move(f).handle_exception(
+              [this](const std::exception_ptr& e) {
+                  _ctxlog.error(
+                    "Error waiting for background acks to finish - {}", e);
+              });
+        });
+        return ss::now();
+    });
 }
 
 append_entries_reply consensus::make_append_entries_reply(
@@ -2458,7 +2525,13 @@ heartbeats_suppressed consensus::are_heartbeats_suppressed(vnode id) const {
 void consensus::update_suppress_heartbeats(
   vnode id, follower_req_seq last_seq, heartbeats_suppressed suppressed) {
     if (auto it = _fstats.find(id); it != _fstats.end()) {
-        if (last_seq <= it->second.last_sent_seq) {
+        /**
+         * Since there may be concurrent sources causing heartbeats suppression
+         * we use last_suppress_heartbeats_seq to control concurrency of
+         * heartbeats state update
+         */
+        if (last_seq >= it->second.last_suppress_heartbeats_seq) {
+            it->second.last_suppress_heartbeats_seq = last_seq;
             it->second.suppress_heartbeats = suppressed;
         }
     }
