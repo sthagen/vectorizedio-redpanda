@@ -286,7 +286,7 @@ configuration::configuration()
       "tm_sync_timeout_ms",
       "Time to wait state catch up before rejecting a request",
       required::no,
-      2000ms)
+      10s)
   , tm_violation_recovery_policy(
       *this,
       "tm_violation_recovery_policy",
@@ -299,7 +299,7 @@ configuration::configuration()
       "rm_sync_timeout_ms",
       "Time to wait state catch up before rejecting a request",
       required::no,
-      2000ms)
+      10s)
   , tx_timeout_delay_ms(
       *this,
       "tx_timeout_delay_ms",
@@ -875,6 +875,18 @@ configuration::configuration()
       "Leadership rebalancing node mute timeout",
       required::no,
       20s)
+  , internal_topic_replication_factor(
+      *this,
+      "internal_topic_replication_factor",
+      "Target replication factor for internal topics",
+      required::no,
+      3)
+  , health_manager_tick_interval(
+      *this,
+      "health_manager_tick_interval",
+      "How often the health manager runs",
+      required::no,
+      3min)
   , _advertised_kafka_api(
       *this,
       "advertised_kafka_api",
