@@ -12,6 +12,7 @@ import time
 
 from ducktape.mark.resource import cluster
 from ducktape.utils.util import wait_until
+from ducktape.mark import ignore
 from rptest.clients.kafka_cat import KafkaCat
 import requests
 
@@ -148,7 +149,7 @@ class PartitionMovementTest(EndToEndTest):
             return converged and info["status"] == "done"
 
         # wait until redpanda reports complete
-        wait_until(status_done, timeout_sec=30, backoff_sec=1)
+        wait_until(status_done, timeout_sec=60, backoff_sec=2)
 
         def derived_done():
             info = self._get_current_partitions(admin, topic, partition)
@@ -156,7 +157,7 @@ class PartitionMovementTest(EndToEndTest):
                 f"derived assignments for {topic}-{partition}: {info}")
             return self._equal_assignments(info, assignments)
 
-        wait_until(derived_done, timeout_sec=30, backoff_sec=1)
+        wait_until(derived_done, timeout_sec=60, backoff_sec=2)
 
     @cluster(num_nodes=3)
     def test_moving_not_fully_initialized_partition(self):
@@ -210,7 +211,7 @@ class PartitionMovementTest(EndToEndTest):
         for n in self.redpanda.nodes:
             hb.unset_failures(n, 'raftgen_service::failure_probes', 'vote')
         # wait until redpanda reports complete
-        wait_until(status_done, timeout_sec=30, backoff_sec=1)
+        wait_until(status_done, timeout_sec=60, backoff_sec=2)
 
         def derived_done():
             info = self._get_current_partitions(admin, topic, partition)
@@ -218,7 +219,7 @@ class PartitionMovementTest(EndToEndTest):
                 f"derived assignments for {topic}-{partition}: {info}")
             return self._equal_assignments(info, assignments)
 
-        wait_until(derived_done, timeout_sec=30, backoff_sec=1)
+        wait_until(derived_done, timeout_sec=60, backoff_sec=2)
 
     @cluster(num_nodes=3)
     def test_empty(self):
@@ -308,6 +309,7 @@ class PartitionMovementTest(EndToEndTest):
 
             self.logger.info(f"Finished verifying records in {spec}")
 
+    @ignore  # https://github.com/vectorizedio/redpanda/issues/2385
     @cluster(num_nodes=5)
     def test_dynamic(self):
         """
