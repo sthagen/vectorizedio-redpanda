@@ -142,7 +142,7 @@ ntp_reconciliation_state::ntp_reconciliation_state(
 create_partititions_configuration::create_partititions_configuration(
   model::topic_namespace tp_ns, int32_t cnt)
   : tp_ns(std::move(tp_ns))
-  , partition_count(cnt) {}
+  , new_total_partition_count(cnt) {}
 
 std::ostream& operator<<(std::ostream& o, const topic_configuration& cfg) {
     fmt::print(
@@ -212,6 +212,8 @@ operator<<(std::ostream& o, const topic_table_delta::op_type& tp) {
         return o << "update_finished";
     case topic_table_delta::op_type::update_properties:
         return o << "update_properties";
+    case topic_table_delta::op_type::add_non_replicable:
+        return o << "add_non_replicable_addition";
     }
     __builtin_unreachable();
 }
@@ -237,6 +239,12 @@ std::ostream& operator<<(std::ostream& o, const backend_operation& op) {
       op.p_as,
       op.source_shard,
       op.type);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const non_replicable_topic& d) {
+    fmt::print(
+      o, "{{Source topic: {}, non replicable topic: {}}}", d.source, d.name);
     return o;
 }
 
@@ -268,9 +276,9 @@ std::ostream&
 operator<<(std::ostream& o, const create_partititions_configuration& cfg) {
     fmt::print(
       o,
-      "{{topic: {}, partition count: {}, custom assignments: {}}}",
+      "{{topic: {}, new total partition count: {}, custom assignments: {}}}",
       cfg.tp_ns,
-      cfg.partition_count,
+      cfg.new_total_partition_count,
       cfg.custom_assignments);
     return o;
 }
@@ -747,7 +755,8 @@ adl<cluster::ntp_reconciliation_state>::from(iobuf_parser& in) {
 
 void adl<cluster::create_partititions_configuration>::to(
   iobuf& out, cluster::create_partititions_configuration&& pc) {
-    return serialize(out, pc.tp_ns, pc.partition_count, pc.custom_assignments);
+    return serialize(
+      out, pc.tp_ns, pc.new_total_partition_count, pc.custom_assignments);
 }
 
 cluster::create_partititions_configuration
@@ -795,6 +804,29 @@ adl<cluster::create_data_policy_cmd_data>::from(iobuf_parser& in) {
       cluster::create_data_policy_cmd_data::current_version);
     auto dp = adl<v8_engine::data_policy>{}.from(in);
     return cluster::create_data_policy_cmd_data{.dp = std::move(dp)};
+}
+
+void adl<cluster::non_replicable_topic>::to(
+  iobuf& out, cluster::non_replicable_topic&& cm_cmd_data) {
+    return serialize(
+      out,
+      cm_cmd_data.current_version,
+      std::move(cm_cmd_data.source),
+      std::move(cm_cmd_data.name));
+}
+
+cluster::non_replicable_topic
+adl<cluster::non_replicable_topic>::from(iobuf_parser& in) {
+    auto version = adl<int8_t>{}.from(in);
+    vassert(
+      version == cluster::non_replicable_topic::current_version,
+      "Unexpected version: {} (expected: {})",
+      version,
+      cluster::non_replicable_topic::current_version);
+    auto source = adl<model::topic_namespace>{}.from(in);
+    auto name = adl<model::topic_namespace>{}.from(in);
+    return cluster::non_replicable_topic{
+      .source = std::move(source), .name = std::move(name)};
 }
 
 } // namespace reflection
