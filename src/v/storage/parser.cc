@@ -23,17 +23,19 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/when_all.hh>
 #include <seastar/util/variant_utils.hh>
 
 #include <bits/stdint-uintn.h>
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <exception>
 
 namespace storage {
 using stop_parser = batch_consumer::stop_parser;
 
-model::record_batch_header header_from_iobuf(iobuf b) {
+static model::record_batch_header header_from_iobuf(iobuf b) {
     iobuf_parser parser(std::move(b));
     auto header_crc = reflection::adl<uint32_t>{}.from(parser);
     auto sz = reflection::adl<int32_t>{}.from(parser);
@@ -317,10 +319,29 @@ public:
                 break;
             };
         }
-        co_await _input.close();
         co_await _output.flush();
-        co_await _output.close();
         co_return consumed;
+    }
+
+    ss::future<> close() {
+        auto input_close = _input.close();
+        auto output_close = _output.close();
+        auto [fi, fo] = co_await ss::when_all(
+          std::move(input_close), std::move(output_close));
+        if (fi.failed()) {
+            vlog(
+              stlog.error, "Input stram close error: {}", fi.get_exception());
+        }
+        if (fo.failed()) {
+            vlog(
+              stlog.error, "Output stram close error: {}", fo.get_exception());
+        }
+        if (fo.failed()) {
+            std::rethrow_exception(fo.get_exception());
+        }
+        if (fi.failed()) {
+            std::rethrow_exception(fi.get_exception());
+        }
     }
 
     ss::input_stream<char> _input;
@@ -334,7 +355,8 @@ ss::future<result<size_t>> transform_stream(
   ss::output_stream<char> out,
   record_batch_transform_predicate pred) {
     copy_helper helper(std::move(in), std::move(out), std::move(pred));
-    co_return co_await helper.run();
+    co_return co_await helper.run().finally(
+      [&helper] { return helper.close(); });
 }
 
 } // namespace storage

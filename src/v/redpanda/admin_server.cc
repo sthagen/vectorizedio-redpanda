@@ -32,7 +32,6 @@
 #include "redpanda/admin/api-doc/broker.json.h"
 #include "redpanda/admin/api-doc/config.json.h"
 #include "redpanda/admin/api-doc/hbadger.json.h"
-#include "redpanda/admin/api-doc/kafka.json.h"
 #include "redpanda/admin/api-doc/partition.json.h"
 #include "redpanda/admin/api-doc/raft.json.h"
 #include "redpanda/admin/api-doc/security.json.h"
@@ -483,8 +482,10 @@ void admin_server::register_security_routes() {
 }
 
 void admin_server::register_kafka_routes() {
-    ss::httpd::kafka_json::kafka_transfer_leadership.set(
+    ss::httpd::partition_json::kafka_transfer_leadership.set(
       _server._routes, [this](std::unique_ptr<ss::httpd::request> req) {
+          auto ns = model::ns(req->param["namespace"]);
+
           auto topic = model::topic(req->param["topic"]);
 
           model::partition_id partition;
@@ -518,13 +519,15 @@ void admin_server::register_kafka_routes() {
 
           vlog(
             logger.info,
-            "Leadership transfer request for leader of topic-partition {}:{} "
+            "Leadership transfer request for leader of topic-partition "
+            "{}:{}:{} "
             "to node {}",
+            ns,
             topic,
             partition,
             target);
 
-          model::ntp ntp(model::kafka_namespace, topic, partition);
+          model::ntp ntp(ns, topic, partition);
 
           auto shard = _shard_table.local().shard_for(ntp);
           if (!shard) {
@@ -767,6 +770,7 @@ void admin_server::register_partition_routes() {
           p.ns = ntp.ns;
           p.topic = ntp.tp.topic;
           p.partition_id = ntp.tp.partition;
+          p.leader_id = -1;
 
           // Logic for fetching replicas+status is different for normal
           // topics vs. the special controller topic.
@@ -780,8 +784,10 @@ void admin_server::register_partition_routes() {
                   a.node_id = leader_opt.value();
                   a.core = cluster::controller_stm_shard;
                   p.replicas.push(a);
+                  p.leader_id = *leader_opt;
               }
-
+              // special case, controller is raft group 0
+              p.raft_group_id = 0;
               for (const auto& i : _metadata_cache.local().all_broker_ids()) {
                   if (!leader_opt.has_value() || leader_opt.value() != i) {
                       ss::httpd::partition_json::assignment a;
@@ -812,7 +818,13 @@ void admin_server::register_partition_routes() {
                       a.core = r.shard;
                       p.replicas.push(a);
                   }
+                  p.raft_group_id = assignment->group;
               }
+              auto leader = _metadata_cache.local().get_leader_id(ntp);
+              if (leader) {
+                  p.leader_id = *leader;
+              }
+
               return _controller->get_api()
                 .local()
                 .get_reconciliation_state(ntp)

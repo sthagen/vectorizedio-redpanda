@@ -48,10 +48,15 @@ class RpkTool:
     def __init__(self, redpanda):
         self._redpanda = redpanda
 
-    def create_topic(self, topic, partitions=None):
+    def create_topic(self, topic, partitions=1, replicas=None, config=None):
         cmd = ["create", topic]
-        if partitions is not None:
-            cmd += ["--partitions", str(partitions)]
+        cmd += ["--partitions", str(partitions)]
+        if replicas is not None:
+            cmd += ["--replicas", str(replicas)]
+        if config is not None:
+            cfg = [f"{k}:{v}" for k, v in config.items()]
+            for it in cfg:
+                cmd += ["--topic-config", it]
         return self._run_topic(cmd)
 
     def delete_topic(self, topic):
@@ -84,9 +89,11 @@ class RpkTool:
                 headers=[],
                 partition=None,
                 timeout=None):
+        # For tests, we want fast failures rather than indefinite retries,
+        # so we use a 1s delivery timeout.
         cmd = [
-            'produce', '--brokers',
-            self._redpanda.brokers(), '--key', key, topic
+            'produce', '--key', key, '-z', 'none', '--delivery-timeout',
+            '4.5s', '-f', '%v', topic
         ]
         if headers:
             cmd += ['-H ' + h for h in headers]
@@ -98,7 +105,7 @@ class RpkTool:
         return int(offset)
 
     def describe_topic(self, topic):
-        cmd = ['describe', topic]
+        cmd = ['describe', topic, '-p']
         output = self._run_topic(cmd)
         if "not found" in output:
             return None
@@ -106,7 +113,7 @@ class RpkTool:
 
         def partition_line(line):
             m = re.match(
-                r" *(?P<id>\d+) +(?P<leader>\d+) +\[(?P<replicas>.+?)\] +(?P<hw>\d+) *",
+                r" *(?P<id>\d+) +(?P<leader>\d+) +\[(?P<replicas>.+?)\] +(?P<logstart>.*?) +(?P<hw>\d+) *",
                 line)
             if m == None:
                 return None
@@ -180,37 +187,24 @@ class RpkTool:
             timeout = DEFAULT_TIMEOUT
 
         self._redpanda.logger.debug("Executing command: %s", cmd)
-        f = None
-        if stdin:
-            if isinstance(stdin, str):
-                # Convert the string msg to bytes
-                stdin = stdin.encode()
 
-            f = tempfile.TemporaryFile()
-            f.write(stdin)
-            f.seek(0)
-
-        # rpk logs everything on STDERR by default
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=f, text=True)
-        start_time = time.time()
-
-        ret = None
-        while time.time() < start_time + timeout:
-            ret = p.poll()
-            if ret != None:
-                break
-            time.sleep(0.5)
-
-        if ret is None:
-            p.terminate()
+        p = subprocess.Popen(cmd,
+                             stdout=subprocess.PIPE,
+                             stdin=subprocess.PIPE,
+                             stderr=subprocess.PIPE,
+                             text=True)
+        try:
+            output, error = p.communicate(input=stdin, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
             raise RpkException(f"command {' '.join(cmd)} timed out")
 
-        output = p.stdout.read()
         self._redpanda.logger.debug(output)
 
         if p.returncode:
-            raise RpkException('command %s returned %d, output: %s' %
-                               (' '.join(cmd), p.returncode, output))
+            raise RpkException(
+                'command %s returned %d, output: %s, error: %s' %
+                (' '.join(cmd), p.returncode, output, error))
 
         return output
 
