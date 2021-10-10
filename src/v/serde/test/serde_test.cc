@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "hashing/crc32c.h"
+#include "model/fundamental.h"
 #include "serde/envelope.h"
 #include "serde/serde.h"
 
@@ -71,11 +72,34 @@ struct test_msg1_new
     int _b, _c;
 };
 
+struct test_msg1_new_manual {
+    using value_t = test_msg1_new_manual;
+    static constexpr auto redpanda_serde_version = 10;
+    static constexpr auto redpanda_serde_compat_version = 5;
+
+    bool operator==(test_msg1_new_manual const&) const = default;
+
+    int _a;
+    test_msg0 _m;
+    int _b, _c;
+};
+
 struct not_an_envelope {};
 static_assert(!serde::is_envelope_v<not_an_envelope>);
 static_assert(serde::is_envelope_v<test_msg1>);
+static_assert(serde::inherits_from_envelope_v<test_msg1_new>);
+static_assert(!serde::inherits_from_envelope_v<test_msg1_new_manual>);
 static_assert(test_msg1::redpanda_serde_version == 4);
 static_assert(test_msg1::redpanda_serde_compat_version == 0);
+
+SEASTAR_THREAD_TEST_CASE(manual_and_envelope_equal) {
+    auto const roundtrip = serde::from_iobuf<test_msg1_new_manual>(
+      serde::to_iobuf(test_msg1_new{
+        ._a = 77, ._m = test_msg0{._i = 2, ._j = 3}, ._b = 88, ._c = 99}));
+    auto const check = test_msg1_new_manual{
+      ._a = 77, ._m = test_msg0{._i = 2, ._j = 3}, ._b = 88, ._c = 99};
+    BOOST_CHECK(roundtrip == check);
+}
 
 SEASTAR_THREAD_TEST_CASE(reserve_test) {
     auto b = iobuf();
@@ -297,6 +321,13 @@ SEASTAR_THREAD_TEST_CASE(all_types_test) {
         auto parser = iobuf_parser{std::move(b)};
         BOOST_CHECK(serde::read<double>(parser) == double{-123.456});
     }
+
+    {
+        auto b = iobuf();
+        serde::write(b, model::ns{"abc"});
+        auto parser = iobuf_parser{std::move(b)};
+        BOOST_CHECK(serde::read<model::ns>(parser) == "abc");
+    }
 }
 
 struct test_snapshot_header
@@ -307,6 +338,7 @@ struct test_snapshot_header
     ss::future<> serde_async_read(iobuf_parser&, serde::header const&);
     ss::future<> serde_async_write(iobuf&) const;
 
+    model::ns ns_;
     int32_t header_crc;
     int32_t metadata_crc;
     int8_t version;
@@ -319,6 +351,7 @@ static_assert(serde::has_serde_async_write<test_snapshot_header>);
 
 ss::future<> test_snapshot_header::serde_async_read(
   iobuf_parser& in, serde::header const& h) {
+    ns_ = serde::read_nested<decltype(ns_)>(in, h._bytes_left_limit);
     header_crc = serde::read_nested<decltype(header_crc)>(
       in, h._bytes_left_limit);
     metadata_crc = serde::read_nested<decltype(metadata_crc)>(
@@ -346,6 +379,7 @@ ss::future<> test_snapshot_header::serde_async_read(
 }
 
 ss::future<> test_snapshot_header::serde_async_write(iobuf& out) const {
+    serde::write(out, ns_);
     serde::write(out, header_crc);
     serde::write(out, metadata_crc);
     serde::write(out, version);
