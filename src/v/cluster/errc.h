@@ -54,7 +54,8 @@ enum class errc : int16_t {
     data_policy_already_exists,
     data_policy_not_exists,
     source_topic_not_exists,
-    invalid_delete_topic_request
+    source_topic_still_in_use,
+    wating_for_partition_shutdown
 };
 struct errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::errc"; }
@@ -149,8 +150,13 @@ struct errc_category final : public std::error_category {
             return "Attempted to create a non_replicable log for a source "
                    "topic "
                    "that does not exist";
-        case errc::invalid_delete_topic_request:
-            return "Requested to delete a non replicable topic is invalid";
+        case errc::source_topic_still_in_use:
+            return "Cannot delete source topic for which there still are "
+                   "materialized topics for";
+        case errc::wating_for_partition_shutdown:
+            return "Partition update on current core can not be finished since "
+                   "backend is waiting for the partition to be shutdown on its "
+                   "originating core";
         }
         return "cluster::errc::unknown";
     }

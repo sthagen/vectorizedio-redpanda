@@ -1,5 +1,5 @@
 set(fixture_srcs
-    utils/event_publisher.cc
+    utils/event_publisher_utils.cc
     utils/supervisor.cc
     utils/wasm_event_generator.cc
     fixtures/coproc_test_fixture.cc
@@ -23,8 +23,8 @@ rp_test(
     wasm_event_tests.cc
     event_handler_tests.cc
     event_listener_tests.cc
-    read_materialized_topic_test.cc
+    kafka_api_materialized_tests.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
   LIBRARIES v::seastar_testing_main ${fixture_deps}
-  LABELS coproc
+  LABELS coproc disable_on_ci  # https://github.com/vectorizedio/redpanda/issues/2613
 )

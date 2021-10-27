@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "avro/ValidSchema.hh"
 #include "model/metadata.h"
 #include "seastarx.h"
 #include "utils/named_type.h"
@@ -19,10 +20,7 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/util/bool_class.hh>
 
-#include <fmt/core.h>
-#include <fmt/format.h>
-#include <fmt/ostream.h>
-
+#include <iosfwd>
 #include <type_traits>
 
 namespace pandaproxy::schema_registry {
@@ -59,9 +57,7 @@ from_string_view<schema_type>(std::string_view sv) {
       .default_match(std::nullopt);
 }
 
-inline std::ostream& operator<<(std::ostream& os, const schema_type& v) {
-    return os << to_string_view(v);
-}
+std::ostream& operator<<(std::ostream& os, const schema_type& v);
 
 ///\brief A subject is the name under which a schema is registered.
 ///
@@ -69,11 +65,134 @@ inline std::ostream& operator<<(std::ostream& os, const schema_type& v) {
 using subject = named_type<ss::sstring, struct subject_tag>;
 static const subject invalid_subject{};
 
-///\brief The definition of the schema.
+///\brief Definition of a schema and its type.
+template<typename Tag>
+class typed_schema_definition {
+public:
+    using tag = Tag;
+    using raw_string = named_type<ss::sstring, tag>;
+
+    template<typename T>
+    typed_schema_definition(T&& def, schema_type type)
+      : _def{ss::sstring{std::forward<T>(def)}}
+      , _type{type} {}
+
+    friend bool operator==(
+      const typed_schema_definition& lhs, const typed_schema_definition& rhs)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& os, const typed_schema_definition&);
+
+    schema_type type() const { return _type; }
+
+    const raw_string& raw() const& { return _def; }
+    raw_string raw() && { return std::move(_def); }
+
+private:
+    raw_string _def;
+    schema_type _type{schema_type::avro};
+};
+
+///\brief An unvalidated definition of the schema and its type.
 ///
-/// TODO(Ben): Make this cheap to copy
-using schema_definition = named_type<ss::sstring, struct schema_definition_tag>;
-static const schema_definition invalid_schema_definition{};
+/// This comes from the user and should be considered as potentially
+/// ill-formed.
+using unparsed_schema_definition
+  = typed_schema_definition<struct unparsed_schema_defnition_tag>;
+
+///\brief A canonical definition of the schema and its type.
+///
+/// This form is stored on the topic and returned to the user.
+using canonical_schema_definition
+  = typed_schema_definition<struct canonical_schema_defnition_tag>;
+
+static const unparsed_schema_definition invalid_schema_definition{
+  "", schema_type::avro};
+
+///\brief The definition of an avro schema.
+class avro_schema_definition {
+public:
+    explicit avro_schema_definition(avro::ValidSchema vs);
+
+    canonical_schema_definition::raw_string raw() const;
+
+    const avro::ValidSchema& operator()() const;
+
+    friend bool operator==(
+      const avro_schema_definition& lhs, const avro_schema_definition& rhs);
+
+    friend std::ostream&
+    operator<<(std::ostream& os, const avro_schema_definition& rhs);
+
+    constexpr schema_type type() const { return schema_type::avro; }
+
+    explicit operator canonical_schema_definition() const {
+        return {raw(), type()};
+    }
+
+private:
+    avro::ValidSchema _impl;
+};
+
+///\brief A schema that has been validated.
+class valid_schema {
+    using impl = std::variant<avro_schema_definition>;
+
+    template<typename T>
+    using disable_if_valid_schema = std::
+      enable_if_t<!std::is_same_v<std::remove_cvref_t<T>, valid_schema>, int>;
+
+    template<typename T>
+    using enable_if_can_construct_impl = std::
+      enable_if_t<std::is_constructible_v<impl, std::remove_cvref_t<T>>, int>;
+
+public:
+    ///\brief Converting constructor from variant types
+    template<
+      typename T,
+      disable_if_valid_schema<T> = 0,
+      enable_if_can_construct_impl<T> = 0>
+    valid_schema(T&& def)
+      : _impl{std::forward<T>(def)} {}
+
+    template<typename V, typename... Args>
+    decltype(auto) visit(V&& v, Args... args) const& {
+        return std::visit(
+          std::forward<V>(v), _impl, std::forward<Args>(args)...);
+    }
+
+    template<typename V, typename... Args>
+    decltype(auto) visit(V&& v, Args... args) && {
+        return std::visit(
+          std::forward<V>(v), std::move(_impl), std::forward<Args>(args)...);
+    }
+
+    schema_type type() const {
+        return visit([](const auto& def) { return def.type(); });
+    }
+
+    unparsed_schema_definition::raw_string raw() const& {
+        return visit([](auto&& def) {
+            return unparsed_schema_definition::raw_string{def.raw()()};
+        });
+    }
+
+    unparsed_schema_definition::raw_string raw() && {
+        return visit([](auto def) {
+            return unparsed_schema_definition::raw_string{
+              std::move(def).raw()()};
+        });
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const valid_schema& def) {
+        def.visit([&os](const auto& def) { os << def; });
+        return os;
+    }
+
+private:
+    impl _impl;
+};
 
 ///\brief The version of the schema registered with a subject.
 ///
@@ -122,66 +241,72 @@ struct seq_marker {
     schema_version version;
     seq_marker_key_type key_type{seq_marker_key_type::invalid};
 
-    friend std::ostream& operator<<(std::ostream& os, const seq_marker& v) {
-        if (v.seq.has_value() && v.node.has_value()) {
-            fmt::print(
-              os,
-              "seq={} node={} version={} key_type={}",
-              *v.seq,
-              *v.node,
-              v.version,
-              to_string_view(v.key_type));
-        } else {
-            fmt::print(
-              os,
-              "unsequenced version={} key_type={}",
-              v.version,
-              to_string_view(v.key_type));
-        }
-        return os;
-    }
+    friend std::ostream& operator<<(std::ostream& os, const seq_marker& v);
 };
 
-///\brief Complete description of a schema.
-struct schema {
-    schema(schema_id id, schema_type type, schema_definition definition)
-      : id{id}
-      , type{type}
-      , definition{std::move(definition)} {}
+struct schema_reference {
+    friend bool
+    operator==(const schema_reference& lhs, const schema_reference& rhs)
+      = default;
 
-    schema_id id;
-    schema_type type;
-    schema_definition definition;
+    friend std::ostream&
+    operator<<(std::ostream& os, const schema_reference& ref);
+
+    ss::sstring name;
+    subject sub{invalid_subject};
+    schema_version version{invalid_schema_version};
 };
 
-///\brief A mapping of version and schema id for a subject.
-struct subject_version_id {
-    subject_version_id(schema_version version, schema_id id, is_deleted deleted)
-      : version{version}
-      , id{id}
-      , deleted(deleted) {}
+///\brief A schema with its subject and references.
+template<typename Tag>
+class typed_schema {
+public:
+    using tag = Tag;
+    using schema_definition = typed_schema_definition<tag>;
 
-    subject_version_id(schema_version version, schema_id id)
-      : version{version}
-      , id{id} {}
+    using references = std::vector<schema_reference>;
 
-    schema_version version;
-    schema_id id;
-    is_deleted deleted{is_deleted::no};
+    typed_schema() = default;
 
-    std::vector<seq_marker> written_at;
+    typed_schema(subject sub, schema_definition def)
+      : _sub{std::move(sub)}
+      , _def{std::move(def)} {}
+
+    typed_schema(subject sub, schema_definition def, references refs)
+      : _sub{std::move(sub)}
+      , _def{std::move(def)}
+      , _refs{std::move(refs)} {}
+
+    friend bool operator==(const typed_schema& lhs, const typed_schema& rhs)
+      = default;
+
+    friend std::ostream& operator<<(std::ostream& os, const typed_schema& ref);
+
+    const subject& sub() const& { return _sub; }
+    subject sub() && { return std::move(_sub); }
+
+    schema_type type() const { return _def.type(); }
+
+    const schema_definition& def() const& { return _def; }
+    schema_definition def() && { return std::move(_def); }
+
+    const references& refs() const& { return _refs; }
+    references refs() && { return std::move(_refs); }
+
+private:
+    subject _sub{invalid_subject};
+    schema_definition _def{"", schema_type::avro};
+    references _refs;
 };
 
-///\brief All schema versions for a subject.
-using subject_versions = std::vector<subject_version_id>;
+using unparsed_schema = typed_schema<unparsed_schema_definition::tag>;
+using canonical_schema = typed_schema<canonical_schema_definition::tag>;
 
 ///\brief Complete description of a subject and schema for a version.
 struct subject_schema {
-    subject sub{invalid_subject};
+    canonical_schema schema;
     schema_version version{invalid_schema_version};
     schema_id id{invalid_schema_id};
-    schema_type type{schema_type::avro};
-    schema_definition definition{invalid_schema_definition};
     is_deleted deleted{false};
 };
 

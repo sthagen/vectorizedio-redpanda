@@ -12,6 +12,7 @@
 #include "config/configuration.h"
 #include "likely.h"
 #include "model/metadata.h"
+#include "model/namespace.h"
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/consensus_client_protocol.h"
 #include "raft/consensus_utils.h"
@@ -40,6 +41,15 @@
 
 namespace raft {
 
+static std::vector<model::record_batch_type>
+offset_translator_batch_types(const model::ntp& ntp) {
+    if (ntp.ns == model::kafka_namespace) {
+        return {model::record_batch_type::raft_configuration};
+    } else {
+        return {};
+    }
+}
+
 consensus::consensus(
   model::node_id nid,
   group_id group,
@@ -56,6 +66,11 @@ consensus::consensus(
   , _group(group)
   , _jit(std::move(jit))
   , _log(l)
+  , _offset_translator(ss::make_lw_shared<offset_translator>(
+      offset_translator_batch_types(_log.config().ntp()),
+      group,
+      _log.config().ntp(),
+      storage))
   , _scheduling(scheduling_config)
   , _disk_timeout(disk_timeout)
   , _client_protocol(client)
@@ -109,6 +124,13 @@ void consensus::setup_metrics() {
 
 void consensus::do_step_down() {
     _hbeat = clock_type::now();
+    if (_vstate == vote_state::leader) {
+        vlog(
+          _ctxlog.info,
+          "Stepping down as leader in term {}, dirty offset {}",
+          _term,
+          _log.offsets().dirty_offset);
+    }
     _vstate = vote_state::follower;
 }
 
@@ -993,9 +1015,27 @@ ss::future<> consensus::do_start() {
                 _ctxlog.trace,
                 "Configuration manager started: {}",
                 _configuration_manager);
-
-              return hydrate_snapshot();
           })
+          .then([this, initial_state] {
+              offset_translator::must_reset must_reset{initial_state};
+
+              absl::btree_map<model::offset, int64_t> offset2delta;
+              for (auto it = _configuration_manager.begin();
+                   it != _configuration_manager.end();
+                   ++it) {
+                  offset2delta.emplace(it->first, it->second.idx());
+              }
+
+              auto bootstrap = offset_translator::bootstrap_state{
+                .offset2delta = std::move(offset2delta),
+                .highest_known_offset
+                = _configuration_manager.get_highest_known_offset(),
+              };
+
+              return _offset_translator->start(
+                must_reset, std::move(bootstrap));
+          })
+          .then([this] { return hydrate_snapshot(); })
           .then([this] {
               vlog(
                 _ctxlog.debug,
@@ -1049,6 +1089,7 @@ ss::future<> consensus::do_start() {
                   update_follower_stats(_configuration_manager.get_latest());
               });
           })
+          .then([this] { return _offset_translator->sync_with_log(_log, _as); })
           .then([this] {
               /**
                * fix for incorrectly persisted configuration index. In previous
@@ -1162,8 +1203,16 @@ consensus::write_voted_for(consensus::voted_for_configuration config) {
 }
 
 ss::future<> consensus::write_last_applied(model::offset o) {
+    /**
+     * it is possible that the offset is applied to the state machine before it
+     * is flushed on the leader disk. This may lead to situations in which last
+     * applied offset stored by a state machine is not readable.
+     * In order to keep an invariant that: 'last applied offset MUST be
+     * readable' we limit it here to committed (leader flushed) offset.
+     */
+    auto const limited_offset = std::min(o, _log.offsets().committed_offset);
     auto key = last_applied_key();
-    iobuf val = reflection::to_iobuf(o);
+    iobuf val = reflection::to_iobuf(limited_offset);
     return _storage.kvs().put(
       storage::kvstore::key_space::consensus, std::move(key), std::move(val));
 }
@@ -1566,9 +1615,17 @@ consensus::do_append_entries(append_entries_request&& r) {
           lstats.dirty_offset,
           truncate_at);
         _probe.log_truncated();
-        return _log
-          .truncate(
-            storage::truncate_config(truncate_at, _scheduling.default_iopc))
+
+        // We are truncating the offset translator before truncating the log
+        // because if saving offset translator state fails, we will retry and
+        // eventually log and offset translator will become consistent. OTOH if
+        // log truncation were first and saving offset translator state failed,
+        // we wouldn't retry and log and offset translator could diverge.
+        return _offset_translator->truncate(truncate_at)
+          .then([this, truncate_at] {
+              return _log.truncate(storage::truncate_config(
+                truncate_at, _scheduling.default_iopc));
+          })
           .then([this, truncate_at] {
               _last_quorum_replicated_index = std::min(
                 details::prev_offset(truncate_at),
@@ -1662,6 +1719,9 @@ ss::future<> consensus::truncate_to_latest_snapshot() {
     // metadata
     return _configuration_manager.prefix_truncate(_last_snapshot_index)
       .then([this] {
+          return _offset_translator->prefix_truncate(_last_snapshot_index);
+      })
+      .then([this] {
           return _log.truncate_prefix(storage::truncate_prefix_config(
             details::next_offset(_last_snapshot_index),
             _scheduling.default_iopc));
@@ -1689,6 +1749,10 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
         update_follower_stats(metadata.latest_configuration);
         return _configuration_manager
           .add(_last_snapshot_index, std::move(metadata.latest_configuration))
+          .then([this, delta = metadata.log_start_delta] {
+              return _offset_translator->prefix_truncate_reset(
+                _last_snapshot_index, delta);
+          })
           .then([this] {
               _probe.configuration_update();
               _log.set_collectible_offset(_last_snapshot_index);
@@ -1856,6 +1920,8 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
       .last_included_term = last_included_term.value(),
       .latest_configuration = *config,
       .cluster_time = clock_type::time_point::min(),
+      .log_start_delta = offset_translator_delta(
+        _offset_translator->delta(details::next_offset(last_included_index))),
     };
 
     return details::persist_snapshot(
@@ -1865,7 +1931,11 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
           _last_snapshot_index = last_included_index;
           _last_snapshot_term = term;
           // update configuration manager
-          return _configuration_manager.prefix_truncate(_last_snapshot_index);
+          return _configuration_manager.prefix_truncate(_last_snapshot_index)
+            .then([this] {
+                return _offset_translator->prefix_truncate(
+                  _last_snapshot_index);
+            });
       });
 }
 
@@ -1960,10 +2030,32 @@ ss::future<storage::append_result> consensus::disk_append(
       storage::log_append_config::fsync::no,
       _scheduling.default_iopc,
       model::timeout_clock::now() + _disk_timeout};
+
+    class consumer {
+    public:
+        consumer(offset_translator& translator, storage::log_appender appender)
+          : _translator(translator)
+          , _appender(std::move(appender)) {}
+
+        ss::future<ss::stop_iteration> operator()(model::record_batch& batch) {
+            auto ret = co_await _appender(batch);
+            // passing batch to translator after appender so that correct batch
+            // offsets are filled.
+            _translator.process(batch);
+            co_return ret;
+        }
+
+        auto end_of_stream() { return _appender.end_of_stream(); }
+
+    private:
+        offset_translator& _translator;
+        storage::log_appender _appender;
+    };
+
     return details::for_each_ref_extract_configuration(
              _log.offsets().dirty_offset,
              std::move(reader),
-             _log.make_appender(cfg),
+             consumer(*_offset_translator, _log.make_appender(cfg)),
              cfg.timeout)
       .then([this, should_update_last_quorum_idx](
               std::tuple<ret_t, std::vector<offset_configuration>> t) {
@@ -1999,6 +2091,12 @@ ss::future<storage::append_result> consensus::disk_append(
               if (_bg.is_closed()) {
                   return ret;
               }
+
+              // Do checkpointing in the background to avoid latency spikes in
+              // the write path caused by KVStore flush debouncing.
+
+              (void)ss::with_gate(
+                _bg, [this] { return _offset_translator->maybe_checkpoint(); });
 
               (void)ss::with_gate(
                 _bg, [this, last_offset = ret.last_offset, sz = ret.byte_size] {
@@ -2325,6 +2423,100 @@ consensus::transfer_leadership(transfer_leadership_request req) {
     co_return reply;
 }
 
+/**
+ * After we have accepted the request to transfer leadership, carry out
+ * preparatory phase before we actually send a timeout_now to the new
+ * leader.  During this phase we endeavor to make sure the new leader
+ * is sufficiently up to date that they will win the election when
+ * they start it.
+ */
+ss::future<std::error_code>
+consensus::prepare_transfer_leadership(vnode target_rni) {
+    /*
+     * the follower's log needs to be up-to-date so that it will
+     * receive votes when we ask it to trigger an immediate
+     * election. so check if the followers needs some recovery, and
+     * then wait on that process to complete before sending the
+     * election request.
+     */
+
+    vlog(
+      _ctxlog.trace,
+      "transfer leadership: preparing target={}, dirty_offset={}",
+      target_rni,
+      _log.offsets().dirty_offset);
+
+    // Enforce ordering wrt anyone currently doing an append under op_lock
+    {
+        auto units = co_await _op_lock.get_units();
+        vlog(_ctxlog.trace, "transfer leadership: cleared oplock");
+    }
+
+    // Allow any buffered batches to complete, to avoid racing
+    // advances of dirty offset against new leader's recovery
+    co_await _batcher.flush({}, true);
+
+    // After we have (maybe) waited for op_lock and batcher,
+    // proceed to (maybe) wait for recovery to complete
+    if (!_fstats.contains(target_rni)) {
+        // Gone?  Nothing to wait for, proceed immediately.
+        co_return make_error_code(errc::node_does_not_exists);
+    }
+    auto& meta = _fstats.get(target_rni);
+    if (
+      !meta.is_recovering
+      && needs_recovery(meta, _log.offsets().dirty_offset)) {
+        vlog(
+          _ctxlog.debug,
+          "transfer leadership: starting node {} recovery",
+          target_rni);
+        dispatch_recovery(meta); // sets is_recovering flag
+    } else {
+        vlog(
+          _ctxlog.debug,
+          "transfer leadership: node {} doesn't need recovery or "
+          "is already recovering (is_recovering {} dirty offset {})",
+          target_rni,
+          meta.is_recovering,
+          _log.offsets().dirty_offset);
+    }
+
+    auto timeout = ss::semaphore::clock::duration(
+      config::shard_local_cfg().raft_transfer_leader_recovery_timeout_ms());
+
+    if (meta.is_recovering) {
+        vlog(
+          _ctxlog.warn,
+          "transfer leadership: waiting for node {} recovery",
+          target_rni);
+        meta.follower_state_change.broadcast();
+        try {
+            co_await meta.recovery_finished.wait(timeout);
+        } catch (ss::timed_out_error) {
+            vlog(
+              _ctxlog.warn,
+              "transfer leadership: timed out waiting on node {} "
+              "recovery",
+              target_rni);
+            co_return make_error_code(errc::timeout);
+        }
+        vlog(
+          _ctxlog.warn,
+          "transfer leadership: finished waiting on node {} "
+          "recovery",
+          target_rni);
+    } else {
+        vlog(
+          _ctxlog.debug,
+          "transfer leadership: node {} is not recovering, proceeding "
+          "(dirty offset {})",
+          target_rni,
+          _log.offsets().dirty_offset);
+    }
+
+    co_return make_error_code(errc::success);
+}
+
 ss::future<std::error_code>
 consensus::do_transfer_leadership(std::optional<model::node_id> target) {
     if (!is_leader()) {
@@ -2421,94 +2613,99 @@ consensus::do_transfer_leadership(std::optional<model::node_id> target) {
          */
         _transferring_leadership = true;
 
-        /*
-         * the follower's log needs to be up-to-date so that it will
-         * receive votes when we ask it to trigger an immediate
-         * election. so check if the followers needs some recovery, and
-         * then wait on that process to complete before sending the
-         * election request.
-         */
         if (!_fstats.contains(target_rni)) {
             return seastar::make_ready_future<std::error_code>(
               make_error_code(errc::node_does_not_exists));
         }
-        auto& meta = _fstats.get(target_rni);
-        if (
-          !meta.is_recovering
-          && needs_recovery(meta, _log.offsets().dirty_offset)) {
-            dispatch_recovery(meta); // sets is_recovering flag
-        }
 
-        auto f = ss::now();
-        if (meta.is_recovering) {
-            vlog(
-              _ctxlog.warn,
-              "Waiting on node to recover before requesting election");
-            auto timeout = ss::semaphore::clock::duration(
-              config::shard_local_cfg()
-                .raft_transfer_leader_recovery_timeout_ms());
-            f = meta.recovery_finished.wait(timeout);
-
-            meta.follower_state_change.broadcast();
-        }
-
-        return f.then([this, target_rni] {
-            /*
-             * there are still several scenarios in which we will want
-             * to not complete leadership transfer, all of which might
-             * have occurred during the recovery process.
-             *
-             *   - we might have lost leadership status
-             *   - shutdown may be in progress
-             *   - other: identified by follower not caught-up
-             */
-            if (!is_leader()) {
-                vlog(
-                  _ctxlog.warn, "Cannot transfer leadership from non-leader");
-                return seastar::make_ready_future<std::error_code>(
-                  make_error_code(errc::not_leader));
-            }
-
-            if (_as.abort_requested()) {
-                return seastar::make_ready_future<std::error_code>(
-                  make_error_code(errc::not_leader));
-            }
-
-            if (!_fstats.contains(target_rni)) {
-                return seastar::make_ready_future<std::error_code>(
-                  make_error_code(errc::node_does_not_exists));
-            }
-
-            auto& meta = _fstats.get(target_rni);
-            if (needs_recovery(meta, _log.offsets().dirty_offset)) {
-                return seastar::make_ready_future<std::error_code>(
-                  make_error_code(errc::timeout));
-            }
-
-            timeout_now_request req{
-              .target_node_id = target_rni,
-              .node_id = _self,
-              .group = _group,
-              .term = _term,
-            };
-
-            auto timeout
-              = raft::clock_type::now()
-                + config::shard_local_cfg().raft_timeout_now_timeout_ms();
-
-            return _client_protocol
-              .timeout_now(
-                target_rni.id(), std::move(req), rpc::client_opts(timeout))
-
-              .then([](result<timeout_now_reply> reply) {
-                  if (!reply) {
-                      return seastar::make_ready_future<std::error_code>(
-                        reply.error());
-                  }
+        return prepare_transfer_leadership(target_rni)
+          .then([this, target_rni](std::error_code prepare_err) {
+              if (prepare_err) {
+                  return ss::make_ready_future<std::error_code>(prepare_err);
+              }
+              /*
+               * there are still several scenarios in which we will want
+               * to not complete leadership transfer, all of which might
+               * have occurred during the recovery process.
+               *
+               *   - we might have lost leadership status
+               *   - shutdown may be in progress
+               *   - other: identified by follower not caught-up
+               */
+              if (!is_leader()) {
+                  vlog(
+                    _ctxlog.warn, "Cannot transfer leadership from non-leader");
                   return seastar::make_ready_future<std::error_code>(
-                    make_error_code(errc::success));
-              });
-        });
+                    make_error_code(errc::not_leader));
+              }
+
+              if (_as.abort_requested()) {
+                  vlog(
+                    _ctxlog.warn,
+                    "Cannot transfer leadership: abort requested");
+
+                  return seastar::make_ready_future<std::error_code>(
+                    make_error_code(errc::not_leader));
+              }
+
+              if (!_fstats.contains(target_rni)) {
+                  vlog(
+                    _ctxlog.warn,
+                    "Cannot transfer leadership: no stats for {}",
+                    target_rni);
+
+                  return seastar::make_ready_future<std::error_code>(
+                    make_error_code(errc::node_does_not_exists));
+              }
+
+              auto& meta = _fstats.get(target_rni);
+              if (needs_recovery(meta, _log.offsets().dirty_offset)) {
+                  vlog(
+                    _ctxlog.warn,
+                    "Cannot transfer leadership: {} needs recovery ({}, {}, "
+                    "{})",
+                    target_rni,
+                    meta.match_index,
+                    meta.last_dirty_log_index,
+                    _log.offsets().dirty_offset);
+
+                  return seastar::make_ready_future<std::error_code>(
+                    make_error_code(errc::timeout));
+              }
+
+              timeout_now_request req{
+                .target_node_id = target_rni,
+                .node_id = _self,
+                .group = _group,
+                .term = _term,
+              };
+
+              auto timeout
+                = raft::clock_type::now()
+                  + config::shard_local_cfg().raft_timeout_now_timeout_ms();
+
+              return _client_protocol
+                .timeout_now(
+                  target_rni.id(), std::move(req), rpc::client_opts(timeout))
+
+                .then([this](result<timeout_now_reply> reply) {
+                    if (!reply) {
+                        return seastar::make_ready_future<std::error_code>(
+                          reply.error());
+                    } else {
+                        // Step down before setting _transferring_leadership
+                        // to false, to ensure we do not accept any more writes
+                        // in the gap between new leader acking timeout now
+                        // and new leader sending a vote for its new term.
+                        // (If we accepted more writes, our log could get
+                        //  ahead of new leader, and it could lose election)
+                        do_step_down();
+
+                        return seastar::make_ready_future<std::error_code>(
+                          make_error_code(errc::success));
+                    }
+                });
+          });
     });
 
     return f.finally([this] { _transferring_leadership = false; });
@@ -2523,6 +2720,8 @@ ss::future<> consensus::remove_persistent_state() {
       storage::kvstore::key_space::consensus, last_applied_key());
     // configuration manager
     co_await _configuration_manager.remove_persistent_state();
+    // offset translator
+    co_await _offset_translator->remove_persistent_state();
     // snapshot
     co_await _snapshot_mgr.remove_snapshot();
     co_await _snapshot_mgr.remove_partial_snapshots();

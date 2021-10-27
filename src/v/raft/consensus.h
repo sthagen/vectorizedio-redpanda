@@ -23,6 +23,7 @@
 #include "raft/group_configuration.h"
 #include "raft/logger.h"
 #include "raft/mutex_buffer.h"
+#include "raft/offset_translator.h"
 #include "raft/prevote_stm.h"
 #include "raft/probe.h"
 #include "raft/recovery_throttle.h"
@@ -282,6 +283,7 @@ public:
      */
     ss::future<transfer_leadership_reply>
       transfer_leadership(transfer_leadership_request);
+    ss::future<std::error_code> prepare_transfer_leadership(vnode);
     ss::future<std::error_code>
       do_transfer_leadership(std::optional<model::node_id>);
 
@@ -297,6 +299,10 @@ public:
     probe& get_probe() { return _probe; };
 
     storage::log& log() { return _log; }
+
+    const ss::lw_shared_ptr<offset_translator>& get_offset_translator() {
+        return _offset_translator;
+    }
 
     /**
      * In our raft implementation heartbeats are sent outside of the consensus
@@ -527,6 +533,7 @@ private:
     raft::group_id _group;
     timeout_jitter _jit;
     storage::log _log;
+    ss::lw_shared_ptr<offset_translator> _offset_translator;
     scheduling_config _scheduling;
     model::timeout_clock::duration _disk_timeout;
     consensus_client_protocol _client_protocol;

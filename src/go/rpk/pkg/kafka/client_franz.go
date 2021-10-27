@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spf13/afero"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -26,9 +27,6 @@ import (
 )
 
 // NewFranzClient returns a franz-go based kafka client.
-//
-// The settings are close to, but not identical to the sarama client
-// configuration.  Particularly, our timeouts are higher.
 func NewFranzClient(
 	fs afero.Fs, p *config.Params, cfg *config.Config, extraOpts ...kgo.Opt,
 ) (*kgo.Client, error) {
@@ -77,6 +75,19 @@ func NewFranzClient(
 	opts = append(opts, extraOpts...)
 
 	return kgo.NewClient(opts...)
+}
+
+// NewAdmin returns a franz-go admin client.
+func NewAdmin(
+	fs afero.Fs, p *config.Params, cfg *config.Config, extraOpts ...kgo.Opt,
+) (*kadm.Client, error) {
+	cl, err := NewFranzClient(fs, p, cfg, extraOpts...)
+	if err != nil {
+		return nil, err
+	}
+	adm := kadm.NewClient(cl)
+	adm.SetTimeoutMillis(5000) // 5s timeout default for any timeout based request
+	return adm, nil
 }
 
 // MetaString returns what we will print within rpk for kgo.BrokerMetadata.

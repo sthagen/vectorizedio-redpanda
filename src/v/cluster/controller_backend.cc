@@ -22,6 +22,7 @@
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
+#include "config/node_config.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "outcome.h"
@@ -175,8 +176,8 @@ controller_backend::controller_backend(
   , _partition_leaders_table(leaders)
   , _topics_frontend(frontend)
   , _storage(storage)
-  , _self(model::node_id(config::shard_local_cfg().node_id))
-  , _data_directory(config::shard_local_cfg().data_directory().as_sstring())
+  , _self(model::node_id(config::node().node_id))
+  , _data_directory(config::node().data_directory().as_sstring())
   , _housekeeping_timer_interval(
       config::shard_local_cfg().controller_backend_housekeeping_interval_ms())
   , _as(as) {}
@@ -377,6 +378,13 @@ ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
             if (ec) {
                 if (it->type == topic_table_delta::op_type::update) {
                     /**
+                     * do not skip cross core partition updates waiting for
+                     * partition to be shut down on the other core
+                     */
+                    if (ec == errc::wating_for_partition_shutdown) {
+                        continue;
+                    }
+                    /**
                      * check if pending update isn't already finished, if so it
                      * is safe to proceed to the next step
                      */
@@ -532,6 +540,10 @@ controller_backend::execute_partitition_op(const topic_table::delta& delta) {
         return create_non_replicable_partition(delta.ntp, rev);
     case op_t::del:
         return delete_partition(delta.ntp, rev).then([] {
+            return std::error_code(errc::success);
+        });
+    case op_t::del_non_replicable:
+        return delete_non_replicable_partition(delta.ntp, rev).then([] {
             return std::error_code(errc::success);
         });
     case op_t::update:
@@ -716,7 +728,9 @@ ss::future<std::error_code> controller_backend::process_partition_update(
      * currently present. On this core we will just wait for partition to be
      * created.
      */
-    if (contains_node(_self, previous.replicas)) {
+    if (
+      contains_node(_self, previous.replicas)
+      && !has_local_replicas(_self, previous.replicas)) {
         auto previous_shard = get_target_shard(_self, previous.replicas);
         std::optional<model::revision_id> initial_revision;
         std::vector<model::broker> initial_brokers;
@@ -732,13 +746,14 @@ ss::future<std::error_code> controller_backend::process_partition_update(
             // ask previous controller for partition initial revision
             auto x_core_move_req = co_await ask_remote_shard_for_initail_rev(
               ntp, *previous_shard);
-            if (x_core_move_req) {
-                initial_revision = x_core_move_req->revision;
-                std::copy(
-                  x_core_move_req->initial_configuration.brokers().begin(),
-                  x_core_move_req->initial_configuration.brokers().end(),
-                  std::back_inserter(initial_brokers));
+            if (!x_core_move_req) {
+                co_return errc::wating_for_partition_shutdown;
             }
+            initial_revision = x_core_move_req->revision;
+            std::copy(
+              x_core_move_req->initial_configuration.brokers().begin(),
+              x_core_move_req->initial_configuration.brokers().end(),
+              std::back_inserter(initial_brokers));
         }
         if (initial_revision) {
             vlog(
@@ -929,6 +944,17 @@ ss::future<> controller_backend::remove_from_shard_table(
       [ntp = std::move(ntp), raft_group, revision](shard_table& s) mutable {
           s.erase(ntp, raft_group, revision);
       });
+}
+
+ss::future<> controller_backend::delete_non_replicable_partition(
+  model::ntp ntp, model::revision_id rev) {
+    vlog(clusterlog.trace, "removing {} from shard table at {}", ntp, rev);
+    co_await _shard_table.invoke_on_all(
+      [ntp, rev](shard_table& st) { st.erase(ntp, rev); });
+    auto log = _storage.local().log_mgr().get(ntp);
+    if (log && log->config().get_revision() < rev) {
+        co_await _storage.local().log_mgr().remove(ntp);
+    }
 }
 
 ss::future<std::error_code> controller_backend::create_non_replicable_partition(

@@ -9,9 +9,9 @@
 
 #include "pandaproxy/schema_registry/seq_writer.h"
 
+#include "kafka/client/client_fetch_batch_reader.h"
 #include "pandaproxy/error.h"
 #include "pandaproxy/logger.h"
-#include "pandaproxy/schema_registry/client_fetch_batch_reader.h"
 #include "pandaproxy/schema_registry/exceptions.h"
 #include "pandaproxy/schema_registry/storage.h"
 #include "random/simple_time_jitter.h"
@@ -56,7 +56,7 @@ ss::future<> seq_writer::wait_for(model::offset offset) {
                   seq._loaded_offset,
                   offset);
 
-                return make_client_fetch_batch_reader(
+                return kafka::client::make_client_fetch_batch_reader(
                          seq._client.local(),
                          model::schema_registry_internal_tp,
                          seq._loaded_offset + model::offset{1},
@@ -130,14 +130,14 @@ void seq_writer::advance_offset_inner(model::offset offset) {
     }
 }
 
-ss::future<schema_id> seq_writer::write_subject_version(
-  subject sub, schema_definition def, schema_type type) {
-    auto do_write = [sub, def, type](
+ss::future<schema_id>
+seq_writer::write_subject_version(canonical_schema schema) {
+    auto do_write = [schema{std::move(schema)}](
                       model::offset write_at,
                       seq_writer& seq) -> ss::future<std::optional<schema_id>> {
         // Check if store already contains this data: if
         // so, we do no I/O and return the schema ID.
-        auto projected = co_await seq._store.project_ids(sub, def, type);
+        auto projected = co_await seq._store.project_ids(schema);
 
         if (!projected.inserted) {
             vlog(plog.debug, "write_subject_version: no-op");
@@ -150,21 +150,19 @@ ss::future<schema_id> seq_writer::write_subject_version(
               "schema={} "
               "version={}",
               write_at,
-              sub,
+              schema.sub(),
               projected.id,
               projected.version);
 
             auto key = schema_key{
               .seq{write_at},
               .node{seq._node_id},
-              .sub{sub},
+              .sub{schema.sub()},
               .version{projected.version}};
             auto value = schema_value{
-              .sub{sub},
+              .schema{schema},
               .version{projected.version},
-              .type = type,
               .id{projected.id},
-              .schema{def},
               .deleted = is_deleted::no};
 
             auto batch = as_record_batch(key, value);
@@ -247,11 +245,9 @@ seq_writer::delete_subject_version(subject sub, schema_version version) {
           .seq{write_at}, .node{seq._node_id}, .sub{sub}, .version{version}};
         vlog(plog.debug, "seq_writer::delete_subject_version {}", key);
         auto value = schema_value{
-          .sub{sub},
+          .schema{std::move(ss.schema)},
           .version{version},
-          .type = ss.type,
           .id{ss.id},
-          .schema{std::move(ss.definition)},
           .deleted{is_deleted::yes}};
 
         auto batch = as_record_batch(key, value);

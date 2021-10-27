@@ -12,6 +12,7 @@
 #include "pandaproxy/schema_registry/avro.h"
 
 #include "pandaproxy/schema_registry/error.h"
+#include "pandaproxy/schema_registry/errors.h"
 #include "utils/string_switch.h"
 
 #include <avro/Compiler.hh>
@@ -312,6 +313,31 @@ result<void> sanitize(
 
 } // namespace
 
+avro_schema_definition::avro_schema_definition(avro::ValidSchema vs)
+  : _impl(std::move(vs)) {}
+
+const avro::ValidSchema& avro_schema_definition::operator()() const {
+    return _impl;
+}
+
+bool operator==(
+  const avro_schema_definition& lhs, const avro_schema_definition& rhs) {
+    return lhs.raw() == rhs.raw();
+}
+
+std::ostream& operator<<(std::ostream& os, const avro_schema_definition& def) {
+    fmt::print(
+      os,
+      "type: {}, definition: {}",
+      to_string_view(def.type()),
+      def().toJson(false));
+    return os;
+}
+
+canonical_schema_definition::raw_string avro_schema_definition::raw() const {
+    return canonical_schema_definition::raw_string{_impl.toJson(false)};
+}
+
 result<avro_schema_definition>
 make_avro_schema_definition(std::string_view sv) {
     try {
@@ -324,12 +350,17 @@ make_avro_schema_definition(std::string_view sv) {
     }
 }
 
-result<schema_definition>
-sanitize_avro_schema_definition(schema_definition def) {
+result<canonical_schema_definition>
+sanitize_avro_schema_definition(unparsed_schema_definition def) {
     rapidjson::GenericDocument<rapidjson::UTF8<>> doc;
     constexpr auto flags = rapidjson::kParseDefaultFlags
                            | rapidjson::kParseStopWhenDoneFlag;
-    doc.Parse<flags>(def().data(), def().size());
+    const auto& raw = def.raw()();
+    if (raw.empty()) {
+        auto ec = error_code::schema_empty;
+        return error_info{ec, make_error_code(ec).message()};
+    }
+    doc.Parse<flags>(raw.data(), raw.size());
     if (doc.HasParseError()) {
         return error_info{
           error_code::schema_invalid,
@@ -343,19 +374,20 @@ sanitize_avro_schema_definition(schema_definition def) {
     if (res.has_error()) {
         return error_info{
           res.assume_error().code(),
-          fmt::format("{} {}", res.assume_error().message(), def())};
+          fmt::format("{} {}", res.assume_error().message(), raw)};
     }
 
     rapidjson::GenericStringBuffer<rapidjson::UTF8<>> str_buf;
-    str_buf.Reserve(def().size());
+    str_buf.Reserve(raw.size());
     rapidjson::Writer<rapidjson::StringBuffer> w{str_buf};
 
     if (!doc.Accept(w)) {
         return error_info{error_code::schema_invalid, "Invalid schema"};
     }
 
-    return schema_definition{
-      ss::sstring{str_buf.GetString(), str_buf.GetSize()}};
+    return canonical_schema_definition{
+      std::string_view{str_buf.GetString(), str_buf.GetSize()},
+      schema_type::avro};
 }
 
 bool check_compatible(

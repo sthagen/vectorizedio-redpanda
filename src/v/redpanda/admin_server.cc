@@ -213,14 +213,90 @@ void admin_server::log_level_timer_handler() {
     rearm_log_level_timer();
 }
 
+/**
+ * Throw an appropriate seastar HTTP exception if we saw
+ * a redpanda error during a request.
+ *
+ * @param ec error code, may be from any subsystem
+ * @param id optional node ID, for operations that acted on a particular
+ *           node and would like it referenced in per-node cluster errors
+ */
+void throw_on_error(
+  std::error_code ec, model::node_id id = model::node_id{-1}) {
+    if (!ec) {
+        return;
+    }
+
+    if (ec.category() == cluster::error_category()) {
+        switch (cluster::errc(ec.value())) {
+        case cluster::errc::node_does_not_exists:
+            throw ss::httpd::not_found_exception(
+              fmt::format("broker with id {} not found", id));
+        case cluster::errc::invalid_node_operation:
+            throw ss::httpd::bad_request_exception(fmt::format(
+              "can not update broker {} state, invalid state transition "
+              "requested",
+              id));
+        case cluster::errc::update_in_progress:
+        case cluster::errc::waiting_for_recovery:
+            throw ss::httpd::base_exception(
+              fmt::format("Not ready ({})", ec.message()),
+              ss::httpd::reply::status_type::service_unavailable);
+        default:
+            throw ss::httpd::server_error_exception(
+              fmt::format("Unexpected cluster error: {}", ec.message()));
+        }
+    } else if (ec.category() == raft::error_category()) {
+        switch (raft::errc(ec.value())) {
+        case raft::errc::exponential_backoff:
+        case raft::errc::disconnected_endpoint:
+        case raft::errc::configuration_change_in_progress:
+        case raft::errc::leadership_transfer_in_progress:
+            throw ss::httpd::base_exception(
+              fmt::format("Not ready: {}", ec.message()),
+              ss::httpd::reply::status_type::service_unavailable);
+        default:
+            throw ss::httpd::server_error_exception(
+              fmt::format("Unexpected raft error: {}", ec.message()));
+        }
+    } else {
+        throw ss::httpd::server_error_exception(
+          fmt::format("Unexpected error: {}", ec.message()));
+    }
+}
+
 void admin_server::register_config_routes() {
-    ss::httpd::config_json::get_config.set(
-      _server._routes, []([[maybe_unused]] ss::const_req req) {
+    static ss::httpd::handle_function get_config_handler =
+      []([[maybe_unused]] ss::const_req req, ss::reply& reply) {
           rapidjson::StringBuffer buf;
           rapidjson::Writer<rapidjson::StringBuffer> writer(buf);
           config::shard_local_cfg().to_json(writer);
-          return ss::json::json_return_type(buf.GetString());
-      });
+
+          reply.set_status(ss::httpd::reply::status_type::ok, buf.GetString());
+          return "";
+      };
+
+    auto get_config_handler_f = new ss::httpd::function_handler{
+      get_config_handler, "json"};
+
+    ss::httpd::config_json::get_config.set(
+      _server._routes, get_config_handler_f);
+
+    static ss::httpd::handle_function get_node_config_handler =
+      []([[maybe_unused]] ss::const_req req, ss::reply& reply) {
+          rapidjson::StringBuffer buf;
+          rapidjson::Writer<rapidjson::StringBuffer> writer(buf);
+          config::node().to_json(writer);
+
+          reply.set_status(ss::httpd::reply::status_type::ok, buf.GetString());
+          return "";
+      };
+
+    auto get_node_config_handler_f = new ss::httpd::function_handler{
+      get_node_config_handler, "json"};
+
+    ss::httpd::config_json::get_node_config.set(
+      _server._routes, get_node_config_handler_f);
 
     ss::httpd::config_json::set_log_level.set(
       _server._routes, [this](ss::const_req req) {
@@ -348,10 +424,7 @@ void admin_server::register_raft_routes() {
                 }
                 return consensus->do_transfer_leadership(target).then(
                   [](std::error_code err) {
-                      if (err) {
-                          throw ss::httpd::server_error_exception(fmt::format(
-                            "Leadership transfer failed: {}", err.message()));
-                      }
+                      throw_on_error(err);
                       return ss::json::json_return_type(ss::json::json_void());
                   });
             });
@@ -543,10 +616,7 @@ void admin_server::register_kafka_routes() {
                 }
                 return partition->transfer_leadership(target).then(
                   [](std::error_code err) {
-                      if (err) {
-                          throw ss::httpd::server_error_exception(fmt::format(
-                            "Leadership transfer failed: {}", err.message()));
-                      }
+                      throw_on_error(err);
                       return ss::json::json_return_type(ss::json::json_void());
                   });
             });
@@ -560,27 +630,6 @@ void admin_server::register_status_routes() {
             {"status", _ready ? "ready" : "booting"}};
           return ss::make_ready_future<ss::json::json_return_type>(status_map);
       });
-}
-
-void map_broker_state_update_error(model::node_id id, std::error_code ec) {
-    if (ec.category() == cluster::error_category()) {
-        switch (cluster::errc(ec.value())) {
-        case cluster::errc::node_does_not_exists:
-            throw ss::httpd::not_found_exception(
-              fmt::format("broker with id {} not found", id));
-        case cluster::errc::invalid_node_operation:
-            throw ss::httpd::bad_request_exception(fmt::format(
-              "can not update broker {} state, ivalid state transition "
-              "requested",
-              id));
-        default:
-            throw ss::httpd::server_error_exception(
-              fmt::format("error updating broker state: {}", ec.message()));
-        }
-    }
-
-    throw ss::httpd::server_error_exception(
-      fmt::format("error updating broker state: {}", ec.message()));
 }
 
 model::node_id parse_broker_id(const ss::httpd::request& req) {
@@ -632,9 +681,8 @@ void admin_server::register_broker_routes() {
             .local()
             .decommission_node(id)
             .then([id](std::error_code ec) {
-                if (ec) {
-                    map_broker_state_update_error(id, ec);
-                }
+                throw_on_error(ec, id);
+
                 return ss::make_ready_future<ss::json::json_return_type>(
                   ss::json::json_void());
             });
@@ -647,9 +695,8 @@ void admin_server::register_broker_routes() {
             .local()
             .recommission_node(id)
             .then([id](std::error_code ec) {
-                if (ec) {
-                    map_broker_state_update_error(id, ec);
-                }
+                throw_on_error(ec, id);
+
                 return ss::make_ready_future<ss::json::json_return_type>(
                   ss::json::json_void());
             });
@@ -879,7 +926,16 @@ void admin_server::register_partition_routes() {
           }
 
           std::vector<model::broker_shard> replicas;
+          if (!doc.IsArray()) {
+              throw ss::httpd::bad_request_exception("Expected array");
+          }
           for (auto& r : doc.GetArray()) {
+              const auto& node_id_json = r["node_id"];
+              const auto& core_json = r["core"];
+              if (!node_id_json.IsInt() || !core_json.IsInt()) {
+                  throw ss::httpd::bad_request_exception(
+                    "`node_id` and `core` must be integers");
+              }
               const auto node_id = model::node_id(r["node_id"].GetInt());
               const auto shard = static_cast<uint32_t>(r["core"].GetInt());
 

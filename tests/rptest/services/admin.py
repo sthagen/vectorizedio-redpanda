@@ -55,6 +55,12 @@ class Admin:
         r.raise_for_status()
         return r
 
+    def get_config(self):
+        return self._request("GET", "config").json()
+
+    def get_node_config(self):
+        return self._request("GET", "node_config").json()
+
     def set_log_level(self, name, level, expires=None):
         """
         Set broker log level

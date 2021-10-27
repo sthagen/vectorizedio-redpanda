@@ -9,14 +9,13 @@ v_cc_library(
   NAME pandaproxy_schema_registry
   SRCS
     api.cc
-    client_fetch_batch_reader.cc
     configuration.cc
     handlers.cc
     error.cc
-    schema_util.cc
     service.cc
     seq_writer.cc
     sharded_store.cc
+    types.cc
     avro.cc
   DEPS
     v::pandaproxy_common
