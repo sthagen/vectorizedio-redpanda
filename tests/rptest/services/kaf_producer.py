@@ -22,12 +22,21 @@ class KafProducer(BackgroundThreadService):
         self._stopping = Event()
 
     def _worker(self, _idx, node):
-        cmd = f"for (( i=0; i < {self._num_records}; i++ )) ; do export KEY=key-$(printf %08d $i) ; export VALUE=record-$(printf %08d $i) ; echo $VALUE | kaf produce -b {self._redpanda.brokers()} --key $KEY {self._topic} ; done"
+        cmd = f"echo $$ ; for (( i=0; i < {self._num_records}; i++ )) ; do export KEY=key-$(printf %08d $i) ; export VALUE={self.value_gen()} ; echo $VALUE | kaf produce -b {self._redpanda.brokers()} --key $KEY {self._topic} ; done"
 
         self._stopping.clear()
+        self._pid = None
         try:
-            for line in node.account.ssh_capture(cmd, timeout_sec=10):
-                self.logger.debug(line.rstrip())
+            out_iter = node.account.ssh_capture(cmd, timeout_sec=10)
+            for line in out_iter:
+                if self._pid is None:
+                    # Take first line as pid
+                    self._pid = line.strip()
+                    self._redpanda.logger.debug(
+                        f"Spawned remote shell {self._pid}")
+                    continue
+                else:
+                    self.logger.debug(line.rstrip())
         except RemoteCommandError:
             if self._stopping.is_set():
                 pass
@@ -37,6 +46,8 @@ class KafProducer(BackgroundThreadService):
     def stop_node(self, node):
         self._stopping.set()
         try:
+            if self._pid is not None:
+                node.account.signal(self._pid, 9, allow_fail=True)
             node.account.kill_process("kaf", clean_shutdown=False)
         except RemoteCommandError as e:
             if b"No such process" in e.msg:
@@ -46,3 +57,6 @@ class KafProducer(BackgroundThreadService):
 
     def clean_node(self, nodes):
         pass
+
+    def value_gen(self):
+        return "record-$(printf %08d $i)"

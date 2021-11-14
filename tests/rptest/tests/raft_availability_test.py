@@ -10,19 +10,21 @@
 import sys
 import time
 import re
-import requests
 import random
 
 from ducktape.mark.resource import cluster
 from ducktape.mark import parametrize
+from ducktape.mark import ignore
 from ducktape.utils.util import wait_until
 
 from rptest.clients.kafka_cat import KafkaCat
 from rptest.clients.rpk import RpkTool, RpkException
 from rptest.clients.types import TopicSpec
+from rptest.services.failure_injector import FailureInjector, FailureSpec
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.services.rpk_producer import RpkProducer
 from rptest.services.kaf_producer import KafProducer
+from rptest.services.admin import Admin
 
 ELECTION_TIMEOUT = 10
 
@@ -175,11 +177,13 @@ class RaftAvailabilityTest(RedpandaTest):
         rpk = RpkTool(self.redpanda)
 
         payload = str(random.randint(0, 1000))
-
+        start = time.time()
         offset = rpk.produce(self.topic, "tkey", payload, timeout=5)
         consumed = kc.consume_one(self.topic, 0, offset)
+        latency = time.time() - start
         self.logger.info(
-            f"_ping_pong produced '{payload}' consumed '{consumed}'")
+            f"_ping_pong produced '{payload}' consumed '{consumed}' in {(latency)*1000.0:.2f} ms"
+        )
         if consumed['payload'] != payload:
             raise RuntimeError(f"expected '{payload}' got '{consumed}'")
 
@@ -451,29 +455,23 @@ class RaftAvailabilityTest(RedpandaTest):
         # reactor stalls and corresponding nondeterministic behaviour/failures.
         # This appears unrelated to the functionality under test, something else
         # is tripping up the cluster when we have so many leadership transfers.
+        # https://github.com/vectorizedio/redpanda/issues/2623
+
+        admin = Admin(self.redpanda)
 
         initial_leader_id = leader_node_id
         for n in range(0, transfer_count):
             target_idx = (initial_leader_id + n) % len(self.redpanda.nodes)
             target_node_id = target_idx + 1
 
-            api_host = self.redpanda.nodes[leader_node_id - 1].account.hostname
-
-            url = "http://{}:9644/v1/partitions/kafka/{}/{}/transfer_leadership?target={}".format(
-                api_host, self.topic, 0, target_node_id)
             self.logger.info(f"Starting transfer to {target_node_id}")
-
-            # Leadership transfer is a blocking API endpoint, important to use a timeout
-            # to avoid a test hang if something goes hangs on the server side.
-            r = requests.post(url, timeout=30)
-            if r.status_code not in (200, 500):
-                r.raise_for_status()
+            admin.partition_transfer_leadership("kafka", self.topic, 0,
+                                                target_node_id)
 
             self._wait_for_leader(
                 lambda l: l is not None and l == target_node_id,
                 timeout=ELECTION_TIMEOUT * 2)
             self.logger.info(f"Completed transfer to {target_node_id}")
-            leader_node_id = target_node_id
 
         self.logger.info(f"Completed {transfer_count} transfers successfully")
 
@@ -481,3 +479,31 @@ class RaftAvailabilityTest(RedpandaTest):
         producer.stop()
         producer.wait()
         producer.free()
+
+    @cluster(num_nodes=3)
+    def test_follower_isolation(self):
+        """
+        Simplest HA test.  Stop the leader for our partition.  Validate that
+        the cluster remains available afterwards, and that the expected
+        peer takes over as the new leader.
+        """
+        # Find which node is the leader
+        initial_leader_id, replicas = self._wait_for_leader()
+        assert initial_leader_id == replicas[0]
+
+        self._expect_available()
+
+        leader_node = self.redpanda.get_node(initial_leader_id)
+        self.logger.info(
+            f"Initial leader {initial_leader_id} {leader_node.account.hostname}"
+        )
+
+        with FailureInjector(self.redpanda) as fi:
+            # isolate one of the followers
+            fi.inject_failure(
+                FailureSpec(FailureSpec.FAILURE_ISOLATE,
+                            self.redpanda.get_node(replicas[1])))
+
+            # expect messages to be produced and consumed without a timeout
+            for i in range(0, 128):
+                self._ping_pong()
