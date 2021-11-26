@@ -11,6 +11,7 @@
 
 #include "archival/ntp_archiver_service.h"
 #include "archival/service.h"
+#include "archival/upload_controller.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"
 #include "cluster/fwd.h"
@@ -50,6 +51,7 @@
 #include "resource_mgmt/io_priority.h"
 #include "rpc/server.h"
 #include "rpc/simple_protocol.h"
+#include "storage/backlog_controller.h"
 #include "storage/chunk_cache.h"
 #include "storage/compaction_controller.h"
 #include "storage/directories.h"
@@ -63,6 +65,7 @@
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
+#include <seastar/core/seastar.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/json/json_elements.hh>
@@ -332,12 +335,20 @@ void application::hydrate_config(const po::variables_map& cfg) {
     _redpanda_enabled = config["redpanda"];
     if (_redpanda_enabled) {
         ss::smp::invoke_on_all([&config] {
-            config::shard_local_cfg().load(config);
-        }).get0();
-
-        ss::smp::invoke_on_all([&config] {
             config::node().load(config);
         }).get0();
+
+        if (config::node().enable_central_config) {
+            _config_preload = cluster::config_manager::preload().get0();
+        }
+
+        if (_config_preload.version == cluster::config_version_unset) {
+            // This node has never seen a cluster configuration message.
+            // Bootstrap configuration from local yaml file.
+            ss::smp::invoke_on_all([&config] {
+                config::shard_local_cfg().load(config);
+            }).get0();
+        }
 
         config::shard_local_cfg().for_each(config_printer("redpanda"));
         config::node().for_each(config_printer("redpanda"));
@@ -493,6 +504,39 @@ static storage::backlog_controller_config compaction_controller_config(
       config::shard_local_cfg().compaction_ctrl_max_shares());
 }
 
+static storage::backlog_controller_config
+make_upload_controller_config(ss::scheduling_group sg) {
+    // This settings are similar to compaction_controller_config.
+    // The desired setpoint for archival is set to 0 since the goal is to upload
+    // all data that we have.
+    // If the size of the backlog (the data which should be uploaded to S3) is
+    // larger than this value we need to bump the scheduling priority.
+    // Otherwise, we're good with the minimal.
+    // Since the setpoint is 0 we can't really use integral component of the
+    // controller. This is because upload backlog size never gets negative so
+    // once integral part will rump up high enough it won't be able to go down
+    // even if everything is uploaded.
+
+    auto available
+      = ss::fs_avail(config::node().data_directory().path.string()).get();
+    int64_t setpoint = 0;
+    int64_t normalization = static_cast<int64_t>(available)
+                            / (1000 * ss::smp::count);
+    return {
+      config::shard_local_cfg().cloud_storage_upload_ctrl_p_coeff(),
+      0,
+      config::shard_local_cfg().cloud_storage_upload_ctrl_d_coeff(),
+      normalization,
+      setpoint,
+      static_cast<int>(
+        priority_manager::local().archival_priority().get_shares()),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_update_interval_ms(),
+      sg,
+      priority_manager::local().archival_priority(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_min_shares(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_max_shares()};
+}
+
 // add additional services in here
 void application::wire_up_services() {
     if (_redpanda_enabled) {
@@ -600,7 +644,8 @@ void application::wire_up_redpanda_services() {
       std::ref(raft_group_manager),
       std::ref(tx_gateway_frontend),
       std::ref(partition_recovery_manager),
-      std::ref(cloud_storage_api))
+      std::ref(cloud_storage_api),
+      std::ref(shadow_index_cache))
       .get();
     vlog(_log.info, "Partition manager started");
 
@@ -612,6 +657,7 @@ void application::wire_up_redpanda_services() {
 
     construct_single_service(
       controller,
+      std::move(_config_preload),
       _raft_connection_cache,
       partition_manager,
       shard_table,
@@ -625,7 +671,8 @@ void application::wire_up_redpanda_services() {
       metadata_cache,
       std::ref(controller->get_topics_state()),
       std::ref(controller->get_members_table()),
-      std::ref(controller->get_partition_leaders()))
+      std::ref(controller->get_partition_leaders()),
+      std::ref(controller->get_health_monitor()))
       .get();
     /**
      * Wait for all requests to finish before removing critical redpanda
@@ -661,12 +708,36 @@ void application::wire_up_redpanda_services() {
       .get();
 
     if (archival_storage_enabled()) {
+        syschecks::systemd_message("Starting shadow indexing cache").get();
+        auto cache_path_cfg
+          = config::node().cloud_storage_cache_directory.value();
+        auto redpanda_dir = config::node().data_directory.value();
+        std::filesystem::path cache_dir = redpanda_dir.path
+                                          / "cloud_storage_cache";
+        if (cache_path_cfg) {
+            cache_dir = std::filesystem::path(cache_path_cfg.value());
+        }
+        auto cache_size
+          = config::shard_local_cfg().cloud_storage_cache_size.value();
+        auto cache_interval = config::shard_local_cfg()
+                                .cloud_storage_cache_check_interval_ms.value();
+        construct_service(
+          shadow_index_cache, cache_dir, cache_size, cache_interval)
+          .get();
+
+        shadow_index_cache
+          .invoke_on_all(
+            [](cloud_storage::cache& cache) { return cache.start(); })
+          .get();
+
         syschecks::systemd_message("Starting archival scheduler").get();
         ss::sharded<archival::configuration> arch_configs;
         arch_configs.start().get();
         arch_configs
-          .invoke_on_all([](archival::configuration& c) {
-              return archival::scheduler_service::get_archival_service_config()
+          .invoke_on_all([this](archival::configuration& c) {
+              return archival::scheduler_service::get_archival_service_config(
+                       _scheduling_groups.archival_upload(),
+                       archival_priority())
                 .then(
                   [&c](archival::configuration cfg) { c = std::move(cfg); });
           })
@@ -680,6 +751,12 @@ void application::wire_up_redpanda_services() {
           std::ref(arch_configs))
           .get();
         arch_configs.stop().get();
+
+        construct_service(
+          _archival_upload_controller,
+          std::ref(archival_scheduler),
+          make_upload_controller_config(_scheduling_groups.archival_upload()))
+          .get();
     }
     // group membership
     syschecks::systemd_message("Creating partition manager").get();
@@ -1008,7 +1085,10 @@ void application::start_redpanda() {
             std::ref(metadata_cache),
             std::ref(controller->get_security_frontend()),
             std::ref(controller->get_api()),
-            std::ref(controller->get_members_frontend()));
+            std::ref(controller->get_members_frontend()),
+            std::ref(controller->get_config_frontend()),
+            std::ref(controller->get_health_monitor()));
+
           proto->register_service<cluster::metadata_dissemination_handler>(
             _scheduling_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
@@ -1093,5 +1173,8 @@ void application::start_redpanda() {
     }
 
     _compaction_controller.invoke_on_all(&storage::compaction_controller::start)
+      .get();
+    _archival_upload_controller
+      .invoke_on_all(&archival::upload_controller::start)
       .get();
 }

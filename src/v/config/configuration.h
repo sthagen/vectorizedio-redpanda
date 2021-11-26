@@ -89,6 +89,7 @@ struct configuration final : public config_store {
     property<model::timestamp_type> log_message_timestamp_type;
     property<model::compression> log_compression_type;
     property<size_t> fetch_max_bytes;
+    property<std::chrono::milliseconds> metadata_status_wait_timeout_ms;
     // same as transactional.id.expiration.ms in kafka
     property<std::chrono::milliseconds> transactional_id_expiration_ms;
     property<bool> enable_idempotence;
@@ -179,6 +180,14 @@ struct configuration final : public config_store {
     property<std::optional<std::chrono::seconds>>
       cloud_storage_segment_max_upload_interval_sec;
 
+    // Archival upload controller
+    property<std::chrono::milliseconds>
+      cloud_storage_upload_ctrl_update_interval_ms;
+    property<double> cloud_storage_upload_ctrl_p_coeff;
+    property<double> cloud_storage_upload_ctrl_d_coeff;
+    property<int16_t> cloud_storage_upload_ctrl_min_shares;
+    property<int16_t> cloud_storage_upload_ctrl_max_shares;
+
     // Archival cache
     property<size_t> cloud_storage_cache_size;
     property<std::chrono::milliseconds> cloud_storage_cache_check_interval_ms;
@@ -209,6 +218,9 @@ struct configuration final : public config_store {
     property<int> internal_topic_replication_factor;
     property<std::chrono::milliseconds> health_manager_tick_interval;
 
+    // health monitor
+    property<std::chrono::milliseconds> health_monitor_tick_interval;
+    property<std::chrono::milliseconds> health_monitor_max_metadata_age;
     configuration();
 
     void load(const YAML::Node& root_node);

@@ -284,19 +284,19 @@ configuration::configuration()
       *this,
       "log_cleanup_policy",
       "Default topic cleanup policy",
-      required::no,
+      {required::no, needs_restart::no},
       model::cleanup_policy_bitflags::deletion)
   , log_message_timestamp_type(
       *this,
       "log_message_timestamp_type",
       "Default topic messages timestamp type",
-      required::no,
+      {required::no, needs_restart::no},
       model::timestamp_type::create_time)
   , log_compression_type(
       *this,
       "log_compression_type",
       "Default topic compression type",
-      required::no,
+      {required::no, needs_restart::no},
       model::compression::producer)
   , fetch_max_bytes(
       *this,
@@ -304,6 +304,13 @@ configuration::configuration()
       "Maximum number of bytes returned in fetch request",
       required::no,
       55_MiB)
+  , metadata_status_wait_timeout_ms(
+      *this,
+      "metadata_status_wait_timeout_ms",
+      "Maximum time to wait in metadata request for cluster health to be "
+      "refreshed",
+      required::no,
+      2s)
   , transactional_id_expiration_ms(
       *this,
       "transactional_id_expiration_ms",
@@ -752,6 +759,36 @@ configuration::configuration()
       "remote storage (sec)",
       required::no,
       std::nullopt)
+  , cloud_storage_upload_ctrl_update_interval_ms(
+      *this,
+      "cloud_storage_upload_ctrl_update_interval_ms",
+      "",
+      required::no,
+      60s)
+  , cloud_storage_upload_ctrl_p_coeff(
+      *this,
+      "cloud_storage_upload_ctrl_p_coeff",
+      "proportional coefficient for upload PID controller",
+      required::no,
+      -2.0)
+  , cloud_storage_upload_ctrl_d_coeff(
+      *this,
+      "cloud_storage_upload_ctrl_d_coeff",
+      "derivative coefficient for upload PID controller.",
+      required::no,
+      0.0)
+  , cloud_storage_upload_ctrl_min_shares(
+      *this,
+      "compaction_ctrl_min_shares",
+      "minimum number of IO and CPU shares that archival upload can use",
+      required::no,
+      100)
+  , cloud_storage_upload_ctrl_max_shares(
+      *this,
+      "cloud_storage_upload_ctrl_max_shares",
+      "maximum number of IO and CPU shares that archival upload can use",
+      required::no,
+      1000)
   , cloud_storage_cache_size(
       *this,
       "cloud_storage_cache_size",
@@ -879,7 +916,19 @@ configuration::configuration()
       "health_manager_tick_interval",
       "How often the health manager runs",
       required::no,
-      3min) {}
+      3min)
+  , health_monitor_tick_interval(
+      *this,
+      "health_monitor_tick_interval",
+      "How often health monitor refresh cluster state",
+      required::no,
+      10s)
+  , health_monitor_max_metadata_age(
+      *this,
+      "health_monitor_max_metadata_age",
+      "Max age of metadata cached in the health monitor of non controller node",
+      required::no,
+      10s) {}
 
 void configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

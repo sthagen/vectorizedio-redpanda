@@ -96,7 +96,13 @@ node_config::node_config() noexcept
       "Directory for archival cache. Should be present when "
       "`cloud_storage_enabled` is present",
       required::no,
-      (data_directory.value().path / "archival_cache").native())
+      std::nullopt)
+  , enable_central_config(
+      *this,
+      "enable_central_config",
+      "Enable central storage + sync of cluster configuration",
+      required::no,
+      false)
   , _advertised_rpc_api(
       *this,
       "advertised_rpc_api",

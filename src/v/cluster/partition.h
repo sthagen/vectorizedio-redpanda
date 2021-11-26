@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "cloud_storage/manifest.h"
+#include "cloud_storage/remote_partition.h"
 #include "cluster/archival_metadata_stm.h"
 #include "cluster/id_allocator_stm.h"
 #include "cluster/partition_probe.h"
@@ -39,7 +41,8 @@ public:
     partition(
       consensus_ptr r,
       ss::sharded<cluster::tx_gateway_frontend>&,
-      ss::sharded<cloud_storage::remote>&);
+      ss::sharded<cloud_storage::remote>&,
+      ss::sharded<cloud_storage::cache>&);
 
     raft::group_id group() const { return _raft->group(); }
     ss::future<> start();
@@ -63,6 +66,7 @@ public:
       model::batch_identity,
       model::record_batch_reader&&,
       raft::replicate_options);
+
     /**
      * The reader is modified such that the max offset is configured to be
      * the minimum of the max offset requested and the committed index of the
@@ -133,6 +137,10 @@ public:
 
     bool is_leader() const { return _raft->is_leader(); }
 
+    ss::future<result<model::offset>> linearizable_barrier() {
+        return _raft->linearizable_barrier();
+    }
+
     ss::future<std::error_code>
     transfer_leadership(std::optional<model::node_id> target) {
         return _raft->do_transfer_leadership(target);
@@ -152,6 +160,10 @@ public:
 
     model::revision_id get_revision_id() const {
         return _raft->config().revision_id();
+    }
+
+    std::optional<model::node_id> get_leader_id() const {
+        return _raft->get_leader_id();
     }
 
     model::offset get_latest_configuration_offset() const {
@@ -196,6 +208,33 @@ public:
         return _archival_meta_stm;
     }
 
+    /// Check if cloud storage is connected to cluster partition
+    ///
+    /// The remaining 'cloud' methods can only be called if this
+    /// method returned 'true'.
+    bool cloud_data_available() const {
+        return static_cast<bool>(_cloud_storage_partition)
+               && _cloud_storage_partition->is_data_available();
+    }
+
+    /// Starting offset in the object store
+    model::offset start_cloud_offset() const {
+        vassert(
+          cloud_data_available(),
+          "Method can only be called if cloud data is available");
+        return _cloud_storage_partition->first_uploaded_offset();
+    }
+
+    /// Create a reader that will fetch data from remote storage
+    ss::future<model::record_batch_reader> make_cloud_reader(
+      storage::log_reader_config config,
+      std::optional<model::timeout_clock::time_point> deadline = std::nullopt) {
+        vassert(
+          cloud_data_available(),
+          "Method can only be called if cloud data is available");
+        return _cloud_storage_partition->make_reader(config, deadline);
+    }
+
 private:
     friend partition_manager;
     friend replicated_partition_probe;
@@ -214,6 +253,7 @@ private:
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
     bool _is_tx_enabled{false};
     bool _is_idempotence_enabled{false};
+    ss::lw_shared_ptr<cloud_storage::remote_partition> _cloud_storage_partition;
 
     friend std::ostream& operator<<(std::ostream& o, const partition& x);
 };

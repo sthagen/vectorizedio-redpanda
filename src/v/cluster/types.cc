@@ -254,6 +254,35 @@ std::ostream& operator<<(std::ostream& o, const backend_operation& op) {
     return o;
 }
 
+std::ostream&
+operator<<(std::ostream& o, const cluster_config_delta_cmd_data& data) {
+    fmt::print(
+      o,
+      "{{cluster_config_delta_cmd_data: {} upserts, {} removes)}}",
+      data.upsert.size(),
+      data.remove.size());
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const config_status& s) {
+    fmt::print(
+      o,
+      "{{cluster_status: node {}, version: {}, restart: {} ({} invalid, {} "
+      "unknown)}}",
+      s.node,
+      s.version,
+      s.restart,
+      s.invalid.size(),
+      s.unknown.size());
+    return o;
+}
+
+bool config_status::operator==(const config_status& rhs) const {
+    return std::tie(node, version, restart, unknown, invalid)
+           == std::tie(
+             rhs.node, rhs.version, rhs.restart, rhs.unknown, rhs.invalid);
+}
+
 std::ostream& operator<<(std::ostream& o, const non_replicable_topic& d) {
     fmt::print(
       o, "{{Source topic: {}, non replicable topic: {}}}", d.source, d.name);
@@ -499,14 +528,40 @@ adl<cluster::configuration_invariants>::from(iobuf_parser& parser) {
 
 void adl<cluster::topic_properties_update>::to(
   iobuf& out, cluster::topic_properties_update&& r) {
-    reflection::serialize(out, r.tp_ns, r.properties);
+    reflection::serialize(
+      out, r.version, r.tp_ns, r.properties, r.custom_properties);
 }
 
 cluster::topic_properties_update
 adl<cluster::topic_properties_update>::from(iobuf_parser& parser) {
+    /**
+     * We use the same versioning trick as for `cluster::topic_configuration`.
+     *
+     * NOTE: The first field of the topic_properties_update is a
+     * model::topic_namespace. Serialized ss::string starts from either
+     * int32_t for string length. We use negative version to encode new format
+     * of incremental topic_properties_update
+     */
+
+    auto version = adl<int32_t>{}.from(parser.peek(4));
+    if (version < 0) {
+        // Consume version from stream
+        parser.skip(4);
+        vassert(
+          version == cluster::topic_properties_update::version,
+          "topic_properties_update version {} is not supported",
+          version);
+    } else {
+        version = 0;
+    }
+
     auto tp_ns = adl<model::topic_namespace>{}.from(parser);
     cluster::topic_properties_update ret(std::move(tp_ns));
     ret.properties = adl<cluster::incremental_topic_updates>{}.from(parser);
+    if (version < 0) {
+        ret.custom_properties
+          = adl<cluster::incremental_topic_custom_updates>{}.from(parser);
+    }
 
     return ret;
 }
@@ -879,8 +934,7 @@ void adl<cluster::incremental_topic_updates>::to(
       t.timestamp_type,
       t.segment_size,
       t.retention_bytes,
-      t.retention_duration,
-      t.data_policy);
+      t.retention_duration);
 }
 
 cluster::incremental_topic_updates
@@ -899,7 +953,7 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
         // Consume version from stream
         in.skip(1);
         vassert(
-          version == cluster::incremental_topic_updates::version,
+          version >= cluster::incremental_topic_updates::version,
           "topic_configuration version {} is not supported",
           version);
     } else {
@@ -928,12 +982,92 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
       = adl<cluster::property_update<tristate<std::chrono::milliseconds>>>{}
           .from(in);
 
-    if (version < 0) {
-        updates.data_policy
-          = adl<
-              cluster::property_update<std::optional<v8_engine::data_policy>>>{}
-              .from(in);
+    if (
+      version == cluster::incremental_topic_updates::version_with_data_policy) {
+        // data_policy property from update_topic_properties_cmd is never used.
+        // data_policy_frontend replicates this property and store it to
+        // create_data_policy_cmd_data, data_policy_manager handles it
+        adl<cluster::property_update<std::optional<v8_engine::data_policy>>>{}
+          .from(in);
     }
+    return updates;
+}
+
+void adl<cluster::config_status>::to(iobuf& out, cluster::config_status&& s) {
+    return serialize(out, s.node, s.version, s.restart, s.unknown, s.invalid);
+}
+
+cluster::config_status adl<cluster::config_status>::from(iobuf_parser& in) {
+    auto node_id = adl<model::node_id>().from(in);
+    auto version = adl<cluster::config_version>().from(in);
+    auto restart = adl<bool>().from(in);
+    auto unknown = adl<std::vector<ss::sstring>>().from(in);
+    auto invalid = adl<std::vector<ss::sstring>>().from(in);
+
+    return cluster::config_status{
+      .node = std::move(node_id),
+      .version = std::move(version),
+      .restart = std::move(restart),
+      .unknown = std::move(unknown),
+      .invalid = std::move(invalid),
+    };
+}
+
+void adl<cluster::cluster_config_delta_cmd_data>::to(
+  iobuf& out, cluster::cluster_config_delta_cmd_data&& cmd) {
+    return serialize(
+      out, cmd.current_version, std::move(cmd.upsert), std::move(cmd.remove));
+}
+
+cluster::cluster_config_delta_cmd_data
+adl<cluster::cluster_config_delta_cmd_data>::from(iobuf_parser& in) {
+    auto version = adl<int8_t>{}.from(in);
+    vassert(
+      version == cluster::cluster_config_delta_cmd_data::current_version,
+      "Unexpected version: {} (expected {})",
+      version,
+      cluster::cluster_config_delta_cmd_data::current_version);
+    auto upsert = adl<std::vector<std::pair<ss::sstring, ss::sstring>>>().from(
+      in);
+    auto remove = adl<std::vector<ss::sstring>>().from(in);
+
+    return cluster::cluster_config_delta_cmd_data{
+      .upsert = std::move(upsert),
+      .remove = std::move(remove),
+    };
+}
+
+void adl<cluster::cluster_config_status_cmd_data>::to(
+  iobuf& out, cluster::cluster_config_status_cmd_data&& cmd) {
+    return serialize(out, cmd.current_version, std::move(cmd.status));
+}
+
+cluster::cluster_config_status_cmd_data
+adl<cluster::cluster_config_status_cmd_data>::from(iobuf_parser& in) {
+    auto version = adl<int8_t>{}.from(in);
+    vassert(
+      version == cluster::cluster_config_status_cmd_data::current_version,
+      "Unexpected version: {} (expected {})",
+      version,
+      cluster::cluster_config_status_cmd_data::current_version);
+    auto status = adl<cluster::config_status>().from(in);
+
+    return cluster::cluster_config_status_cmd_data{
+      .status = std::move(status),
+    };
+}
+
+void adl<cluster::incremental_topic_custom_updates>::to(
+  iobuf& out, cluster::incremental_topic_custom_updates&& t) {
+    reflection::serialize(out, t.data_policy);
+}
+
+cluster::incremental_topic_custom_updates
+adl<cluster::incremental_topic_custom_updates>::from(iobuf_parser& in) {
+    cluster::incremental_topic_custom_updates updates;
+    updates.data_policy
+      = adl<cluster::property_update<std::optional<v8_engine::data_policy>>>{}
+          .from(in);
     return updates;
 }
 

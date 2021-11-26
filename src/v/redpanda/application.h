@@ -12,7 +12,8 @@
 #pragma once
 
 #include "archival/fwd.h"
-#include "cloud_storage/partition_recovery_manager.h"
+#include "cloud_storage/fwd.h"
+#include "cluster/config_manager.h"
 #include "cluster/fwd.h"
 #include "coproc/fwd.h"
 #include "kafka/client/configuration.h"
@@ -92,6 +93,7 @@ public:
     ss::sharded<cluster::rm_partition_frontend> rm_partition_frontend;
     ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
     ss::sharded<v8_engine::data_policy_table> data_policies;
+    ss::sharded<cloud_storage::cache> shadow_index_cache;
 
 private:
     using deferred_actions
@@ -125,6 +127,7 @@ private:
     void setup_metrics();
     std::unique_ptr<ss::app_template> _app;
     bool _redpanda_enabled{true};
+    cluster::config_manager::preload_result _config_preload;
     std::optional<pandaproxy::rest::configuration> _proxy_config;
     std::optional<kafka::client::configuration> _proxy_client_config;
     std::optional<pandaproxy::schema_registry::configuration>
@@ -142,6 +145,7 @@ private:
     ss::sharded<pandaproxy::rest::proxy> _proxy;
     std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;
+    ss::sharded<archival::upload_controller> _archival_upload_controller;
 
     ss::metrics::metric_groups _metrics;
     std::unique_ptr<kafka::rm_group_proxy_impl> _rm_group_proxy;

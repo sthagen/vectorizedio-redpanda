@@ -404,6 +404,18 @@ void consensus::process_append_entries_reply(
   result<append_entries_reply> r,
   follower_req_seq seq_id,
   model::offset dirty_offset) {
+    auto config = _configuration_manager.get_latest();
+    if (!config.contains_broker(physical_node)) {
+        // We might have sent an append_entries just before removing
+        // a node from configuration: ignore its reply, to avoid
+        // doing things like initiating recovery to this removed node.
+        vlog(
+          _ctxlog.debug,
+          "Ignoring reply from node {}, it is not in members list",
+          physical_node);
+        return;
+    }
+
     auto is_success = update_follower_index(
       physical_node, r, seq_id, dirty_offset);
     if (is_success) {
@@ -798,8 +810,10 @@ void consensus::dispatch_vote(bool leadership_transfer) {
     // lower our required priority for next time.
     _target_priority = next_target_priority();
 
-    // skip sending vote request if current node is not a voter
-    if (!_configuration_manager.get_latest().is_voter(_self)) {
+    // skip sending vote request if current node is not a voter in current
+    // configuration
+    if (!_configuration_manager.get_latest().is_allowed_to_request_votes(
+          _self)) {
         arm_vote_timeout();
         return;
     }
@@ -914,8 +928,8 @@ ss::future<std::error_code> consensus::add_group_members(
     return change_configuration([nodes = std::move(nodes), new_revision](
                                   group_configuration current) mutable {
         auto contains_already = std::any_of(
-          std::cbegin(nodes),
-          std::cend(nodes),
+          nodes.cbegin(),
+          nodes.cend(),
           [&current](const model::broker& broker) {
               return current.contains_broker(broker.id());
           });
@@ -936,7 +950,7 @@ ss::future<std::error_code> consensus::remove_members(
     return change_configuration(
       [ids = std::move(ids), new_revision](group_configuration current) {
           auto all_exists = std::all_of(
-            std::cbegin(ids), std::cend(ids), [&current](model::node_id id) {
+            ids.cbegin(), ids.cend(), [&current](model::node_id id) {
                 return current.contains_broker(id);
             });
           if (!all_exists) {
@@ -2219,22 +2233,45 @@ ss::future<> consensus::maybe_commit_configuration(ss::semaphore_units<> u) {
     }
 
     auto latest_cfg = _configuration_manager.get_latest();
-    // as a leader replicate new simple configuration
-    if (
-      latest_cfg.type() == configuration_type::joint
-      && latest_cfg.current_config().learners.empty()) {
-        latest_cfg.discard_old_config();
-        vlog(
-          _ctxlog.trace,
-          "leaving joint consensus, new simple configuration {}",
-          latest_cfg);
+    /**
+     * simple configuration, there is nothing to do
+     */
+    if (latest_cfg.type() == configuration_type::simple) {
+        return ss::now();
+    }
+    /**
+     * at this point joint configuration is committed, and all added learners
+     * were promoted to voter
+     */
+    if (latest_cfg.current_config().learners.empty()) {
+        /*
+         * In the first step we demote all removed voters to learners
+         */
+
+        if (latest_cfg.maybe_demote_removed_voters()) {
+            vlog(
+              _ctxlog.info,
+              "demoting removed voters, new configuration {}",
+              latest_cfg);
+        } else {
+            /**
+             * When all old voters were demoted, as a leader, we replicate new
+             * configuration
+             */
+            latest_cfg.discard_old_config();
+            vlog(
+              _ctxlog.info,
+              "leaving joint consensus, new simple configuration {}",
+              latest_cfg);
+        }
+
         auto contains_current = latest_cfg.contains(_self);
         return replicate_configuration(std::move(u), std::move(latest_cfg))
           .then([this, contains_current](std::error_code ec) {
               if (ec) {
                   vlog(
                     _ctxlog.error,
-                    "unable to replicate simple configuration  - {}",
+                    "unable to replicate updated configuration - {}",
                     ec);
                   return;
               }
@@ -2247,7 +2284,6 @@ ss::future<> consensus::maybe_commit_configuration(ss::semaphore_units<> u) {
               }
           });
     }
-
     return ss::now();
 }
 
@@ -2887,6 +2923,26 @@ model::offset consensus::get_latest_configuration_offset() const {
     return _configuration_manager.get_latest_offset();
 }
 
+follower_metrics build_follower_metrics(
+  model::node_id id,
+  const storage::offset_stats& lstats,
+  std::chrono::milliseconds liveness_timeout,
+  const follower_index_metadata& meta) {
+    const auto is_live = meta.last_received_append_entries_reply_timestamp
+                           + liveness_timeout
+                         > clock_type::now();
+    return follower_metrics{
+      .id = id,
+      .is_learner = meta.is_learner,
+      .committed_log_index = meta.last_flushed_log_index,
+      .dirty_log_index = meta.last_dirty_log_index,
+      .match_index = meta.match_index,
+      .last_heartbeat = meta.last_received_append_entries_reply_timestamp,
+      .is_live = is_live,
+      .under_replicated = (meta.is_recovering || !is_live)
+                          && meta.match_index < lstats.dirty_offset};
+}
+
 std::vector<follower_metrics> consensus::get_follower_metrics() const {
     // if not leader return empty vector, as metrics wouldn't have any sense
     if (!is_leader()) {
@@ -2894,23 +2950,29 @@ std::vector<follower_metrics> consensus::get_follower_metrics() const {
     }
     std::vector<follower_metrics> ret;
     ret.reserve(_fstats.size());
-    auto dirty_offset = _log.offsets().dirty_offset;
+    const auto offsets = _log.offsets();
     for (const auto& f : _fstats) {
-        auto last_hbeat = f.second.last_received_append_entries_reply_timestamp;
-        auto is_live = last_hbeat + _jit.base_duration() > clock_type::now();
-        ret.push_back(follower_metrics{
-          .id = f.first.id(),
-          .is_learner = f.second.is_learner,
-          .committed_log_index = f.second.last_flushed_log_index,
-          .dirty_log_index = f.second.last_dirty_log_index,
-          .match_index = f.second.match_index,
-          .last_heartbeat = last_hbeat,
-          .is_live = is_live,
-          .under_replicated = (f.second.is_recovering || !is_live)
-                              && f.second.match_index < dirty_offset});
+        ret.push_back(build_follower_metrics(
+          f.first.id(), offsets, _jit.base_duration(), f.second));
     }
 
     return ret;
+}
+
+result<follower_metrics>
+consensus::get_follower_metrics(model::node_id id) const {
+    // if not leader return empty vector, as metrics wouldn't have any sense
+    if (!is_leader()) {
+        return errc::not_leader;
+    }
+    auto it = std::find_if(_fstats.begin(), _fstats.end(), [id](const auto& p) {
+        return p.first.id() == id;
+    });
+    if (it == _fstats.end()) {
+        return errc::node_does_not_exists;
+    }
+    return build_follower_metrics(
+      id, _log.offsets(), _jit.base_duration(), it->second);
 }
 
 } // namespace raft

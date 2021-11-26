@@ -77,12 +77,11 @@ class KafkaStreamsDriverBase(KafkaStreamsTest):
 
         # Start the example
         example.start()
+        example.wait()
 
         # Start the driver
         driver.start()
         driver.wait()
-
-        example.wait()
 
         driver.stop()
         example.stop()

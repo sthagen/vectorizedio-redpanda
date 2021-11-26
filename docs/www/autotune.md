@@ -6,7 +6,7 @@ order: 1
 # Designed for performance
 
 Great news! Redpanda comes with an autotuner that detects the optimal settings for your hardware.
-To get the best performance for your hardware, set Redpanda to [production mode](./docs/production-deployment).
+To get the best performance for your hardware, set Redpanda to [production mode](https://vectorized.io/docs/production-deployment).
 In production mode, Redpanda identifies your hardware configuration and tunes itself to give you the best performance.
 
 The performance settings listed here are just for general reference.
@@ -30,8 +30,8 @@ Redpanda uses DMA (Direct Memory Access) for all its disk IO. To get the
 best IO performance, we recommend the you place the data directory
 (/var/lib/redpanda/data) on an XFS partition in a local NVMe SSD. Redpanda can
 drive your SSD at maximum throughput at all times. Redpanda relies on XFS due
-to its use of sparse filesystem support to flush concurrent, non-overlapping pages.
-Although other filesystems might work, they may have limitations that prevent
+to its use of sparse file system support to flush concurrent, non-overlapping pages.
+Although other file systems might work, they may have limitations that prevent
 you from getting the most value out of your hardware.
 
 > **_Note:_** We recommend not using networked block devices because of their inherent performance limitations.
@@ -40,9 +40,9 @@ For multi-disk setups we recommend using Raid-0 with XFS on
 top. Future releases will manage multi-disk virtualization without user
 involvement.
 
-While monitoring, you might notice that the filesystem file sizes might jump
+While monitoring, you might notice that the file system file sizes might jump
 around. This is expected behavior as we use internal heuristics to expand the
-filesystem metadata eagerly when we determine it would improve performance for a
+file system metadata eagerly when we determine it would improve performance for a
 sequence of operations or to amortize the cost of synchronization events.
 
 ## Network
