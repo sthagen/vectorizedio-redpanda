@@ -27,6 +27,7 @@
 #include "raft/group_configuration.h"
 #include "raft/log_eviction_stm.h"
 #include "raft/types.h"
+#include "storage/translating_reader.h"
 #include "storage/types.h"
 
 #include <seastar/core/shared_ptr.hh>
@@ -133,7 +134,7 @@ public:
     const model::ntp& ntp() const { return _raft->ntp(); }
 
     ss::future<std::optional<storage::timequery_result>>
-      timequery(model::timestamp, ss::io_priority_class);
+      timequery(model::timestamp, model::offset, ss::io_priority_class);
 
     bool is_leader() const { return _raft->is_leader(); }
 
@@ -178,9 +179,9 @@ public:
         return _raft->get_configuration_manager();
     }
 
-    const ss::lw_shared_ptr<raft::offset_translator>&
-    get_offset_translator() const {
-        return _raft->get_offset_translator();
+    ss::lw_shared_ptr<const storage::offset_translator_state>
+    get_offset_translator_state() const {
+        return _raft->get_offset_translator_state();
     }
 
     ss::shared_ptr<cluster::rm_stm> rm_stm();
@@ -208,6 +209,12 @@ public:
         return _archival_meta_stm;
     }
 
+    /// Return true if shadow indexing is enabled for the partition
+    bool is_remote_fetch_enabled() const {
+        const auto& cfg = _raft->log_config();
+        return cfg.is_remote_fetch_enabled();
+    }
+
     /// Check if cloud storage is connected to cluster partition
     ///
     /// The remaining 'cloud' methods can only be called if this
@@ -226,7 +233,7 @@ public:
     }
 
     /// Create a reader that will fetch data from remote storage
-    ss::future<model::record_batch_reader> make_cloud_reader(
+    ss::future<storage::translating_reader> make_cloud_reader(
       storage::log_reader_config config,
       std::optional<model::timeout_clock::time_point> deadline = std::nullopt) {
         vassert(

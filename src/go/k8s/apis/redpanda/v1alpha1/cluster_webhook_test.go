@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/pointer"
 )
@@ -167,6 +168,20 @@ func TestDefault(t *testing.T) {
 
 		redpandaCluster.Default()
 		assert.Equal(t, 8081, redpandaCluster.Spec.Configuration.SchemaRegistry.Port)
+	})
+	t.Run("pod disruption budget", func(t *testing.T) {
+		redpandaCluster := &v1alpha1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "",
+			},
+			Spec: v1alpha1.ClusterSpec{
+				Replicas: pointer.Int32Ptr(1),
+			},
+		}
+		redpandaCluster.Default()
+		assert.True(t, redpandaCluster.Spec.PodDisruptionBudget.Enabled)
+		assert.Equal(t, intstr.FromInt(1), *redpandaCluster.Spec.PodDisruptionBudget.MaxUnavailable)
 	})
 }
 
@@ -425,14 +440,6 @@ func TestValidateUpdate_NoError(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("external admin listener cannot have port specified", func(t *testing.T) {
-		exPort := redpandaCluster.DeepCopy()
-		exPort.Spec.Configuration.AdminAPI[0].External.Enabled = true
-		err := exPort.ValidateUpdate(redpandaCluster)
-
-		assert.Error(t, err)
-	})
-
 	t.Run("multiple admin listeners with tls", func(t *testing.T) {
 		multiPort := redpandaCluster.DeepCopy()
 		multiPort.Spec.Configuration.AdminAPI[0].TLS.Enabled = true
@@ -544,29 +551,9 @@ func TestValidateUpdate_NoError(t *testing.T) {
 	})
 }
 
-//nolint:funlen,dupl // this is ok for a test
+//nolint:funlen // this is ok for a test
 func TestCreation(t *testing.T) {
-	redpandaCluster := &v1alpha1.Cluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test",
-			Namespace: "",
-		},
-		Spec: v1alpha1.ClusterSpec{
-			Configuration: v1alpha1.RedpandaConfig{
-				KafkaAPI:       []v1alpha1.KafkaAPI{{Port: 124}},
-				AdminAPI:       []v1alpha1.AdminAPI{{Port: 125}},
-				RPCServer:      v1alpha1.SocketAddress{Port: 126},
-				SchemaRegistry: &v1alpha1.SchemaRegistryAPI{Port: 127},
-				PandaproxyAPI:  []v1alpha1.PandaproxyAPI{{Port: 128}},
-			},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceMemory: resource.MustParse("2Gi"),
-					corev1.ResourceCPU:    resource.MustParse("1"),
-				},
-			},
-		},
-	}
+	redpandaCluster := validRedpandaCluster()
 
 	t.Run("no collision in the port", func(t *testing.T) {
 		newPort := redpandaCluster.DeepCopy()
@@ -589,6 +576,7 @@ func TestCreation(t *testing.T) {
 
 	t.Run("collision in the port when external connectivity is enabled", func(t *testing.T) {
 		newPort := redpandaCluster.DeepCopy()
+		newPort.Spec.Configuration.AdminAPI[0].Port = newPort.Spec.Configuration.KafkaAPI[0].Port + 1
 		newPort.Spec.Configuration.KafkaAPI = append(newPort.Spec.Configuration.KafkaAPI,
 			v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{Enabled: true}})
 		newPort.Spec.Configuration.AdminAPI = append(newPort.Spec.Configuration.AdminAPI,
@@ -644,14 +632,6 @@ func TestCreation(t *testing.T) {
 		multiPort.Spec.Configuration.AdminAPI = append(multiPort.Spec.Configuration.AdminAPI,
 			v1alpha1.AdminAPI{Port: 123})
 		err := multiPort.ValidateCreate()
-
-		assert.Error(t, err)
-	})
-
-	t.Run("external admin listener cannot have port specified", func(t *testing.T) {
-		exPort := redpandaCluster.DeepCopy()
-		exPort.Spec.Configuration.AdminAPI[0].External.Enabled = true
-		err := exPort.ValidateCreate()
 
 		assert.Error(t, err)
 	})
@@ -802,29 +782,8 @@ func TestCreation(t *testing.T) {
 	})
 }
 
-//nolint:dupl // this is ok for a test
 func TestSchemaRegistryValidations(t *testing.T) {
-	redpandaCluster := &v1alpha1.Cluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test",
-			Namespace: "",
-		},
-		Spec: v1alpha1.ClusterSpec{
-			Configuration: v1alpha1.RedpandaConfig{
-				KafkaAPI:       []v1alpha1.KafkaAPI{{Port: 124}},
-				AdminAPI:       []v1alpha1.AdminAPI{{Port: 126}},
-				RPCServer:      v1alpha1.SocketAddress{Port: 128},
-				SchemaRegistry: &v1alpha1.SchemaRegistryAPI{Port: 130},
-				PandaproxyAPI:  []v1alpha1.PandaproxyAPI{{Port: 132}},
-			},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceMemory: resource.MustParse("2Gi"),
-					corev1.ResourceCPU:    resource.MustParse("1"),
-				},
-			},
-		},
-	}
+	redpandaCluster := validRedpandaCluster()
 
 	t.Run("if schema registry externally available, kafka external listener is required", func(t *testing.T) {
 		schemaReg := redpandaCluster.DeepCopy()
@@ -895,6 +854,132 @@ func TestSchemaRegistryValidations(t *testing.T) {
 		}
 
 		err := schemaReg.ValidateCreate()
+		assert.Error(t, err)
+	})
+}
+
+func validRedpandaCluster() *v1alpha1.Cluster {
+	return &v1alpha1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "",
+		},
+		Spec: v1alpha1.ClusterSpec{
+			Configuration: v1alpha1.RedpandaConfig{
+				KafkaAPI:       []v1alpha1.KafkaAPI{{Port: 124}},
+				AdminAPI:       []v1alpha1.AdminAPI{{Port: 126}},
+				RPCServer:      v1alpha1.SocketAddress{Port: 128},
+				SchemaRegistry: &v1alpha1.SchemaRegistryAPI{Port: 130},
+				PandaproxyAPI:  []v1alpha1.PandaproxyAPI{{Port: 132}},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+					corev1.ResourceCPU:    resource.MustParse("1"),
+				},
+			},
+		},
+	}
+}
+
+func TestPodDisruptionBudget(t *testing.T) {
+	rpCluster := validRedpandaCluster()
+	value := intstr.FromInt(1)
+
+	t.Run("pdb not enabled is valid", func(t *testing.T) {
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = &v1alpha1.PDBConfig{
+			Enabled: false,
+		}
+
+		err := rpc.ValidateCreate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("pdb with only maxunavailable is valid", func(t *testing.T) {
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = &v1alpha1.PDBConfig{
+			Enabled:        true,
+			MaxUnavailable: &value,
+		}
+
+		err := rpc.ValidateCreate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("pdb with only minavailable is valid", func(t *testing.T) {
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = &v1alpha1.PDBConfig{
+			Enabled:      true,
+			MinAvailable: &value,
+		}
+
+		err := rpc.ValidateCreate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("pdb with both minavailable and maxunavailable is invalid", func(t *testing.T) {
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = &v1alpha1.PDBConfig{
+			Enabled:        true,
+			MinAvailable:   &value,
+			MaxUnavailable: &value,
+		}
+
+		err := rpc.ValidateCreate()
+		assert.Error(t, err)
+	})
+
+	t.Run("pdb with minavailable but enabled=false is invalid", func(t *testing.T) {
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = &v1alpha1.PDBConfig{
+			Enabled:      false,
+			MinAvailable: &value,
+		}
+
+		err := rpc.ValidateCreate()
+		assert.Error(t, err)
+	})
+
+	t.Run("pdb is nil", func(t *testing.T) {
+		// this can happen only if webhook is disabled
+		rpc := rpCluster.DeepCopy()
+		rpc.Spec.PodDisruptionBudget = nil
+
+		err := rpc.ValidateCreate()
+		assert.NoError(t, err)
+	})
+}
+
+func TestExternalKafkaPortSpecified(t *testing.T) {
+	rpCluster := validRedpandaCluster()
+
+	t.Run("collision in the port when kafka api external port is defined", func(t *testing.T) {
+		updatePort := rpCluster.DeepCopy()
+		updatePort.Spec.Configuration.KafkaAPI = append(updatePort.Spec.Configuration.KafkaAPI,
+			v1alpha1.KafkaAPI{Port: 30001, External: v1alpha1.ExternalConnectivityConfig{Enabled: true}})
+		updatePort.Spec.Configuration.AdminAPI = []v1alpha1.AdminAPI{{Port: 30001}}
+
+		err := updatePort.ValidateUpdate(updatePort)
+		assert.Error(t, err)
+	})
+
+	t.Run("no collision in the port when kafka api external port is defined", func(t *testing.T) {
+		updatePort := rpCluster.DeepCopy()
+		updatePort.Spec.Configuration.KafkaAPI = append(updatePort.Spec.Configuration.KafkaAPI,
+			v1alpha1.KafkaAPI{Port: 30001, External: v1alpha1.ExternalConnectivityConfig{Enabled: true}})
+		updatePort.Spec.Configuration.AdminAPI = []v1alpha1.AdminAPI{{Port: 30002}}
+
+		err := updatePort.ValidateUpdate(updatePort)
+		assert.NoError(t, err)
+	})
+
+	t.Run("error when kafkaAPI external port is outside of supported range", func(t *testing.T) {
+		updatePort := rpCluster.DeepCopy()
+		updatePort.Spec.Configuration.KafkaAPI = append(updatePort.Spec.Configuration.KafkaAPI,
+			v1alpha1.KafkaAPI{Port: 29999, External: v1alpha1.ExternalConnectivityConfig{Enabled: true}})
+
+		err := updatePort.ValidateUpdate(updatePort)
 		assert.Error(t, err)
 	})
 }

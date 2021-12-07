@@ -134,7 +134,9 @@ static ss::future<read_result> read_from_partition(
     auto lso = part.last_stable_offset();
     auto start_o = part.start_offset();
     // if we have no data read, return fast
-    if (hw < config.start_offset || config.skip_read) {
+    if (
+      hw < config.start_offset || config.skip_read
+      || config.start_offset > config.max_offset) {
         co_return read_result(start_o, hw, lso);
     }
 
@@ -150,14 +152,16 @@ static ss::future<read_result> read_from_partition(
 
     reader_config.strict_max_bytes = config.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
-    auto result = co_await std::move(rdr).consume(
-      kafka_batch_serializer(), deadline ? *deadline : model::no_timeout);
+    auto result = co_await std::move(rdr.reader)
+                    .consume(
+                      kafka_batch_serializer(),
+                      deadline ? *deadline : model::no_timeout);
     auto data = std::make_unique<iobuf>(std::move(result.data));
     std::vector<cluster::rm_stm::tx_range> aborted_transactions;
     part.probe().add_records_fetched(result.record_count);
     if (result.record_count > 0) {
         aborted_transactions = co_await part.aborted_transactions(
-          result.base_offset, result.last_offset);
+          result.base_offset, result.last_offset, std::move(rdr.ot_state));
     }
 
     if (foreign_read) {
@@ -542,6 +546,7 @@ template<>
 ss::future<response_ptr>
 fetch_handler::handle(request_context rctx, ss::smp_service_group ssg) {
     return ss::do_with(op_context(std::move(rctx), ssg), [](op_context& octx) {
+        vlog(klog.trace, "handling fetch request: {}", octx.request);
         // top-level error is used for session-level errors
         if (octx.session_ctx.has_error()) {
             octx.response.data.error_code = octx.session_ctx.error();

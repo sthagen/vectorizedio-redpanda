@@ -13,6 +13,8 @@ import re
 
 DEFAULT_TIMEOUT = 30
 
+DEFAULT_PRODUCE_TIMEOUT = 5
+
 
 class RpkException(Exception):
     def __init__(self, msg):
@@ -23,15 +25,17 @@ class RpkException(Exception):
 
 
 class RpkPartition:
-    def __init__(self, id, leader, replicas, hw):
+    def __init__(self, id, leader, replicas, hw, start_offset):
         self.id = id
         self.leader = leader
         self.replicas = replicas
         self.high_watermark = hw
+        self.start_offset = start_offset
 
     def __str__(self):
-        return "id: {}, leader: {}, replicas: {}, hw: {}".format(
-            self.id, self.leader, self.replicas, self.high_watermark)
+        return "id: {}, leader: {}, replicas: {}, hw: {}, start_offset: {}".format(
+            self.id, self.leader, self.replicas, self.high_watermark,
+            self.start_offset)
 
 
 class RpkClusterInfoNode:
@@ -88,17 +92,26 @@ class RpkTool:
                 headers=[],
                 partition=None,
                 timeout=None):
-        # For tests, we want fast failures rather than indefinite retries,
-        # so we use a 1s delivery timeout.
+
+        if timeout is None:
+            # For produce, we use a lower timeout than the general
+            # default, because tests generally call this when
+            # they expect a system to be ready.
+            timeout = DEFAULT_PRODUCE_TIMEOUT
+
         cmd = [
             'produce', '--key', key, '-z', 'none', '--delivery-timeout',
-            '4.5s', '-f', '%v', topic
+            f'{timeout}s', '-f', '%v', topic
         ]
         if headers:
             cmd += ['-H ' + h for h in headers]
         if partition is not None:
             cmd += ['-p', str(partition)]
-        out = self._run_topic(cmd, stdin=msg, timeout=timeout)
+
+        # Run remote process with a slightly higher timeout than the
+        # rpk delivery timeout, so that we get a clean-ish rpk timeout
+        # message rather than sigkilling the remote process.
+        out = self._run_topic(cmd, stdin=msg, timeout=timeout + 0.5)
 
         offset = re.search("at offset (\d+)", out).group(1)
         return int(offset)
@@ -120,13 +133,34 @@ class RpkTool:
             return RpkPartition(id=int(m.group('id')),
                                 leader=int(m.group('leader')),
                                 replicas=replicas,
-                                hw=int(m.group('hw')))
+                                hw=int(m.group('hw')),
+                                start_offset=int(m.group("logstart")))
 
         return filter(lambda p: p != None, map(partition_line, lines))
 
     def alter_topic_config(self, topic, set_key, set_value):
         cmd = ['alter-config', topic, "--set", f"{set_key}={set_value}"]
         self._run_topic(cmd)
+
+    def consume(self,
+                topic,
+                n=None,
+                group=None,
+                regex=False,
+                offset=None,
+                fetch_max_bytes=None):
+        cmd = ["consume", topic]
+        if group is not None:
+            cmd += ["-g", group]
+        if n is not None:
+            cmd.append(f"-n{n}")
+        if regex:
+            cmd.append("-r")
+        if fetch_max_bytes is not None:
+            cmd += ["--fetch-max-bytes", str(fetch_max_bytes)]
+        if offset is not None:
+            cmd += ["-o", f"{n}"]
+        return self._run_topic(cmd)
 
     def wasm_deploy(self, script, name, description):
         cmd = [

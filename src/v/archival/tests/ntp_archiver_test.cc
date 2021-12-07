@@ -297,9 +297,9 @@ FIXTURE_TEST(test_upload_segments, archiver_fixture) {
 // NOLINTNEXTLINE
 FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
     model::offset lso{9999};
-    const auto offset1 = model::offset(1000);
-    const auto offset2 = model::offset(2000);
-    const auto offset3 = model::offset(3000);
+    const auto offset1 = model::offset(0000);
+    const auto offset2 = model::offset(1000);
+    const auto offset3 = model::offset(2000);
     const auto offset4 = model::offset(10000);
     std::vector<segment_desc> segments = {
       {manifest_ntp, offset1, model::term_id(1)},
@@ -320,7 +320,8 @@ FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
 
     auto partition = app.partition_manager.local().get(manifest_ntp);
     BOOST_REQUIRE(partition);
-    const raft::offset_translator& tr = *partition->get_offset_translator();
+    const storage::offset_translator_state& tr
+      = *partition->get_offset_translator_state();
 
     // Starting offset is lower than offset1
     auto upload1
@@ -389,12 +390,14 @@ SEASTAR_THREAD_TEST_CASE(test_archival_policy_timeboxed_uploads) {
       b.storage());
     tr.start(raft::offset_translator::must_reset::yes, {}).get();
     tr.sync_with_log(log, std::nullopt).get();
+    const auto& tr_state = *tr.state();
 
     auto start_offset = model::offset{0};
     auto last_stable_offset = log.offsets().dirty_offset + model::offset{1};
-    auto upload1
-      = policy.get_next_candidate(start_offset, last_stable_offset, log, tr)
-          .get();
+    auto upload1 = policy
+                     .get_next_candidate(
+                       start_offset, last_stable_offset, log, tr_state)
+                     .get();
     BOOST_REQUIRE(upload1.source);
     BOOST_REQUIRE_EQUAL(upload1.exposed_name, "0-0-v1.log");
     BOOST_REQUIRE_EQUAL(upload1.starting_offset, start_offset);
@@ -411,9 +414,10 @@ SEASTAR_THREAD_TEST_CASE(test_archival_policy_timeboxed_uploads) {
 
     start_offset = upload1.final_offset + model::offset{1};
     last_stable_offset = log.offsets().dirty_offset + model::offset{1};
-    auto upload2
-      = policy.get_next_candidate(start_offset, last_stable_offset, log, tr)
-          .get();
+    auto upload2 = policy
+                     .get_next_candidate(
+                       start_offset, last_stable_offset, log, tr_state)
+                     .get();
     BOOST_REQUIRE(!upload2.source);
 
     b.stop().get();
@@ -816,9 +820,9 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
     // 100 and dirty offset 101, and B with base offset 100 and committed offset
     // 200, the archival_policy should return A and then B. Before the fix this
     // is not the case and it always retuns A.
-    const auto offset1 = model::offset(1000);
-    const auto offset2 = model::offset(2000);
-    const auto offset3 = model::offset(3000);
+    const auto offset1 = model::offset(0);
+    const auto offset2 = model::offset(1000);
+    const auto offset3 = model::offset(2000);
     std::vector<segment_desc> segments = {
       {manifest_ntp, offset1, model::term_id(1)},
       {manifest_ntp, offset2, model::term_id(1)},
@@ -835,12 +839,12 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
     // actual data so having them a bit inconsistent for the sake of testing
     // is OK.
     auto segment1 = get_segment(
-      manifest_ntp, archival::segment_name("1000-1-v1.log"));
+      manifest_ntp, archival::segment_name("0-1-v1.log"));
     auto& tracker1 = const_cast<storage::segment::offset_tracker&>(
       segment1->offsets());
     tracker1.dirty_offset = offset2 - model::offset(1);
     auto segment2 = get_segment(
-      manifest_ntp, archival::segment_name("2000-1-v1.log"));
+      manifest_ntp, archival::segment_name("1000-1-v1.log"));
     auto& tracker2 = const_cast<storage::segment::offset_tracker&>(
       segment2->offsets());
     tracker2.dirty_offset = offset3 - model::offset(1);
@@ -854,7 +858,8 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
 
     auto partition = app.partition_manager.local().get(manifest_ntp);
     BOOST_REQUIRE(partition);
-    const raft::offset_translator& tr = *partition->get_offset_translator();
+    const storage::offset_translator_state& tr
+      = *partition->get_offset_translator_state();
 
     model::offset start_offset{0};
     model::offset lso{9999};

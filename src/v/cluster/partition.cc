@@ -11,6 +11,7 @@
 
 #include "cluster/logger.h"
 #include "config/configuration.h"
+#include "model/fundamental.h"
 #include "model/namespace.h"
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/types.h"
@@ -73,7 +74,6 @@ partition::partition(
             stm_manager->add_stm(_rm_stm);
         }
 
-        // TODO: check topic config if archival is enabled for this topic
         if (
           config::shard_local_cfg().cloud_storage_enabled()
           && cloud_storage_api.local_is_initialized()
@@ -360,9 +360,9 @@ ss::future<> partition::stop() {
     return f;
 }
 
-ss::future<std::optional<storage::timequery_result>>
-partition::timequery(model::timestamp t, ss::io_priority_class p) {
-    storage::timequery_config cfg(t, _raft->committed_offset(), p);
+ss::future<std::optional<storage::timequery_result>> partition::timequery(
+  model::timestamp t, model::offset offset_limit, ss::io_priority_class p) {
+    storage::timequery_config cfg(t, offset_limit, p);
     return _raft->timequery(cfg);
 }
 

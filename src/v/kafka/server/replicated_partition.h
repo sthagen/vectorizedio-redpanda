@@ -15,11 +15,13 @@
 #include "kafka/server/partition_proxy.h"
 #include "model/fundamental.h"
 #include "model/record_batch_reader.h"
+#include "raft/errc.h"
 #include "raft/types.h"
 
 #include <seastar/core/coroutine.hh>
 
 #include <memory>
+#include <system_error>
 
 namespace kafka {
 
@@ -34,7 +36,8 @@ public:
         auto local_kafka_start_offset = _translator->from_log_offset(
           _partition->start_offset());
         if (
-          _partition->cloud_data_available()
+          _partition->is_remote_fetch_enabled()
+          && _partition->cloud_data_available()
           && (_partition->start_cloud_offset() < local_kafka_start_offset)) {
             return _partition->start_cloud_offset();
         }
@@ -51,17 +54,18 @@ public:
 
     bool is_leader() const final { return _partition->is_leader(); }
 
-    ss::future<result<model::offset>> linearizable_barrier() {
+    ss::future<std::error_code> linearizable_barrier() final {
         auto r = co_await _partition->linearizable_barrier();
         if (r) {
-            co_return result<model::offset>(
-              _translator->from_log_offset(r.value()));
+            co_return raft::errc::success;
         }
-        co_return r;
+        co_return r.error();
     }
 
-    ss::future<std::optional<storage::timequery_result>>
-    timequery(model::timestamp ts, ss::io_priority_class io_pc) final;
+    ss::future<std::optional<storage::timequery_result>> timequery(
+      model::timestamp ts,
+      model::offset offset_limit,
+      ss::io_priority_class io_pc) final;
 
     ss::future<result<model::offset>>
       replicate(model::record_batch_reader, raft::replicate_options);
@@ -71,41 +75,20 @@ public:
       model::record_batch_reader&&,
       raft::replicate_options);
 
-    ss::future<model::record_batch_reader> make_reader(
+    ss::future<storage::translating_reader> make_reader(
       storage::log_reader_config cfg,
       std::optional<model::timeout_clock::time_point>) final;
 
-    ss::future<std::vector<cluster::rm_stm::tx_range>>
-    aborted_transactions(model::offset base, model::offset last) final {
-        model::offset local_kafka_start_offset = _translator->from_log_offset(
-          _partition->start_offset());
-        if (base < local_kafka_start_offset) {
-            // TODO: get offset translation information for the offsets range
-            // that we have read and use it to query
-            // _partition->aborted_transactions.
-            co_return std::vector<cluster::rm_stm::tx_range>{};
-        }
-
-        auto source = co_await _partition->aborted_transactions(
-          _translator->to_log_offset(base), _translator->to_log_offset(last));
-
-        std::vector<cluster::rm_stm::tx_range> target;
-        target.reserve(source.size());
-        for (const auto& range : source) {
-            target.push_back(cluster::rm_stm::tx_range{
-              .pid = range.pid,
-              .first = _translator->from_log_offset(range.first),
-              .last = _translator->from_log_offset(range.last)});
-        }
-
-        co_return target;
-    }
+    ss::future<std::vector<cluster::rm_stm::tx_range>> aborted_transactions(
+      model::offset base,
+      model::offset last,
+      ss::lw_shared_ptr<const storage::offset_translator_state>) final;
 
     cluster::partition_probe& probe() final { return _partition->probe(); }
 
 private:
     ss::lw_shared_ptr<cluster::partition> _partition;
-    ss::lw_shared_ptr<raft::offset_translator> _translator;
+    ss::lw_shared_ptr<const storage::offset_translator_state> _translator;
 };
 
 } // namespace kafka

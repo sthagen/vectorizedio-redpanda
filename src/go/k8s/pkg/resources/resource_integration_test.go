@@ -15,7 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/deprecated/scheme"
+	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -321,8 +321,8 @@ func TestEnsure_NodePortService(t *testing.T) {
 		c,
 		cluster,
 		scheme.Scheme,
-		[]res.NamedServicePort{
-			{Port: 123},
+		[]res.NamedServiceNodePort{
+			{NamedServicePort: res.NamedServicePort{Port: 123}, GenerateNodePort: true},
 		},
 		ctrl.Log.WithName("test"))
 
@@ -353,8 +353,8 @@ func TestEnsure_NodePortService(t *testing.T) {
 		c,
 		cluster,
 		scheme.Scheme,
-		[]res.NamedServicePort{
-			{Port: 1111},
+		[]res.NamedServiceNodePort{
+			{NamedServicePort: res.NamedServicePort{Port: 1111}, GenerateNodePort: true},
 		},
 		ctrl.Log.WithName("test"))
 

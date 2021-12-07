@@ -46,7 +46,11 @@ static constexpr std::string_view topic_property_retention_bytes
 static constexpr std::string_view topic_property_retention_duration
   = "retention.ms";
 static constexpr std::string_view topic_property_recovery
-  = "x-redpanda-recovery";
+  = "redpanda.remote.recovery";
+static constexpr std::string_view topic_property_remote_write
+  = "redpanda.remote.write";
+static constexpr std::string_view topic_property_remote_read
+  = "redpanda.remote.read";
 
 // Data-policy property
 static constexpr std::string_view topic_property_data_policy_function_name
@@ -70,6 +74,7 @@ from_cluster_topic_result(const cluster::topic_result& err) {
 
 config_map_t config_map(const std::vector<createable_topic_config>& config);
 
-cluster::topic_configuration to_cluster_type(const creatable_topic& t);
+cluster::custom_assignable_topic_configuration
+to_cluster_type(const creatable_topic& t);
 
 } // namespace kafka

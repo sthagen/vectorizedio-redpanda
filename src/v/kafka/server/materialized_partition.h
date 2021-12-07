@@ -11,7 +11,10 @@
 #pragma once
 #include "cluster/partition_probe.h"
 #include "kafka/server/partition_proxy.h"
+#include "raft/errc.h"
 #include "storage/log.h"
+
+#include <system_error>
 
 namespace kafka {
 class materialized_partition final : public kafka::partition_proxy::impl {
@@ -38,30 +41,34 @@ public:
 
     bool is_leader() const final { return _partition->is_leader(); }
 
-    ss::future<result<model::offset>> linearizable_barrier() {
+    ss::future<std::error_code> linearizable_barrier() final {
         return _partition->linearizable_barrier().then(
-          [this](result<model::offset> r) {
+          [](result<model::offset> r) {
               if (r) {
-                  return result<model::offset>(last_stable_offset());
+                  return raft::make_error_code(raft::errc::success);
               }
-              return r;
+              return r.error();
           });
     }
 
-    ss::future<model::record_batch_reader> make_reader(
+    ss::future<storage::translating_reader> make_reader(
       storage::log_reader_config cfg,
       std::optional<model::timeout_clock::time_point>) final {
-        return _log.make_reader(cfg);
+        co_return storage::translating_reader(co_await _log.make_reader(cfg));
     }
 
-    ss::future<std::optional<storage::timequery_result>>
-    timequery(model::timestamp ts, ss::io_priority_class io_pc) final {
-        storage::timequery_config cfg(ts, _log.offsets().dirty_offset, io_pc);
+    ss::future<std::optional<storage::timequery_result>> timequery(
+      model::timestamp ts,
+      model::offset offset_limit,
+      ss::io_priority_class io_pc) final {
+        storage::timequery_config cfg(ts, offset_limit, io_pc);
         return _log.timequery(cfg);
     };
 
-    ss::future<std::vector<cluster::rm_stm::tx_range>>
-    aborted_transactions(model::offset, model::offset) final {
+    ss::future<std::vector<cluster::rm_stm::tx_range>> aborted_transactions(
+      model::offset,
+      model::offset,
+      ss::lw_shared_ptr<const storage::offset_translator_state>) final {
         return ss::make_ready_future<std::vector<cluster::rm_stm::tx_range>>(
           std::vector<cluster::rm_stm::tx_range>());
     }

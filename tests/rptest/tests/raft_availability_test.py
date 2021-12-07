@@ -28,6 +28,8 @@ from rptest.services.admin import Admin
 
 ELECTION_TIMEOUT = 10
 
+DEFAULT_PING_PONG_TIMEOUT = 5
+
 
 class MetricCheckFailed(Exception):
     def __init__(self, metric, old_value, new_value):
@@ -172,13 +174,20 @@ class RaftAvailabilityTest(RedpandaTest):
         assert result[0] is not None
         return result[0]
 
-    def _ping_pong(self):
+    def _ping_pong(self, timeout=None):
+        """
+        :param timeout: for tests that expect things to take a little longer (e.g.
+                        right after a node failure) extend the default timeout.
+        """
+        if timeout is None:
+            timeout = DEFAULT_PING_PONG_TIMEOUT
+
         kc = KafkaCat(self.redpanda)
         rpk = RpkTool(self.redpanda)
 
         payload = str(random.randint(0, 1000))
         start = time.time()
-        offset = rpk.produce(self.topic, "tkey", payload, timeout=5)
+        offset = rpk.produce(self.topic, "tkey", payload, timeout=timeout)
         consumed = kc.consume_one(self.topic, 0, offset)
         latency = time.time() - start
         self.logger.info(
@@ -419,10 +428,6 @@ class RaftAvailabilityTest(RedpandaTest):
         https://github.com/vectorizedio/redpanda/issues/2606
         """
 
-        # Redpanda lies on startup, claims there's a leader before there is one
-        # https://github.com/vectorizedio/redpanda/issues/2546
-        time.sleep(5)
-
         leader_node_id, replicas = self._wait_for_leader()
 
         if acks == -1:
@@ -506,4 +511,34 @@ class RaftAvailabilityTest(RedpandaTest):
 
             # expect messages to be produced and consumed without a timeout
             for i in range(0, 128):
-                self._ping_pong()
+                # Use a generous timeout to avoid the test being flaky when the health monitor
+                # takes a long time to catch up with changes to controller leadership.
+                # Revert timeout to default when this issue is fixed:
+                # https://github.com/vectorizedio/redpanda/issues/3098
+                self._ping_pong(timeout=15)
+
+    @cluster(num_nodes=3)
+    def test_initial_leader_stability(self):
+        """
+        Redpanda optimistically initializes a partition's leader in the partition
+        leader table to its expected leader before any election has occurred.
+
+        On a healthy system, that guess should be accurate and the leadership
+        should not flip back to -1 at any stage during startup.
+
+        Reproducer for https://github.com/vectorizedio/redpanda/issues/2546
+        """
+
+        leader_node_id, replicas = self._get_leader()
+
+        # Initial leader should not be none, because we populate partition_leader_table
+        # with the anticipated leader when creating the topic
+        assert leader_node_id is not None
+
+        # Leadership shouhld remain the same across many queries using
+        # individually constructed clients:
+        #  - Because all nodes have the same initial guess
+        #  and
+        #  - Because the anticipated leader should always win the first election
+        for n in range(0, 20):
+            assert self._get_leader()[0] == leader_node_id

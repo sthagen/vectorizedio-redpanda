@@ -68,11 +68,11 @@ consensus::consensus(
   , _group(group)
   , _jit(std::move(jit))
   , _log(l)
-  , _offset_translator(ss::make_lw_shared<offset_translator>(
+  , _offset_translator(
       offset_translator_batch_types(_log.config().ntp()),
       group,
       _log.config().ntp(),
-      storage))
+      storage)
   , _scheduling(scheduling_config)
   , _disk_timeout(disk_timeout)
   , _client_protocol(client)
@@ -902,6 +902,12 @@ template<typename Func>
 ss::future<std::error_code> consensus::change_configuration(Func&& f) {
     return _op_lock.get_units().then(
       [this, f = std::forward<Func>(f)](ss::semaphore_units<> u) mutable {
+          // prevent updating configuration if last configuration wasn't
+          // committed
+          if (_configuration_manager.get_latest_offset() > _commit_index) {
+              return ss::make_ready_future<std::error_code>(
+                errc::configuration_change_in_progress);
+          }
           auto latest_cfg = config();
           // latest configuration is of joint type
           if (latest_cfg.type() == configuration_type::joint) {
@@ -1040,8 +1046,7 @@ ss::future<> consensus::do_start() {
                 = _configuration_manager.get_highest_known_offset(),
               };
 
-              return _offset_translator->start(
-                must_reset, std::move(bootstrap));
+              return _offset_translator.start(must_reset, std::move(bootstrap));
           })
           .then([this] { return hydrate_snapshot(); })
           .then([this] {
@@ -1103,7 +1108,7 @@ ss::future<> consensus::do_start() {
                   update_follower_stats(_configuration_manager.get_latest());
               });
           })
-          .then([this] { return _offset_translator->sync_with_log(_log, _as); })
+          .then([this] { return _offset_translator.sync_with_log(_log, _as); })
           .then([this] {
               /**
                * fix for incorrectly persisted configuration index. In previous
@@ -1638,7 +1643,7 @@ consensus::do_append_entries(append_entries_request&& r) {
         // eventually log and offset translator will become consistent. OTOH if
         // log truncation were first and saving offset translator state failed,
         // we wouldn't retry and log and offset translator could diverge.
-        return _offset_translator->truncate(truncate_at)
+        return _offset_translator.truncate(truncate_at)
           .then([this, truncate_at] {
               return _log.truncate(storage::truncate_config(
                 truncate_at, _scheduling.default_iopc));
@@ -1740,7 +1745,7 @@ ss::future<> consensus::truncate_to_latest_snapshot() {
     // metadata
     return _configuration_manager.prefix_truncate(_last_snapshot_index)
       .then([this] {
-          return _offset_translator->prefix_truncate(_last_snapshot_index);
+          return _offset_translator.prefix_truncate(_last_snapshot_index);
       })
       .then([this] {
           return _log.truncate_prefix(storage::truncate_prefix_config(
@@ -1775,8 +1780,18 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
         update_follower_stats(metadata.latest_configuration);
         return _configuration_manager
           .add(_last_snapshot_index, std::move(metadata.latest_configuration))
-          .then([this, delta = metadata.log_start_delta] {
-              return _offset_translator->prefix_truncate_reset(
+          .then([this, delta = metadata.log_start_delta]() mutable {
+              if (delta < offset_translator_delta(0)) {
+                  delta = offset_translator_delta(
+                    _configuration_manager.offset_delta(_last_snapshot_index));
+                  vlog(
+                    _ctxlog.warn,
+                    "received snapshot without delta field in metadata, "
+                    "falling back to delta obtained from configuration "
+                    "manager: {}",
+                    delta);
+              }
+              return _offset_translator.prefix_truncate_reset(
                 _last_snapshot_index, delta);
           })
           .then([this] {
@@ -1947,7 +1962,8 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
       .latest_configuration = *config,
       .cluster_time = clock_type::time_point::min(),
       .log_start_delta = offset_translator_delta(
-        _offset_translator->delta(details::next_offset(last_included_index))),
+        _offset_translator.state()->delta(
+          details::next_offset(last_included_index))),
     };
 
     return details::persist_snapshot(
@@ -1959,8 +1975,7 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
           // update configuration manager
           return _configuration_manager.prefix_truncate(_last_snapshot_index)
             .then([this] {
-                return _offset_translator->prefix_truncate(
-                  _last_snapshot_index);
+                return _offset_translator.prefix_truncate(_last_snapshot_index);
             });
       });
 }
@@ -2044,10 +2059,20 @@ ss::future<> consensus::flush_log() {
     _probe.log_flushed();
     auto flushed_up_to = _log.offsets().dirty_offset;
     return _log.flush().then([this, flushed_up_to] {
-        _flushed_offset = flushed_up_to;
+        auto lstats = _log.offsets();
+        /**
+         * log flush may be interleaved with trucation, hence we need to check
+         * if log was truncated, if so we do nothing, flushed offset will be
+         * updated in the truncation path.
+         */
+        if (flushed_up_to > lstats.dirty_offset) {
+            return;
+        }
+
+        _flushed_offset = std::max(flushed_up_to, _flushed_offset);
+        vlog(_ctxlog.trace, "flushed offset updated: {}", _flushed_offset);
         // TODO: remove this assertion when we will remove committed_offset
         // from storage.
-        auto lstats = _log.offsets();
         vassert(
           lstats.committed_offset >= _flushed_offset,
           "Raft incorrectly tracking flushed log offset. Expected offset: {}, "
@@ -2094,7 +2119,7 @@ ss::future<storage::append_result> consensus::disk_append(
     return details::for_each_ref_extract_configuration(
              _log.offsets().dirty_offset,
              std::move(reader),
-             consumer(*_offset_translator, _log.make_appender(cfg)),
+             consumer(_offset_translator, _log.make_appender(cfg)),
              cfg.timeout)
       .then([this, should_update_last_quorum_idx](
               std::tuple<ret_t, std::vector<offset_configuration>> t) {
@@ -2135,7 +2160,7 @@ ss::future<storage::append_result> consensus::disk_append(
               // the write path caused by KVStore flush debouncing.
 
               (void)ss::with_gate(
-                _bg, [this] { return _offset_translator->maybe_checkpoint(); });
+                _bg, [this] { return _offset_translator.maybe_checkpoint(); });
 
               (void)ss::with_gate(
                 _bg, [this, last_offset = ret.last_offset, sz = ret.byte_size] {
@@ -2753,27 +2778,28 @@ consensus::do_transfer_leadership(std::optional<model::node_id> target) {
                 .timeout_now(
                   target_rni.id(), std::move(req), rpc::client_opts(timeout))
 
-                .then([this](result<timeout_now_reply> reply) {
-                    if (!reply) {
-                        return seastar::make_ready_future<std::error_code>(
-                          reply.error());
-                    } else {
-                        // Step down before setting _transferring_leadership
-                        // to false, to ensure we do not accept any more writes
-                        // in the gap between new leader acking timeout now
-                        // and new leader sending a vote for its new term.
-                        // (If we accepted more writes, our log could get
-                        //  ahead of new leader, and it could lose election)
-                        do_step_down();
-                        if (_leader_id) {
-                            _leader_id = std::nullopt;
-                            trigger_leadership_notification();
-                        }
+                .then(
+                  [this](result<timeout_now_reply> reply)
+                    -> ss::future<std::error_code> {
+                      if (!reply) {
+                          co_return reply.error();
+                      } else {
+                          // Step down before setting _transferring_leadership
+                          // to false, to ensure we do not accept any more
+                          // writes in the gap between new leader acking timeout
+                          // now and new leader sending a vote for its new term.
+                          // (If we accepted more writes, our log could get
+                          //  ahead of new leader, and it could lose election)
+                          auto units = co_await _op_lock.get_units();
+                          do_step_down();
+                          if (_leader_id) {
+                              _leader_id = std::nullopt;
+                              trigger_leadership_notification();
+                          }
 
-                        return seastar::make_ready_future<std::error_code>(
-                          make_error_code(errc::success));
-                    }
-                });
+                          co_return make_error_code(errc::success);
+                      }
+                  });
           });
     });
 
@@ -2790,7 +2816,7 @@ ss::future<> consensus::remove_persistent_state() {
     // configuration manager
     co_await _configuration_manager.remove_persistent_state();
     // offset translator
-    co_await _offset_translator->remove_persistent_state();
+    co_await _offset_translator.remove_persistent_state();
     // snapshot
     co_await _snapshot_mgr.remove_snapshot();
     co_await _snapshot_mgr.remove_partial_snapshots();
@@ -2973,6 +2999,18 @@ consensus::get_follower_metrics(model::node_id id) const {
     }
     return build_follower_metrics(
       id, _log.offsets(), _jit.base_duration(), it->second);
+}
+
+ss::future<std::optional<storage::timequery_result>>
+consensus::timequery(storage::timequery_config cfg) {
+    return _log.timequery(cfg).then(
+      [this](std::optional<storage::timequery_result> res) {
+          if (res) {
+              // do not return offset that is earlier raft start offset
+              res->offset = std::max(res->offset, start_offset());
+          }
+          return res;
+      });
 }
 
 } // namespace raft
