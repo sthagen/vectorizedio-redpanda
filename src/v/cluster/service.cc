@@ -87,6 +87,20 @@ service::create_topics(create_topics_request&& r, rpc::streaming_context&) {
       });
 }
 
+ss::future<create_non_replicable_topics_reply>
+service::create_non_replicable_topics(
+  create_non_replicable_topics_request&& r, rpc::streaming_context&) {
+    return ss::with_scheduling_group(
+             get_scheduling_group(),
+             [this, r = std::move(r)]() mutable {
+                 return _topics_frontend.local().create_non_replicable_topics(
+                   std::move(r.topics), model::time_from_now(r.timeout));
+             })
+      .then([](std::vector<topic_result> res) {
+          return create_non_replicable_topics_reply{std::move(res)};
+      });
+}
+
 std::pair<std::vector<model::topic_metadata>, std::vector<topic_configuration>>
 service::fetch_metadata_and_cfg(const std::vector<topic_result>& res) {
     std::vector<model::topic_metadata> md;
@@ -262,6 +276,28 @@ service::config_status(config_status_request&& req, rpc::streaming_context&) {
         co_return config_status_reply{.error = errc(ec.value())};
     } else {
         co_return config_status_reply{.error = errc::replication_error};
+    }
+}
+
+ss::future<config_update_reply>
+service::config_update(config_update_request&& req, rpc::streaming_context&) {
+    auto patch_result = co_await _config_frontend.invoke_on(
+      config_frontend::version_shard,
+      [req = std::move(req)](config_frontend& fe) mutable {
+          return fe.patch(
+            std::move(req),
+            config::shard_local_cfg().replicate_append_timeout_ms()
+              + model::timeout_clock::now());
+      });
+
+    if (patch_result.errc.category() == error_category()) {
+        co_return config_update_reply{
+          .error = errc(patch_result.errc.value()),
+          .latest_version = patch_result.version};
+    } else {
+        co_return config_update_reply{
+          .error = errc::replication_error,
+          .latest_version = patch_result.version};
     }
 }
 

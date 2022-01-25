@@ -114,6 +114,7 @@ func TestEnsure(t *testing.T) {
 					ConfiguratorTag:       "latest",
 					ImagePullPolicy:       "Always",
 				},
+				func(ctx context.Context) (string, error) { return hash, nil },
 				ctrl.Log.WithName("test"))
 
 			err = sts.Ensure(context.Background())
@@ -131,6 +132,8 @@ func TestEnsure(t *testing.T) {
 
 			assert.Equal(t, expectedRedpandaResources, actualRedpandaResources)
 			assert.Equal(t, expectedInitResources, actualInitResources)
+			configMapHash := actual.Spec.Template.Annotations["redpanda.vectorized.io/configmap-hash"]
+			assert.Equal(t, hash, configMapHash)
 
 			if *actual.Spec.Replicas != *tt.expectedObject.Spec.Replicas {
 				t.Errorf("%s: expecting replicas %d, got replicas %d", tt.name,
@@ -250,7 +253,7 @@ func pandaCluster() *redpandav1alpha1.Cluster {
 		},
 		Spec: redpandav1alpha1.ClusterSpec{
 			Image:    "image",
-			Version:  "v21.10.1",
+			Version:  "v21.11.1",
 			Replicas: pointer.Int32Ptr(replicas),
 			CloudStorage: redpandav1alpha1.CloudStorageConfig{
 				Enabled: true,

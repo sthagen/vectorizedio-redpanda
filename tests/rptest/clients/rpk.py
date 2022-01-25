@@ -8,7 +8,6 @@
 # by the Apache License, Version 2.0
 
 import subprocess
-import socket
 import re
 
 DEFAULT_TIMEOUT = 30
@@ -62,6 +61,29 @@ class RpkTool:
                 cmd += ["--topic-config", it]
         return self._run_topic(cmd)
 
+    def sasl_allow_principal(self, principal, operations, resource,
+                             resource_name, username, password, mechanism):
+        if resource == "topic":
+            resource = "--topic"
+        elif resource == "transactional-id":
+            resource = "--transactional-id"
+        else:
+            raise Exception(f"unknown resource: {resource}")
+
+        cmd = [
+            "acl", "create", "--allow-principal", principal, "--operation",
+            ",".join(operations), resource, resource_name, "--brokers",
+            self._redpanda.brokers(), "--user", username, "--password",
+            password, "--sasl-mechanism", mechanism
+        ]
+        return self._run(cmd)
+
+    def sasl_create_user(self, new_username, new_password, mechanism):
+        cmd = ["acl", "user", "create", new_username, "-p", new_password]
+        cmd += ["--api-urls", self._redpanda.admin_endpoints()]
+        cmd += ["--sasl-mechanism", mechanism]
+        return self._run(cmd)
+
     def delete_topic(self, topic):
         cmd = ["delete", topic]
         return self._run_topic(cmd)
@@ -113,8 +135,9 @@ class RpkTool:
         # message rather than sigkilling the remote process.
         out = self._run_topic(cmd, stdin=msg, timeout=timeout + 0.5)
 
-        offset = re.search("at offset (\d+)", out).group(1)
-        return int(offset)
+        m = re.search(r"at offset (\d+)", out)
+        assert m, f"Reported offset not found in: {out}"
+        return int(m.group(1))
 
     def describe_topic(self, topic):
         cmd = ['describe', topic, '-p']
@@ -138,8 +161,29 @@ class RpkTool:
 
         return filter(lambda p: p != None, map(partition_line, lines))
 
+    def describe_topic_configs(self, topic):
+        cmd = ['describe', topic, '-c']
+        output = self._run_topic(cmd)
+        assert "not found" not in output, \
+                f"Cannot describe configs for unknown topic {topic}"
+        lines = output.splitlines()
+        res = {}
+        for line in lines:
+            try:
+                key, value, source = line.split()
+                if key == "KEY":
+                    continue
+                res[key] = value, source
+            except:
+                pass
+        return res
+
     def alter_topic_config(self, topic, set_key, set_value):
         cmd = ['alter-config', topic, "--set", f"{set_key}={set_value}"]
+        self._run_topic(cmd)
+
+    def delete_topic_config(self, topic, key):
+        cmd = ['alter-config', topic, "--delete", key]
         self._run_topic(cmd)
 
     def consume(self,
@@ -162,6 +206,14 @@ class RpkTool:
             cmd += ["-o", f"{n}"]
         return self._run_topic(cmd)
 
+    def group_seek_to(self, group, to):
+        cmd = ["seek", group, "--to", to]
+        self._run_group(cmd)
+
+    def group_seek_to_group(self, group, to_group):
+        cmd = ["seek", group, "--to-group", to_group]
+        self._run_group(cmd)
+
     def wasm_deploy(self, script, name, description):
         cmd = [
             self._rpk_binary(), 'wasm', 'deploy', script, '--brokers',
@@ -183,6 +235,17 @@ class RpkTool:
             self._rpk_binary(), "topic", "--brokers",
             self._redpanda.brokers()
         ] + cmd
+        return self._execute(cmd, stdin=stdin, timeout=timeout)
+
+    def _run_group(self, cmd, stdin=None, timeout=None):
+        cmd = [
+            self._rpk_binary(), "group", "--brokers",
+            self._redpanda.brokers()
+        ] + cmd
+        return self._execute(cmd, stdin=stdin, timeout=timeout)
+
+    def _run(self, cmd, stdin=None, timeout=None):
+        cmd = [self._rpk_binary()] + cmd
         return self._execute(cmd, stdin=stdin, timeout=timeout)
 
     def cluster_info(self, timeout=None):
@@ -209,17 +272,51 @@ class RpkTool:
 
         cmd = [
             self._rpk_binary(), 'cluster', 'info', '--brokers',
-            self._redpanda.brokers(1)
+            self._redpanda.brokers()
         ]
         output = self._execute(cmd, stdin=None, timeout=timeout)
         parsed = map(_parse_out, output.splitlines())
         return [p for p in parsed if p is not None]
 
+    def _admin_host(self, node=None):
+        if node is None:
+            node = self._redpanda.nodes[0]
+        return f"{node.account.hostname}:9644"
+
     def admin_config_print(self, node):
         return self._execute([
             self._rpk_binary(), "redpanda", "admin", "config", "print",
-            "--host", f"{node.account.hostname}:9644"
+            "--host",
+            self._admin_host(node)
         ])
+
+    def cluster_config_export(self, file, all):
+        node = self._redpanda.nodes[0]
+        cmd = [
+            self._rpk_binary(), '--api-urls',
+            self._admin_host(), "cluster", "config", "export", "--filename",
+            file
+        ]
+        if all:
+            cmd.append("--all")
+        return self._execute(cmd)
+
+    def cluster_config_import(self, file, all):
+        cmd = [
+            self._rpk_binary(), "--api-urls",
+            self._admin_host(), "cluster", "config", "import", "--filename",
+            file
+        ]
+        if all:
+            cmd.append("--all")
+        return self._execute(cmd)
+
+    def cluster_config_status(self):
+        cmd = [
+            self._rpk_binary(), "--api-urls",
+            self._admin_host(), "cluster", "config", "status"
+        ]
+        return self._execute(cmd)
 
     def _execute(self, cmd, stdin=None, timeout=None):
         if timeout is None:

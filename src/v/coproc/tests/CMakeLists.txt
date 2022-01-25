@@ -3,6 +3,7 @@ set(fixture_srcs
     utils/supervisor.cc
     utils/wasm_event_generator.cc
     utils/batch_utils.cc
+    fixtures/coproc_cluster_fixture.cc
     fixtures/coproc_test_fixture.cc
     fixtures/coproc_bench_fixture.cc
     fixtures/fiber_mock_fixture.cc
@@ -18,9 +19,11 @@ rp_test(
   SOURCES
     ${fixture_srcs}
     retry_logic_tests.cc
+    partition_movement_tests.cc
     topic_ingestion_policy_tests.cc
     failure_recovery_tests.cc
     pacemaker_tests.cc
+    autocreate_topic_tests.cc
     coproc_bench_tests.cc
     offset_storage_utils_tests.cc
     wasm_event_tests.cc

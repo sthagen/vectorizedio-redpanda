@@ -16,9 +16,9 @@
 #include "coproc/types.h"
 #include "coproc/wasm_event.h"
 #include "model/namespace.h"
+#include "net/unresolved_address.h"
 #include "ssx/future-util.h"
 #include "storage/parser_utils.h"
-#include "utils/unresolved_address.h"
 #include "vassert.h"
 #include "vlog.h"
 
@@ -37,8 +37,8 @@ namespace {
 
 kafka::client::client make_client() {
     kafka::client::configuration cfg;
-    cfg.brokers.set_value(
-      std::vector<unresolved_address>{config::node().kafka_api()[0].address});
+    cfg.brokers.set_value(std::vector<net::unresolved_address>{
+      config::node().kafka_api()[0].address});
     cfg.retries.set_value(size_t(1));
     return kafka::client::client{to_yaml(cfg)};
 }
@@ -59,8 +59,9 @@ ss::future<> event_listener::stop() {
       });
 }
 
-event_listener::event_listener()
-  : _client(make_client()) {}
+event_listener::event_listener(ss::abort_source& as)
+  : _client(make_client())
+  , _abort_source(as) {}
 
 ss::future<> event_listener::start() {
     co_await ss::parallel_for_each(
@@ -70,7 +71,7 @@ ss::future<> event_listener::start() {
           return type_and_handler.second->start();
       });
 
-    (void)ss::with_gate(_gate, [this] {
+    ssx::spawn_with_gate(_gate, [this] {
         return ss::do_until(
           [this] { return _abort_source.abort_requested(); },
           [this] {
@@ -97,8 +98,6 @@ void event_listener::register_handler(event_type type, event_handler* handler) {
       "Register new handler for wasm_event_type: {}",
       coproc_type_as_string_view(type));
 }
-
-ss::abort_source& event_listener::get_abort_source() { return _abort_source; }
 
 static ss::future<std::vector<model::record_batch>>
 decompress_wasm_events(model::record_batch_reader::data_t events) {

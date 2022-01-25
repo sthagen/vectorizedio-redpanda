@@ -79,52 +79,49 @@ config_manager::config_manager(
  */
 void config_manager::start_bootstrap() {
     // Detach fiber
-    (void)ss::try_with_gate(
-      _gate,
-      [this] {
-          return ss::do_until(
-            [this] {
-                return _as.local().abort_requested() || _bootstrap_complete;
-            },
-            [this]() -> ss::future<> {
-                if (_seen_version != config_version_unset) {
-                    vlog(
-                      clusterlog.info,
-                      "Bootstrap complete (version {})",
-                      _seen_version);
-                    _bootstrap_complete = true;
-                    co_return;
-                } else {
-                    auto leader = co_await _leaders.local().wait_for_leader(
-                      model::controller_ntp,
-                      model::timeout_clock::now() + bootstrap_retry,
-                      _as.local());
-                    if (leader == _self) {
-                        // We are the leader.  Proceed to bootstrap cluster
-                        // configuration from our local configuration.
-                        co_await do_bootstrap();
-                        vlog(clusterlog.info, "Completed bootstrap as leader");
-                    } else {
-                        // Someone else got leadership.  Maybe they
-                        // successfully bootstrap config, maybe they don't.
-                        // Wait a short time before checking again.
-                        co_await ss::sleep_abortable(
-                          bootstrap_retry, _as.local());
-                    }
-                }
-            });
-      })
-      .handle_exception_type([](ss::sleep_aborted const&) {})
-      .handle_exception_type([](ss::gate_closed_exception const&) {})
-      .handle_exception([](const std::exception_ptr&) {
-          // Explicitly handle exception so that we do not risk an
-          // 'ignored exceptional future' error.  The only exceptions
-          // we expect here are things like sleep_aborted during shutdown.
-          vlog(
-            clusterlog.warn,
-            "Exception during bootstrap: {}",
-            std::current_exception());
-      });
+    ssx::background
+      = ssx::spawn_with_gate_then(_gate, [this] {
+            return ss::do_until(
+              [this] {
+                  return _as.local().abort_requested() || _bootstrap_complete;
+              },
+              [this]() -> ss::future<> {
+                  if (_seen_version != config_version_unset) {
+                      vlog(
+                        clusterlog.info,
+                        "Bootstrap complete (version {})",
+                        _seen_version);
+                      _bootstrap_complete = true;
+                      co_return;
+                  } else {
+                      auto leader = co_await _leaders.local().wait_for_leader(
+                        model::controller_ntp,
+                        model::timeout_clock::now() + bootstrap_retry,
+                        _as.local());
+                      if (leader == _self) {
+                          // We are the leader.  Proceed to bootstrap cluster
+                          // configuration from our local configuration.
+                          co_await do_bootstrap();
+                          vlog(
+                            clusterlog.info, "Completed bootstrap as leader");
+                      } else {
+                          // Someone else got leadership.  Maybe they
+                          // successfully bootstrap config, maybe they don't.
+                          // Wait a short time before checking again.
+                          co_await ss::sleep_abortable(
+                            bootstrap_retry, _as.local());
+                      }
+                  }
+              });
+        }).handle_exception([](const std::exception_ptr&) {
+            // Explicitly handle exception so that we do not risk an
+            // 'ignored exceptional future' error.  The only exceptions
+            // we expect here are things like sleep_aborted during shutdown.
+            vlog(
+              clusterlog.warn,
+              "Exception during bootstrap: {}",
+              std::current_exception());
+        });
 }
 
 /**
@@ -135,7 +132,7 @@ void config_manager::start_bootstrap() {
  * since upgrading to a redpanda version with central config)
  */
 ss::future<> config_manager::do_bootstrap() {
-    config_update update;
+    config_update_request update;
 
     config::shard_local_cfg().for_each([&update](
                                          const config::base_property& p) {
@@ -155,7 +152,8 @@ ss::future<> config_manager::do_bootstrap() {
 
     try {
         co_await _frontend.local().patch(
-          update, model::timeout_clock::now() + bootstrap_write_timeout);
+          std::move(update),
+          model::timeout_clock::now() + bootstrap_write_timeout);
     } catch (...) {
         // On errors, just drop out: start_bootstrap will go around
         // its loop again.
@@ -184,17 +182,13 @@ ss::future<> config_manager::start() {
     vlog(clusterlog.trace, "Starting reconcile_status...");
 
     // Detach fiber
-    (void)ss::try_with_gate(
-      _gate,
-      [this] {
-          return ss::do_until(
-            [this] { return _as.local().abort_requested(); },
-            [this] { return reconcile_status(); });
-      })
-      .handle_exception_type([](ss::gate_closed_exception const&) {})
-      .handle_exception([](std::exception_ptr const& e) {
-          vlog(clusterlog.warn, "Exception from reconcile_status: {}", e);
-      });
+    ssx::background = ssx::spawn_with_gate_then(_gate, [this] {
+                          return ss::do_until(
+                            [this] { return _as.local().abort_requested(); },
+                            [this] { return reconcile_status(); });
+                      }).handle_exception([](std::exception_ptr const& e) {
+        vlog(clusterlog.warn, "Exception from reconcile_status: {}", e);
+    });
 
     return ss::now();
 }
@@ -246,7 +240,8 @@ static void preload_local(
             // but for strings it's not (the literal value in the cache is
             // "\"foo\"").
             auto decoded = YAML::Load(value.as<std::string>());
-            cfg.get(key).set_value(decoded);
+            auto& property = cfg.get(key);
+            property.set_value(decoded);
 
             // Because we are in preload, it doesn't matter if the property
             // requires restart.  We are setting it before anything else
@@ -257,7 +252,7 @@ static void preload_local(
                   clusterlog.trace,
                   "Loaded property {}={} from local cache",
                   key,
-                  YAML::Dump(decoded));
+                  property.format_raw(YAML::Dump(decoded)));
             }
         } catch (...) {
             if (result.has_value()) {
@@ -321,7 +316,12 @@ ss::future<config_manager::preload_result> config_manager::preload() {
         preload_local(key, value, std::ref(result));
 
         // Store raw values in the result
-        result.raw_values[key] = YAML::Dump(value);
+
+        if (value.IsScalar()) {
+            result.raw_values[key] = value.Scalar();
+        } else {
+            result.raw_values[key] = YAML::Dump(value);
+        }
 
         // Broadcast value to all shards
         co_await ss::smp::invoke_on_all(
@@ -442,10 +442,18 @@ apply_local(cluster_config_delta_cmd_data const& data, bool silent) {
             result.unknown.push_back(u.first);
             continue;
         }
+        auto& property = cfg.get(u.first);
         auto& val_yaml = u.second;
+
         try {
             auto val = YAML::Load(val_yaml);
-            auto& property = cfg.get(u.first);
+
+            vlog(
+              clusterlog.trace,
+              "apply: upsert {}={}",
+              u.first,
+              property.format_raw(val_yaml));
+
             bool changed = property.set_value(val);
             result.restart |= (property.needs_restart() && changed);
         } catch (YAML::ParserException) {
@@ -454,7 +462,7 @@ apply_local(cluster_config_delta_cmd_data const& data, bool silent) {
                   clusterlog.warn,
                   "Invalid syntax in property {}: {}",
                   u.first,
-                  val_yaml);
+                  property.format_raw(val_yaml));
             }
             result.invalid.push_back(u.first);
             continue;
@@ -464,7 +472,7 @@ apply_local(cluster_config_delta_cmd_data const& data, bool silent) {
                   clusterlog.warn,
                   "Invalid value for property {}: {}",
                   u.first,
-                  val_yaml);
+                  property.format_raw(val_yaml));
             }
             result.invalid.push_back(u.first);
             continue;
@@ -482,7 +490,7 @@ apply_local(cluster_config_delta_cmd_data const& data, bool silent) {
                   clusterlog.warn,
                   "Unexpected error setting property {}={}: {}",
                   u.first,
-                  val_yaml,
+                  property.format_raw(val_yaml),
                   std::current_exception());
             }
             result.invalid.push_back(u.first);
@@ -491,6 +499,8 @@ apply_local(cluster_config_delta_cmd_data const& data, bool silent) {
     }
 
     for (const auto& r : data.remove) {
+        vlog(clusterlog.trace, "apply: remove {}", r);
+
         if (!cfg.contains(r)) {
             // Ignore: if we have never heard of the property, removing
             // its value is a no-op.
@@ -658,13 +668,6 @@ config_manager::apply_delta(cluster_config_delta_cmd&& cmd_in) {
       "apply_delta: {} upserts, {} removes",
       data.upsert.size(),
       data.remove.size());
-    for (const auto& u : data.upsert) {
-        vlog(clusterlog.trace, "apply_delta: upsert {}={}", u.first, u.second);
-    }
-
-    for (const auto& d : data.remove) {
-        vlog(clusterlog.trace, "apply_delta: delete {}", d);
-    }
 
     // Update shard-local copies of configuration.  Use our local shard's
     // apply to learn of any bad properties (all copies will have the same

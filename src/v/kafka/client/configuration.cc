@@ -29,7 +29,7 @@ configuration::configuration()
     "brokers",
     "List of address and port of the brokers",
     config::required::yes,
-    std::vector<unresolved_address>({{"127.0.0.1", 9092}}))
+    std::vector<net::unresolved_address>({{"127.0.0.1", 9092}}))
   , broker_tls(
       *this,
       "broker_tls",
@@ -113,7 +113,7 @@ configuration::configuration()
       *this,
       "scram_password",
       "Password to use for SCRAM authentication mechanisms",
-      config::required::no,
+      {.secret = config::is_secret::yes},
       "") {}
 
 } // namespace kafka::client

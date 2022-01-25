@@ -11,7 +11,7 @@
 #pragma once
 #include "kafka/server/protocol.h"
 #include "kafka/server/response.h"
-#include "rpc/server.h"
+#include "net/server.h"
 #include "seastarx.h"
 #include "security/acl.h"
 #include "security/sasl_authentication.h"
@@ -29,6 +29,11 @@
 
 namespace kafka {
 
+/*
+ * authz failures should be quiet or logged at a reduced severity level.
+ */
+using authz_quiet = ss::bool_class<struct authz_quiet_tag>;
+
 struct request_header;
 class request_context;
 
@@ -37,7 +42,7 @@ class connection_context final
 public:
     connection_context(
       protocol& p,
-      rpc::server::resources&& r,
+      net::server::resources&& r,
       security::sasl_server sasl,
       bool enable_authorizer) noexcept
       : _proto(p)
@@ -59,7 +64,8 @@ public:
     security::sasl_server& sasl() { return _sasl; }
 
     template<typename T>
-    bool authorized(security::acl_operation operation, const T& name) {
+    bool authorized(
+      security::acl_operation operation, const T& name, authz_quiet quiet) {
         if (!_enable_authorizer) {
             return true;
         }
@@ -68,19 +74,30 @@ public:
           security::principal_type::user, std::move(user));
 
         bool authorized = _proto.authorizer().authorized(
-          name,
-          operation,
-          std::move(principal),
-          security::acl_host(_client_addr));
+          name, operation, principal, security::acl_host(_client_addr));
 
         if (!authorized) {
-            vlog(
-              _authlog.info,
-              "proto: {}, sasl state: {}, acl op: {}, resource: {}",
-              _proto.name(),
-              security::sasl_state_to_str(_sasl.state()),
-              operation,
-              name);
+            if (quiet) {
+                vlog(
+                  _authlog.debug,
+                  "proto: {}, sasl state: {}, acl op: {}, principal: {}, "
+                  "resource: {}",
+                  _proto.name(),
+                  security::sasl_state_to_str(_sasl.state()),
+                  operation,
+                  principal,
+                  name);
+            } else {
+                vlog(
+                  _authlog.info,
+                  "proto: {}, sasl state: {}, acl op: {}, principal: {}, "
+                  "resource: {}",
+                  _proto.name(),
+                  security::sasl_state_to_str(_sasl.state()),
+                  operation,
+                  principal,
+                  name);
+            }
         }
 
         return authorized;
@@ -97,7 +114,7 @@ private:
     // used to track number of pending requests
     class request_tracker {
     public:
-        explicit request_tracker(rpc::server_probe& probe) noexcept
+        explicit request_tracker(net::server_probe& probe) noexcept
           : _probe(probe) {
             _probe.request_received();
         }
@@ -109,7 +126,7 @@ private:
         ~request_tracker() noexcept { _probe.request_completed(); }
 
     private:
-        rpc::server_probe& _probe;
+        net::server_probe& _probe;
     };
     // used to pass around some internal state
     struct session_resources {
@@ -188,7 +205,7 @@ private:
     };
 
     protocol& _proto;
-    rpc::server::resources _rs;
+    net::server::resources _rs;
     sequence_id _next_response;
     sequence_id _seq_idx;
     map_t _responses;

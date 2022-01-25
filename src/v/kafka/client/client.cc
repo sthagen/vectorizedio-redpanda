@@ -26,10 +26,10 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
+#include "net/unresolved_address.h"
 #include "random/generators.h"
 #include "seastarx.h"
 #include "ssx/future-util.h"
-#include "utils/unresolved_address.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
@@ -56,7 +56,7 @@ client::client(const YAML::Node& cfg)
                   return mitigate_error(std::move(ex));
               }} {}
 
-ss::future<> client::do_connect(unresolved_address addr) {
+ss::future<> client::do_connect(net::unresolved_address addr) {
     return ss::try_with_gate(_gate, [this, addr]() {
         return make_broker(unknown_node_id, addr, _config)
           .then([this](shared_broker_t broker) {
@@ -116,13 +116,16 @@ ss::future<> client::update_metadata(wait_or_start::tag) {
           .then([this](shared_broker_t broker) {
               return broker->dispatch(metadata_request{.list_all_topics = true})
                 .then([this](metadata_response res) {
-                    // Create new seeds from the returned set of brokers
-                    std::vector<unresolved_address> seeds;
-                    seeds.reserve(res.data.brokers.size());
-                    for (const auto& b : res.data.brokers) {
-                        seeds.emplace_back(b.host, b.port);
+                    // Create new seeds from the returned set of brokers if
+                    // they're not empty
+                    if (!res.data.brokers.empty()) {
+                        std::vector<net::unresolved_address> seeds;
+                        seeds.reserve(res.data.brokers.size());
+                        for (const auto& b : res.data.brokers) {
+                            seeds.emplace_back(b.host, b.port);
+                        }
+                        std::swap(_seeds, seeds);
                     }
-                    std::swap(_seeds, seeds);
 
                     return apply(std::move(res));
                 })
@@ -308,7 +311,6 @@ ss::future<fetch_response> client::fetch_partition(
       std::move(build_request),
       std::move(tp),
       [this](auto& build_request, model::topic_partition& tp) {
-          vlog(kclog.debug, "fetching: {}", tp);
           return gated_retry_with_mitigation([this, &tp, &build_request]() {
                      return _topic_cache.leader(tp)
                        .then([this](model::node_id leader) {
@@ -348,7 +350,7 @@ client::create_consumer(const group_id& group_id, member_id name) {
       .then([this](find_coordinator_response res) {
           return make_broker(
             res.data.node_id,
-            unresolved_address(res.data.host, res.data.port),
+            net::unresolved_address(res.data.host, res.data.port),
             _config);
       })
       .then([this, group_id, name](shared_broker_t coordinator) mutable {
@@ -450,6 +452,7 @@ ss::future<kafka::fetch_response> client::consumer_fetch(
     const auto end = model::timeout_clock::now()
                      + std::min(config_timout, timeout.value_or(config_timout));
     return gated_retry_with_mitigation([this, g_id, name, end, max_bytes]() {
+        vlog(kclog.debug, "consumer_fetch: group_id: {}, name: {}", g_id, name);
         return get_consumer(g_id, name)
           .then([end, max_bytes](shared_consumer_t c) {
               auto timeout = std::max(

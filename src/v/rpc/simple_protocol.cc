@@ -17,8 +17,14 @@
 #include <exception>
 
 namespace rpc {
+
+/*
+ * the size threshold above which a reply message will use compression.
+ */
+static constexpr size_t reply_min_compression_bytes = 1024;
+
 struct server_context_impl final : streaming_context {
-    server_context_impl(server::resources s, header h)
+    server_context_impl(net::server::resources s, header h)
       : res(std::move(s))
       , hdr(h) {
         res.probe().request_received();
@@ -36,12 +42,12 @@ struct server_context_impl final : streaming_context {
     void body_parse_exception(std::exception_ptr e) final {
         pr.set_exception(std::move(e));
     }
-    server::resources res;
+    net::server::resources res;
     header hdr;
     ss::promise<> pr;
 };
 
-ss::future<> simple_protocol::apply(server::resources rs) {
+ss::future<> simple_protocol::apply(net::server::resources rs) {
     return ss::do_until(
       [rs] { return rs.conn->input().eof() || rs.abort_requested(); },
       [this, rs]() mutable {
@@ -63,7 +69,7 @@ ss::future<> simple_protocol::apply(server::resources rs) {
 
 ss::future<>
 send_reply(ss::lw_shared_ptr<server_context_impl> ctx, netbuf buf) {
-    buf.set_min_compression_bytes(1024);
+    buf.set_min_compression_bytes(reply_min_compression_bytes);
     buf.set_compression(rpc::compression_type::zstd);
     buf.set_correlation_id(ctx->get_header().correlation_id);
 
@@ -75,14 +81,14 @@ send_reply(ss::lw_shared_ptr<server_context_impl> ctx, netbuf buf) {
         return ss::make_ready_future<>();
     }
     return ctx->res.conn->write(std::move(view))
-      .handle_exception([ctx](std::exception_ptr e) {
+      .handle_exception([ctx = std::move(ctx)](std::exception_ptr e) {
           vlog(rpclog.info, "Error dispatching method: {}", e);
           ctx->res.conn->shutdown_input();
       });
 }
 
 ss::future<>
-simple_protocol::dispatch_method_once(header h, server::resources rs) {
+simple_protocol::dispatch_method_once(header h, net::server::resources rs) {
     const auto method_id = h.meta;
     auto ctx = ss::make_lw_shared<server_context_impl>(rs, h);
     rs.probe().add_bytes_received(size_of_rpc_header + h.payload_size);
@@ -93,54 +99,78 @@ simple_protocol::dispatch_method_once(header h, server::resources rs) {
     auto fut = ctx->pr.get_future();
 
     // background!
-    (void)with_gate(rs.conn_gate(), [this, method_id, rs, ctx]() mutable {
-        auto it = std::find_if(
-          _services.begin(),
-          _services.end(),
-          [method_id](std::unique_ptr<service>& srvc) {
-              return srvc->method_from_id(method_id) != nullptr;
-          });
-        if (unlikely(it == _services.end())) {
-            rs.probe().method_not_found();
-            netbuf reply_buf;
-            reply_buf.set_status(rpc::status::method_not_found);
-            return send_reply(ctx, std::move(reply_buf)).then([ctx]() mutable {
-                ctx->signal_body_parse();
-            });
-        }
-
-        method* m = it->get()->method_from_id(method_id);
-
-        return m->handle(ctx->res.conn->input(), *ctx)
-          .then_wrapped([ctx, m, l = ctx->res.hist().auto_measure(), rs](
-                          ss::future<netbuf> fut) mutable {
-              netbuf reply_buf;
-              try {
-                  reply_buf = fut.get0();
-                  reply_buf.set_status(rpc::status::success);
-              } catch (const rpc_internal_body_parsing_exception& e) {
-                  // We have to distinguish between exceptions thrown by the
-                  // service handler and the one caused by the corrupted
-                  // payload. Data corruption on the wire may lead to the
-                  // situation where connection is not longer usable and so it
-                  // have to be terminated.
-                  ctx->pr.set_exception(e);
-                  return ss::now();
-              } catch (const ss::timed_out_error& e) {
-                  reply_buf.set_status(rpc::status::request_timeout);
-              } catch (...) {
-                  rpclog.error(
-                    "Service handler thrown an exception - {}",
-                    std::current_exception());
-                  rs.probe().service_error();
-                  reply_buf.set_status(rpc::status::server_error);
-              }
-              return send_reply(ctx, std::move(reply_buf))
-                .finally([m, l = std::move(l)]() mutable {
-                    m->probes.latency_hist().record(std::move(l));
+    ssx::background
+      = ssx::spawn_with_gate_then(
+          rs.conn_gate(),
+          [this, method_id, rs, ctx]() mutable {
+              auto it = std::find_if(
+                _services.begin(),
+                _services.end(),
+                [method_id](std::unique_ptr<service>& srvc) {
+                    return srvc->method_from_id(method_id) != nullptr;
                 });
+              if (unlikely(it == _services.end())) {
+                  rs.probe().method_not_found();
+                  netbuf reply_buf;
+                  reply_buf.set_status(rpc::status::method_not_found);
+                  return send_reply(ctx, std::move(reply_buf))
+                    .then([ctx]() mutable { ctx->signal_body_parse(); });
+              }
+
+              method* m = it->get()->method_from_id(method_id);
+
+              return m->handle(ctx->res.conn->input(), *ctx)
+                .then_wrapped([ctx, m, l = ctx->res.hist().auto_measure(), rs](
+                                ss::future<netbuf> fut) mutable {
+                    netbuf reply_buf;
+                    try {
+                        reply_buf = fut.get0();
+                        reply_buf.set_status(rpc::status::success);
+                    } catch (const rpc_internal_body_parsing_exception& e) {
+                        // We have to distinguish between exceptions thrown by
+                        // the service handler and the one caused by the
+                        // corrupted payload. Data corruption on the wire may
+                        // lead to the situation where connection is not longer
+                        // usable and so it have to be terminated.
+                        ctx->pr.set_exception(e);
+                        return ss::now();
+                    } catch (const ss::timed_out_error& e) {
+                        reply_buf.set_status(rpc::status::request_timeout);
+                    } catch (const ss::gate_closed_exception& e) {
+                        // gate_closed is typical during shutdown.  Treat
+                        // it like a timeout: request was not erroneous
+                        // but we will not give a rseponse.
+                        rpclog.debug(
+                          "Timing out request on gate_closed_exception "
+                          "(shutting down)");
+                        reply_buf.set_status(rpc::status::request_timeout);
+                    } catch (const ss::broken_condition_variable& e) {
+                        rpclog.debug(
+                          "Timing out request on broken_condition_variable "
+                          "(shutting down)");
+                        reply_buf.set_status(rpc::status::request_timeout);
+                    } catch (const ss::abort_requested_exception& e) {
+                        rpclog.debug(
+                          "Timing out request on abort_requested_exception "
+                          "(shutting down)");
+                        reply_buf.set_status(rpc::status::request_timeout);
+                    } catch (...) {
+                        rpclog.error(
+                          "Service handler threw an exception: {}",
+                          std::current_exception());
+                        rs.probe().service_error();
+                        reply_buf.set_status(rpc::status::server_error);
+                    }
+                    return send_reply(ctx, std::move(reply_buf))
+                      .finally([m, l = std::move(l)]() mutable {
+                          m->probes.latency_hist().record(std::move(l));
+                      });
+                });
+          })
+          .handle_exception([](const std::exception_ptr& e) {
+              rpclog.error("Error dispatching: {}", e);
           });
-    });
+
     return fut;
 }
 } // namespace rpc

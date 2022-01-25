@@ -240,7 +240,7 @@ std::vector<topic_table::delta> calculate_bootstrap_deltas(
         // partition with correct offset
         if (auto next = std::next(it); next != deltas.rend()) {
             if (
-              next->type == op_t::update_finished
+              (next->type == op_t::update_finished || next->type == op_t::add)
               && !has_local_replicas(self, next->new_assignment.replicas)) {
                 break;
             }
@@ -272,9 +272,13 @@ bool is_cross_core_update(model::node_id self, const topic_table_delta& delta) {
 }
 ss::future<>
 controller_backend::bootstrap_ntp(const model::ntp& ntp, deltas_t& deltas) {
-    vlog(clusterlog.trace, "bootstrapping {}", ntp);
     // find last delta that has to be applied
     auto bootstrap_deltas = calculate_bootstrap_deltas(_self, deltas);
+    vlog(
+      clusterlog.trace,
+      "bootstrapping {} with deltas {}",
+      ntp,
+      bootstrap_deltas);
 
     // if empty do nothing
     if (bootstrap_deltas.empty()) {
@@ -282,10 +286,16 @@ controller_backend::bootstrap_ntp(const model::ntp& ntp, deltas_t& deltas) {
     }
 
     auto& first_delta = bootstrap_deltas.front();
+    vlog(clusterlog.trace, "first bootstrap delta of {}: {}", ntp, first_delta);
     // if first operation is a cross core update, find initial revision on
     // current node and store it in bootstrap map
     using op_t = topic_table::delta::op_type;
     if (is_cross_core_update(_self, first_delta)) {
+        vlog(
+          clusterlog.trace,
+          "first bootstrap delta of {}, is a x-core update, looking for "
+          "initial revision",
+          ntp);
         // find opeartion that created current partition on this node
         auto it = std::find_if(
           deltas.rbegin(),
@@ -305,13 +315,38 @@ controller_backend::bootstrap_ntp(const model::ntp& ntp, deltas_t& deltas) {
           ntp);
         // if we found update finished operation it is preceeding operation that
         // created partition on current node
-        if (it->type == op_t::update_finished) {
+        vlog(
+          clusterlog.trace,
+          "first {} operation that doesn't contain current node - {}",
+          ntp,
+          *it);
+        /**
+         * At this point we may have two situations
+         * 1. replica was created on current node shard when partition was
+         *    created, with addition delta, in this case `it` contains this
+         *    addition delta.
+         *
+         * 2. replica was moved to this node with `update` delta type, in this
+         *    case `it` contains either `update_finished` delta from previous
+         *    operation or `add` delta from previous operation. In this case
+         *    operation does not contain current node and we need to execute
+         *    operation that is following the found one as this is the first
+         *    operation that created replica on current node
+         *
+         */
+        if (!contains_node(_self, it->new_assignment.replicas)) {
             vassert(
               it != deltas.rbegin(),
-              "update finished delta {} must have preceeding operation",
+              "operation {} must have following operation that created a "
+              "replica on current node",
               *it);
             it = std::prev(it);
         }
+        vlog(
+          clusterlog.trace,
+          "initial revision source delta - {} - {}",
+          ntp,
+          *it);
         // persist revision in order to create partition with correct revision
         _bootstrap_revisions[ntp] = model::revision_id(it->offset());
     }
@@ -335,12 +370,19 @@ ss::future<> controller_backend::fetch_deltas() {
 }
 
 void controller_backend::start_topics_reconciliation_loop() {
-    (void)ss::with_gate(_gate, [this] {
+    ssx::spawn_with_gate(_gate, [this] {
         return ss::do_until(
           [this] { return _as.local().abort_requested(); },
           [this] {
               return fetch_deltas()
                 .then([this] { return reconcile_topics(); })
+                .handle_exception_type(
+                  [](const ss::abort_requested_exception&) {
+                      // Shutting down: don't log this exception as an error
+                      vlog(
+                        clusterlog.debug,
+                        "Abort requested while reconciling topics");
+                  })
                 .handle_exception([](const std::exception_ptr& e) {
                     vlog(
                       clusterlog.error,
@@ -352,21 +394,22 @@ void controller_backend::start_topics_reconciliation_loop() {
 }
 
 void controller_backend::housekeeping() {
-    (void)ss::with_gate(_gate, [this] {
-        auto f = ss::now();
-        if (!_topic_deltas.empty() && _topics_sem.available_units() > 0) {
-            f = reconcile_topics();
-        }
-        return f.finally([this] {
-            if (!_gate.is_closed()) {
-                _housekeeping_timer.arm(_housekeeping_timer_interval);
+    ssx::background
+      = ssx::spawn_with_gate_then(_gate, [this] {
+            auto f = ss::now();
+            if (!_topic_deltas.empty() && _topics_sem.available_units() > 0) {
+                f = reconcile_topics();
             }
+            return f.finally([this] {
+                if (!_gate.is_closed()) {
+                    _housekeeping_timer.arm(_housekeeping_timer_interval);
+                }
+            });
+        }).handle_exception([](const std::exception_ptr& e) {
+            // we ignore the exception as controller backend will retry in next
+            // loop
+            vlog(clusterlog.warn, "error during reconciliation - {}", e);
         });
-    }).handle_exception([](const std::exception_ptr& e) {
-        // we ignore the exception as controller backend will retry in next
-        // loop
-        vlog(clusterlog.warn, "error during reconciliation - {}", e);
-    });
 }
 
 ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
@@ -443,10 +486,17 @@ ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
                 continue;
             }
             vlog(clusterlog.info, "partition operation {} finished", *it);
+        } catch (ss::gate_closed_exception const&) {
+            vlog(
+              clusterlog.debug,
+              "gate_closed-exception while executing partition operation: {}",
+              *it);
+            stop = true;
+            continue;
         } catch (...) {
             vlog(
               clusterlog.error,
-              "exception while executing partiton operation: {} - {}",
+              "exception while executing partition operation: {} - {}",
               *it,
               std::current_exception());
             stop = true;
@@ -769,6 +819,9 @@ ss::future<std::error_code> controller_backend::process_partition_update(
               previous_shard);
             co_await raft::details::move_persistent_state(
               requested.group, *previous_shard, ss::this_shard_id(), _storage);
+            co_await raft::details::move_persistent_state(
+              requested.group, *previous_shard, ss::this_shard_id(), _storage);
+
             auto ec = co_await create_partition(
               ntp,
               requested.group,

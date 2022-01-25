@@ -8,7 +8,7 @@
 # by the Apache License, Version 2.0
 
 from ducktape.utils.util import wait_until
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 import ducktape.errors
 
 from rptest.tests.redpanda_test import RedpandaTest
@@ -16,7 +16,6 @@ from rptest.clients.rpk import RpkTool
 from rptest.services.rpk_consumer import RpkConsumer
 
 import time
-import threading
 import random
 
 

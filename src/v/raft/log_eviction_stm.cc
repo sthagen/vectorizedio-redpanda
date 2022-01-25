@@ -34,7 +34,7 @@ ss::future<> log_eviction_stm::start() {
 ss::future<> log_eviction_stm::stop() { return _gate.close(); }
 
 void log_eviction_stm::monitor_log_eviction() {
-    (void)ss::with_gate(_gate, [this] {
+    ssx::spawn_with_gate(_gate, [this] {
         return ss::do_until(
           [this] { return _gate.is_closed(); },
           [this] {
@@ -87,10 +87,8 @@ log_eviction_stm::handle_deletion_notification(model::offset last_evicted) {
           }
 
           return f.then([this, last_evicted]() {
-              return _raft->write_snapshot(write_snapshot_cfg(
-                last_evicted,
-                iobuf(),
-                write_snapshot_cfg::should_prefix_truncate::no));
+              return _raft->write_snapshot(
+                write_snapshot_cfg(last_evicted, iobuf()));
           });
       });
 }

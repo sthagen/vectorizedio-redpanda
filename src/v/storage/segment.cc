@@ -11,6 +11,7 @@
 
 #include "compression/compression.h"
 #include "config/configuration.h"
+#include "ssx/future-util.h"
 #include "storage/compacted_index_writer.h"
 #include "storage/fs_utils.h"
 #include "storage/fwd.h"
@@ -213,7 +214,7 @@ void segment::release_appender_in_background(readers_cache* readers_cache) {
                ? std::exchange(_cache, std::nullopt)
                : std::nullopt;
     auto i = std::exchange(_compaction_index, std::nullopt);
-    (void)ss::with_gate(
+    ssx::spawn_with_gate(
       _gate,
       [this,
        readers_cache,
@@ -542,7 +543,8 @@ ss::future<ss::lw_shared_ptr<segment>> open_segment(
   std::filesystem::path path,
   debug_sanitize_files sanitize_fileops,
   std::optional<batch_cache_index> batch_cache,
-  size_t buf_size) {
+  size_t buf_size,
+  unsigned read_ahead) {
     auto const meta = segment_path::parse_segment_filename(
       path.filename().string());
     if (!meta || meta->version != record_version_type::v1) {
@@ -565,7 +567,7 @@ ss::future<ss::lw_shared_ptr<segment>> open_segment(
     auto f = co_await internal::make_reader_handle(path, sanitize_fileops);
     auto st = co_await f.stat();
     auto rdr = std::make_unique<segment_reader>(
-      path.string(), std::move(f), st.st_size, buf_size);
+      path.string(), std::move(f), st.st_size, buf_size, read_ahead);
 
     auto index_name = std::filesystem::path(rdr->filename().c_str())
                         .replace_extension("base_index")
@@ -615,13 +617,18 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
   ss::io_priority_class pc,
   record_version_type version,
   size_t buf_size,
+  unsigned read_ahead,
   debug_sanitize_files sanitize_fileops,
   std::optional<batch_cache_index> batch_cache) {
     auto path = segment_path::make_segment_path(
       ntpc, base_offset, term, version);
     vlog(stlog.info, "Creating new segment {}", path.string());
     return open_segment(
-             path, sanitize_fileops, std::move(batch_cache), buf_size)
+             path,
+             sanitize_fileops,
+             std::move(batch_cache),
+             buf_size,
+             read_ahead)
       .then([path, &ntpc, sanitize_fileops, pc](
               ss::lw_shared_ptr<segment> seg) {
           return with_segment(
@@ -632,7 +639,9 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
                          path,
                          sanitize_fileops,
                          internal::number_of_chunks_from_config(ntpc),
-                         pc)
+                         pc,
+                         config::shard_local_cfg()
+                           .segment_fallocation_step.bind())
                   .then([seg](segment_appender_ptr a) {
                       return ss::make_ready_future<ss::lw_shared_ptr<segment>>(
                         ss::make_lw_shared<segment>(

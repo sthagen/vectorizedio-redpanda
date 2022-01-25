@@ -135,6 +135,86 @@
                     ]
                 }
             ]
+        },
+        {
+            "path": "/v1/partitions/{namespace}/{topic}/{partition}/transactions",
+            "operations": [
+                {
+                    "method": "GET",
+                    "summary": "Get all transactions for partition",
+                    "type": "transactions",
+                    "nickname": "get_transactions",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "namespace",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "topic",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "partition",
+                            "in": "path",
+                            "required": true,
+                            "type": "integer"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "path": "/v1/partitions/{namespace}/{topic}/{partition}/mark_transaction_expired",
+            "operations": [
+                {
+                    "method": "POST",
+                    "summary": "Mark transaction expired for partition",
+                    "type": "void",
+                    "nickname": "mark_transaction_expired",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "namespace",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "topic",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "partition",
+                            "in": "path",
+                            "required": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "id",
+                            "in": "query",
+                            "required": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "epoch",
+                            "in": "query",
+                            "required": true,
+                            "type": "integer"
+                        }
+                    ]
+                }
+            ]
         }
     ],
     "models": {
@@ -157,6 +237,10 @@
                 "core": {
                     "type": "long",
                     "description": "core"
+                },
+                "materialized": {
+                    "type": "boolean",
+                    "description": "materialized"
                 }
             }
         },
@@ -208,6 +292,66 @@
                         "type": "assignment"
                     },
                     "description": "Replica assignments"
+                }
+            }
+        },
+        "producer_identity": {
+            "id": "producer_identity",
+            "description": "Producer identity",
+            "properties": {
+                "id": {
+                    "type": "long",
+                    "description": "Producer id"
+                },
+                "epoch": {
+                    "type": "long",
+                    "description": "Producer epoch"
+                }
+            }
+        },
+        "transaction": {
+            "id": "transaction",
+            "description": "Transaction details",
+            "properties": {
+                "producer_id": {
+                    "type": "producer_identity",
+                    "description": "Producer id"
+                },
+                "lso_bound": {
+                    "type": "long",
+                    "description": "First offset"
+                },
+                "staleness_ms": {
+                    "type": "long",
+                    "description": "How long transaction does not make progress"
+                },
+                "timeout_ms": {
+                    "type": "long",
+                    "description": "Transaction timeout"
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Transaction status"
+                }
+            }
+        },
+        "transactions": {
+            "id": "transactions",
+            "description": "Transactions for current partition",
+            "properties": {
+                "active_transactions": {
+                    "type": "array",
+                    "items": {
+                        "type": "transaction"
+                    },
+                    "description": "Active transactions"
+                },
+                "expired_transactions": {
+                    "type": "array",
+                    "items": {
+                        "type": "transaction"
+                    },
+                    "description": "Expired transactions"
                 }
             }
         }

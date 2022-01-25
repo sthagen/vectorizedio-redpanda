@@ -13,6 +13,7 @@
 #include "cloud_storage/cache_service.h"
 #include "cloud_storage/logger.h"
 #include "cloud_storage/types.h"
+#include "config/configuration.h"
 #include "model/fundamental.h"
 #include "resource_mgmt/io_priority.h"
 #include "storage/parser.h"
@@ -21,6 +22,7 @@
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/circular_buffer.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/core/io_priority_class.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/lowres_clock.hh>
@@ -31,9 +33,13 @@
 #include <seastar/util/defer.hh>
 #include <seastar/util/log.hh>
 
+#include <fmt/core.h>
+
 #include <exception>
 
 namespace cloud_storage {
+
+using namespace std::chrono_literals;
 
 static constexpr size_t max_consume_size = 128_KiB;
 
@@ -63,7 +69,7 @@ const char* download_exception::what() const noexcept {
     __builtin_unreachable();
 }
 
-inline void expiry_handler_impl(ss::promise<std::filesystem::path>& pr) {
+inline void expiry_handler_impl(ss::promise<ss::file>& pr) {
     pr.set_exception(ss::timed_out_error());
 }
 
@@ -72,154 +78,187 @@ remote_segment::remote_segment(
   cache& c,
   s3::bucket_name bucket,
   const manifest& m,
-  manifest::key path,
+  const manifest::key& name,
   retry_chain_node& parent)
   : _api(r)
   , _cache(c)
   , _bucket(std::move(bucket))
-  , _manifest(m)
-  , _path(std::move(path))
+  , _ntp(m.get_ntp())
   , _rtc(&parent)
   , _ctxlog(cst_log, _rtc, get_ntp().path())
   , _wait_list(expiry_handler_impl) {
+    auto meta = m.get(name);
+    vassert(meta, "Can't find segment metadata in manifest, name: {}", name);
+
+    _path = m.generate_segment_path(name, *meta);
+
+    auto parsed_name = parse_segment_name(name);
+    vassert(parsed_name, "Can't parse segment name, name: {}", name);
+    _term = parsed_name->term;
+
+    _base_rp_offset = meta->base_offset;
+    _max_rp_offset = meta->committed_offset;
+    _base_offset_delta = std::clamp(
+      meta->delta_offset, model::offset(0), model::offset::max());
+
     // run hydration loop in the background
     (void)run_hydrate_bg();
 }
 
-const model::ntp& remote_segment::get_ntp() const {
-    return _manifest.get_ntp();
-}
+const model::ntp& remote_segment::get_ntp() const { return _ntp; }
 
 const model::offset remote_segment::get_max_rp_offset() const {
-    const auto meta = _manifest.get(_path);
-    // The remote_segment is built based on manifest so we can
-    // expect the _path to be present in the manifest.
-    vassert(
-      meta, "Can't find segment metadata in manifest, segment path: {}", _path);
-    return meta->committed_offset;
+    return _max_rp_offset;
 }
 
 const model::offset remote_segment::get_base_offset_delta() const {
-    const auto meta = _manifest.get(_path);
-    vassert(
-      meta, "Can't find segment metadata in manifest, segment path: {}", _path);
-    return std::clamp(
-      meta->delta_offset, model::offset(0), model::offset::max());
+    return _base_offset_delta;
 }
 
 const model::offset remote_segment::get_base_rp_offset() const {
-    const auto meta = _manifest.get(_path);
-    vassert(
-      meta, "Can't find segment metadata in manifest, segment path: {}", _path);
-    return meta->base_offset;
+    return _base_rp_offset;
 }
 
 const model::offset remote_segment::get_base_kafka_offset() const {
-    const auto meta = _manifest.get(_path);
-    vassert(
-      meta, "Can't find segment metadata in manifest, segment path: {}", _path);
-    auto delta = std::clamp(
-      meta->delta_offset, model::offset(0), model::offset::max());
-    return meta->base_offset - delta;
+    return _base_rp_offset - _base_offset_delta;
 }
 
-const model::term_id remote_segment::get_term() const {
-    std::filesystem::path p = std::visit(
-      [](auto&& arg) { return std::filesystem::path(arg()); }, _path);
-    auto [_, term, success] = parse_segment_name(p);
-    vassert(success, "Can't parse segment name, name: {}", p);
-    return term;
-}
+const model::term_id remote_segment::get_term() const { return _term; }
 
 ss::future<> remote_segment::stop() {
     vlog(_ctxlog.debug, "remote segment stop");
     _bg_cvar.broken();
-    return _gate.close();
+    co_await _gate.close();
+    if (_data_file) {
+        co_await _data_file.close().handle_exception(
+          [this](std::exception_ptr err) {
+              vlog(
+                _ctxlog.error, "Error '{}' while closing the '{}'", err, _path);
+          });
+    }
 }
 
 ss::future<ss::input_stream<char>>
-remote_segment::data_stream(size_t pos, ss::io_priority_class) {
+remote_segment::data_stream(size_t pos, ss::io_priority_class io_priority) {
     vlog(_ctxlog.debug, "remote segment file input stream at {}", pos);
     ss::gate::holder g(_gate);
-    // Hydrate segment on disk
-    auto full_path = co_await hydrate();
-    // Create a file stream
-    auto opt = co_await _cache.get(full_path, pos);
-    if (opt) {
-        co_return std::move(opt->body);
-    }
-    throw remote_segment_exception(
-      fmt::format("Segment {} already evicted", full_path));
+    co_await hydrate();
+    ss::file_input_stream_options options{};
+    options.buffer_size = config::shard_local_cfg().storage_read_buffer_size();
+    options.read_ahead
+      = config::shard_local_cfg().storage_read_readahead_count();
+    options.io_priority_class = io_priority;
+    auto data_stream = ss::make_file_input_stream(
+      _data_file, pos, std::move(options));
+    co_return data_stream;
 }
 
 ss::future<> remote_segment::run_hydrate_bg() {
     ss::gate::holder guard(_gate);
-    auto full_path = _manifest.get_remote_segment_path(_path);
     try {
         while (!_gate.is_closed()) {
             co_await _bg_cvar.wait(
               [this] { return !_wait_list.empty() || _gate.is_closed(); });
             vlog(
-              _ctxlog.info,
-              "Start hydrating segment {}, {} consumers are awaiting",
-              full_path,
-              _wait_list.size());
-            auto status = co_await _cache.is_cached(full_path);
+              _ctxlog.debug,
+              "Segment {} requested, {} consumers are awaiting, data file is "
+              "{}",
+              _path,
+              _wait_list.size(),
+              _data_file ? "available" : "not available");
             std::exception_ptr err;
-            switch (status) {
-            case cache_element_status::in_progress:
-                vassert(
-                  false,
-                  "Hydration of segment {} is already in progress, {} waiters",
-                  full_path,
-                  _wait_list.size());
-            case cache_element_status::available:
-                vlog(
-                  _ctxlog.debug,
-                  "Hydrated segment {} is already available, {} waiters will "
-                  "be invoked",
-                  full_path,
-                  _wait_list.size());
-                break;
-            case cache_element_status::not_available: {
-                vlog(_ctxlog.info, "Hydrating segment {}", full_path);
-                auto callback =
-                  [this, full_path](
-                    uint64_t size_bytes,
-                    ss::input_stream<char> s) -> ss::future<uint64_t> {
-                    co_await _cache.put(full_path, s).finally([&s] {
-                        return s.close();
-                    });
-                    co_return size_bytes;
-                };
-                retry_chain_node local_rtc(
-                  cache_hydration_timeout, cache_hydration_backoff, &_rtc);
-                auto res = co_await _api.download_segment(
-                  _bucket, _path, _manifest, callback, local_rtc);
-                if (res != download_result::success) {
+            if (!_data_file) {
+                // We don't have a _data_file set so we have to check cache
+                // and retrieve the file out of it or hydrate.
+                // If _data_file is initialized we can use it safely since the
+                // cache can't delete it until we close it.
+                auto status = co_await _cache.is_cached(_path);
+                switch (status) {
+                case cache_element_status::in_progress:
+                    vassert(
+                      false,
+                      "Hydration of segment {} is already in progress, {} "
+                      "waiters",
+                      _path,
+                      _wait_list.size());
+                case cache_element_status::available:
                     vlog(
                       _ctxlog.debug,
-                      "Failed to hydrating a segment {}, {} waiter will be "
-                      "invoked",
-                      full_path,
+                      "Hydrated segment {} is already available, {} waiters "
+                      "will "
+                      "be invoked",
+                      _path,
                       _wait_list.size());
-                    err = std::make_exception_ptr(
-                      download_exception(res, full_path));
+                    break;
+                case cache_element_status::not_available: {
+                    vlog(_ctxlog.info, "Hydrating segment {}", _path);
+                    auto callback =
+                      [this](
+                        uint64_t size_bytes,
+                        ss::input_stream<char> s) -> ss::future<uint64_t> {
+                        co_await _cache.put(_path, s).finally(
+                          [&s] { return s.close(); });
+                        co_return size_bytes;
+                    };
+                    retry_chain_node local_rtc(
+                      cache_hydration_timeout, cache_hydration_backoff, &_rtc);
+                    auto res = co_await _api.download_segment(
+                      _bucket, _path, callback, local_rtc);
+                    if (res != download_result::success) {
+                        vlog(
+                          _ctxlog.debug,
+                          "Failed to hydrating a segment {}, {} waiter will be "
+                          "invoked",
+                          _path,
+                          _wait_list.size());
+                        err = std::make_exception_ptr(
+                          download_exception(res, _path));
+                    }
+                } break;
                 }
-            } break;
+                if (!err) {
+                    auto maybe_file = co_await _cache.get(_path);
+                    if (!maybe_file) {
+                        // We could got here because the cache check returned
+                        // 'cache_element_status::available' but right after
+                        // that the file was evicted from cache. It's also
+                        // possible (but very unlikely) that we got here after
+                        // successful hydration which was immediately followed
+                        // by eviction. In any case we should just re-hydrate
+                        // the segment. The 'wait' on cond-variable won't block
+                        // because the
+                        // '_wait_list' is not empty.
+                        vlog(
+                          _ctxlog.info,
+                          "Segment {} was deleted from cache and need to be "
+                          "re-hydrated, {} waiter are pending",
+                          _path,
+                          _wait_list.size());
+                        continue;
+                    }
+                    _data_file = maybe_file->body;
+                }
             }
+            // Invariant: here we should have a data file or error to be set.
+            // If the hydration failed we will have 'err' set to some value. The
+            // error needs to be propagated further. Otherwise we will always
+            // have _data_file set because if we don't we will retry the
+            // hydration earlier.
+            vassert(
+              _data_file || err,
+              "Segment hydration succeded but file isn't available");
             while (!_wait_list.empty()) {
                 auto& p = _wait_list.front();
                 if (err) {
                     p.set_exception(err);
                 } else {
-                    p.set_value(full_path);
+                    p.set_value(_data_file);
                 }
                 _wait_list.pop_front();
             }
         }
     } catch (const ss::broken_condition_variable&) {
-        vlog(_ctxlog.info, "Hydraton loop is stopped");
+        vlog(_ctxlog.debug, "Hydraton loop is stopped");
     } catch (...) {
         vlog(
           _ctxlog.error,
@@ -228,15 +267,14 @@ ss::future<> remote_segment::run_hydrate_bg() {
     }
 }
 
-ss::future<std::filesystem::path> remote_segment::hydrate() {
+ss::future<> remote_segment::hydrate() {
     return ss::with_gate(_gate, [this] {
-        auto full_path = _manifest.get_remote_segment_path(_path);
-        vlog(_ctxlog.debug, "segment {} hydration requested", full_path);
-        ss::promise<std::filesystem::path> p;
+        vlog(_ctxlog.debug, "segment {} hydration requested", _path);
+        ss::promise<ss::file> p;
         auto fut = p.get_future();
         _wait_list.push_back(std::move(p), ss::lowres_clock::time_point::max());
         _bg_cvar.signal();
-        return fut;
+        return fut.discard_result();
     });
 }
 
@@ -474,16 +512,17 @@ remote_segment_batch_reader::remote_segment_batch_reader(
   , _config(config)
   , _rtc(_seg->get_retry_chain_node())
   , _ctxlog(cst_log, _rtc, _seg->get_ntp().path())
-  , _initial_delta(_seg->get_base_offset_delta())
   , _cur_rp_offset(_seg->get_base_rp_offset())
-  , _cur_delta(_initial_delta) {}
+  , _cur_delta(_seg->get_base_offset_delta()) {}
 
 ss::future<result<ss::circular_buffer<model::record_batch>>>
 remote_segment_batch_reader::read_some(
   model::timeout_clock::time_point deadline,
   storage::offset_translator_state& ot_state) {
+    ss::gate::holder h(_gate);
     if (_ringbuf.empty()) {
         if (!_parser) {
+            // remote_segment_batch_reader shouldn't be used concurrently
             _parser = co_await init_parser();
         }
 
@@ -499,10 +538,23 @@ remote_segment_batch_reader::read_some(
 
         _cur_ot_state = ot_state;
         auto deferred = ss::defer([this] { _cur_ot_state = std::nullopt; });
-        auto bytes_consumed = co_await _parser->consume();
-        if (!bytes_consumed) {
-            co_return bytes_consumed.error();
+        auto new_bytes_consumed = co_await _parser->consume();
+        if (!new_bytes_consumed) {
+            co_return new_bytes_consumed.error();
         }
+        if (
+          _bytes_consumed != 0 && _bytes_consumed == new_bytes_consumed.value()
+          && !_config.over_budget) {
+            throw std::runtime_error(fmt_with_ctx(
+              fmt::format,
+              "segment_reader is stuck, segment ntp: {}, _cur_rp_offset: {}, "
+              "_bytes_consumed: "
+              "{}",
+              _seg->get_ntp(),
+              _cur_rp_offset,
+              _bytes_consumed));
+        }
+        _bytes_consumed = new_bytes_consumed.value();
     }
     _total_size = 0;
     co_return std::move(_ringbuf);
@@ -515,16 +567,13 @@ remote_segment_batch_reader::init_parser() {
       0, priority_manager::local().shadow_indexing_priority());
     auto parser = std::make_unique<storage::continuous_batch_parser>(
       std::make_unique<remote_segment_batch_consumer>(
-        _config,
-        *this,
-        _seg->get_term(),
-        _seg->get_ntp(),
-        *_seg->get_retry_chain_node()),
+        _config, *this, _seg->get_term(), _seg->get_ntp(), _rtc),
       std::move(stream));
     co_return parser;
 }
 
 size_t remote_segment_batch_reader::produce(model::record_batch batch) {
+    ss::gate::holder h(_gate);
     vlog(_ctxlog.debug, "remote_segment_batch_reader::produce");
     _total_size += batch.size_bytes();
     _ringbuf.push_back(std::move(batch));
@@ -532,13 +581,18 @@ size_t remote_segment_batch_reader::produce(model::record_batch batch) {
 }
 
 ss::future<> remote_segment_batch_reader::stop() {
-    vlog(_ctxlog.debug, "remote_segment_batch_reader::close");
+    vlog(_ctxlog.debug, "remote_segment_batch_reader::stop");
+    co_await _gate.close();
     if (_parser) {
-        vlog(
-          _ctxlog.debug, "remote_segment_batch_reader::close - parser-close");
-        return _parser->close();
+        vlog(_ctxlog.debug, "remote_segment_batch_reader::stop - parser-close");
+        co_await _parser->close();
+        _parser.reset();
     }
-    return ss::now();
+    _stopped = true;
+}
+
+remote_segment_batch_reader::~remote_segment_batch_reader() noexcept {
+    vassert(_stopped, "Destroyed without stopping");
 }
 
 } // namespace cloud_storage

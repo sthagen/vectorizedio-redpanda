@@ -54,7 +54,12 @@ ntp_archiver::ntp_archiver(
   , _rev(ntp.get_revision())
   , _remote(remote)
   , _partition(std::move(part))
-  , _policy(_ntp, _svc_probe, std::ref(_probe), conf.time_limit)
+  , _policy(
+      _ntp,
+      _svc_probe,
+      std::ref(_probe),
+      conf.time_limit,
+      conf.upload_io_priority)
   , _bucket(conf.bucket_name)
   , _manifest(_ntp, _rev)
   , _gate()
@@ -62,7 +67,13 @@ ntp_archiver::ntp_archiver(
   , _segment_upload_timeout(conf.segment_upload_timeout)
   , _manifest_upload_timeout(conf.manifest_upload_timeout)
   , _io_priority(conf.upload_io_priority) {
-    vlog(archival_log.trace, "Create ntp_archiver {}", _ntp.path());
+    vassert(
+      _partition && _partition->is_leader(),
+      "must be the leader to launch ntp_archiver {}",
+      _ntp);
+    _start_term = _partition->term();
+    vlog(
+      archival_log.debug, "created ntp_archiver {} in term", _ntp, _start_term);
 }
 
 ss::future<> ntp_archiver::stop() {
@@ -91,7 +102,26 @@ ntp_archiver::download_manifest(retry_chain_node& parent) {
     auto path = _manifest.get_manifest_path();
     auto key = cloud_storage::remote_manifest_path(
       std::filesystem::path(std::move(path)));
-    co_return co_await _remote.download_manifest(_bucket, key, _manifest, fib);
+    auto result = co_await _remote.download_manifest(
+      _bucket, key, _manifest, fib);
+
+    // It's OK if the manifest is not found for a newly created topic. The
+    // condition in if statement is not guaranteed to cover all cases for new
+    // topics, so false positives may happen for this warn.
+    if (
+      result == cloud_storage::download_result::notfound
+      && _partition->high_watermark() != model::offset(0)
+      && _partition->term() != model::term_id(1)) {
+        vlog(
+          ctxlog.warn,
+          "Manifest for {} not found in S3, partition high_watermark: {}, "
+          "partition term: {}",
+          _ntp,
+          _partition->high_watermark(),
+          _partition->term());
+    }
+
+    co_return result;
 }
 
 ss::future<cloud_storage::upload_result>
@@ -112,7 +142,11 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
     gate_guard guard{_gate};
     retry_chain_node fib(_segment_upload_timeout, _initial_backoff, &parent);
     retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
-    vlog(ctxlog.debug, "Uploading segment {}", candidate);
+
+    auto path = cloud_storage::generate_remote_segment_path(
+      _ntp, _rev, candidate.exposed_name, _start_term);
+
+    vlog(ctxlog.debug, "Uploading segment {} to {}", candidate, path);
 
     auto reset_func = [this, candidate] {
         auto stream = candidate.source->reader().data_stream(
@@ -120,12 +154,7 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
         return stream;
     };
     co_return co_await _remote.upload_segment(
-      _bucket,
-      candidate.exposed_name,
-      candidate.content_length,
-      reset_func,
-      _manifest,
-      fib);
+      _bucket, path, candidate.content_length, reset_func, fib);
 }
 
 ss::future<ntp_archiver::scheduled_upload> ntp_archiver::schedule_single_upload(
@@ -232,6 +261,8 @@ ss::future<ntp_archiver::scheduled_upload> ntp_archiver::schedule_single_upload(
         .base_timestamp = upload.base_timestamp,
         .max_timestamp = upload.max_timestamp,
         .delta_offset = delta,
+        .ntp_revision = _partition->get_revision_id(),
+        .archiver_term = _start_term,
       },
       .name = upload.exposed_name, .delta = offset - base,
       .stop = ss::stop_iteration::no,
@@ -347,13 +378,18 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::wait_all_scheduled_uploads(
               _manifest.get_manifest_path());
         }
 
-        // TODO: error handling
         if (_partition->archival_meta_stm()) {
             retry_chain_node rc_node(
               _manifest_upload_timeout, _initial_backoff, &parent);
-            if (!co_await _partition->archival_meta_stm()->add_segments(
-                  _manifest, rc_node)) {
-                vlog(ctxlog.warn, "archival metadata STM update failed");
+            auto error = co_await _partition->archival_meta_stm()->add_segments(
+              _manifest, rc_node);
+            if (
+              error != cluster::errc::success
+              && error != cluster::errc::not_leader) {
+                vlog(
+                  ctxlog.warn,
+                  "archival metadata STM update failed: {}",
+                  error);
             }
         }
 

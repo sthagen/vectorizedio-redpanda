@@ -48,6 +48,7 @@ enum class tx_errc {
     partition_not_found,
     stm_not_found,
     partition_not_exists,
+    pid_not_found,
     // when a request times out a client should not do any assumptions about its
     // effect. the request may time out before reaching the server, the request
     // may be successuly processed or may fail and the reply times out
@@ -86,6 +87,8 @@ struct tx_errc_category final : public std::error_category {
             return "Stm not found";
         case tx_errc::partition_not_exists:
             return "Partition not exists";
+        case tx_errc::pid_not_found:
+            return "Pid not found";
         case tx_errc::timeout:
             return "Timeout";
         case tx_errc::conflict:
@@ -767,6 +770,27 @@ struct config_status_reply {
     errc error;
 };
 
+struct create_non_replicable_topics_request {
+    static constexpr int8_t current_version = 1;
+    std::vector<non_replicable_topic> topics;
+    model::timeout_clock::duration timeout;
+};
+
+struct create_non_replicable_topics_reply {
+    static constexpr int8_t current_version = 1;
+    std::vector<topic_result> results;
+};
+
+struct config_update_request final {
+    std::vector<std::pair<ss::sstring, ss::sstring>> upsert;
+    std::vector<ss::sstring> remove;
+};
+
+struct config_update_reply {
+    errc error;
+    cluster::config_version latest_version{config_version_unset};
+};
+
 } // namespace cluster
 namespace std {
 template<>
@@ -814,6 +838,18 @@ struct adl<cluster::create_topics_request> {
     void to(iobuf&, cluster::create_topics_request&&);
     cluster::create_topics_request from(iobuf);
     cluster::create_topics_request from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::create_non_replicable_topics_request> {
+    void to(iobuf&, cluster::create_non_replicable_topics_request&&);
+    cluster::create_non_replicable_topics_request from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::create_non_replicable_topics_reply> {
+    void to(iobuf&, cluster::create_non_replicable_topics_reply&&);
+    cluster::create_non_replicable_topics_reply from(iobuf_parser&);
 };
 
 template<>

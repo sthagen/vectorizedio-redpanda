@@ -11,6 +11,7 @@ package resources
 
 import (
 	"context"
+	"crypto/md5" // nolint:gosec // this is not encrypting secure info
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -60,10 +61,14 @@ const (
 	logSegmentSize = 512 * oneMB
 
 	saslMechanism = "SCRAM-SHA-256"
+
+	configKey = "redpanda.yaml"
 )
 
-var errKeyDoesNotExistInSecretData = errors.New("cannot find key in secret data")
-var errCloudStorageSecretKeyCannotBeEmpty = errors.New("cloud storage SecretKey string cannot be empty")
+var (
+	errKeyDoesNotExistInSecretData        = errors.New("cannot find key in secret data")
+	errCloudStorageSecretKeyCannotBeEmpty = errors.New("cloud storage SecretKey string cannot be empty")
+)
 
 var _ Resource = &ConfigMapResource{}
 
@@ -116,7 +121,8 @@ func (r *ConfigMapResource) Ensure(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error while fetching ConfigMap resource: %w", err)
 	}
-	return Update(ctx, &cm, obj, r.Client, r.logger)
+	_, err = Update(ctx, &cm, obj, r.Client, r.logger)
+	return err
 }
 
 // obj returns resource managed client.Object
@@ -142,7 +148,7 @@ func (r *ConfigMapResource) obj(ctx context.Context) (k8sclient.Object, error) {
 			APIVersion: "v1",
 		},
 		Data: map[string]string{
-			"redpanda.yaml": string(cfgBytes),
+			configKey: string(cfgBytes),
 		},
 	}
 
@@ -177,7 +183,7 @@ func (r *ConfigMapResource) createConfiguration(
 		cr.KafkaApi = append(cr.KafkaApi, config.NamedSocketAddress{
 			SocketAddress: config.SocketAddress{
 				Address: "0.0.0.0",
-				Port:    calculateExternalPort(internalListener.Port),
+				Port:    calculateExternalPort(internalListener.Port, r.pandaCluster.ExternalListener().Port),
 			},
 			Name: ExternalListenerName,
 		})
@@ -282,6 +288,9 @@ func (r *ConfigMapResource) createConfiguration(
 	cr.Other["auto_create_topics_enabled"] = r.pandaCluster.Spec.Configuration.AutoCreateTopics
 	cr.Other["enable_idempotence"] = true
 	cr.Other["enable_transactions"] = true
+	if featuregates.ShadowIndex(r.pandaCluster.Spec.Version) {
+		cr.Other["cloud_storage_segment_max_upload_interval_sec"] = 60 * 30 // 60s * 30 = 30 minutes
+	}
 
 	segmentSize := logSegmentSize
 	cr.LogSegmentSize = &segmentSize
@@ -312,7 +321,8 @@ func (r *ConfigMapResource) createConfiguration(
 					Port:    sr.Port,
 				},
 				Name: SchemaRegistryPortName,
-			}}
+			},
+		}
 	}
 	r.prepareSchemaRegistryTLS(cfgRpk)
 	err = r.prepareSchemaRegistryClient(ctx, cfgRpk)
@@ -358,9 +368,12 @@ func buildInType(value string) bool {
 }
 
 // calculateExternalPort can calculate external Kafka API port based on the internal Kafka API port
-func calculateExternalPort(kafkaInternalPort int) int {
+func calculateExternalPort(kafkaInternalPort, specifiedExternalPort int) int {
 	if kafkaInternalPort < 0 || kafkaInternalPort > 65535 {
 		return 0
+	}
+	if specifiedExternalPort != 0 {
+		return specifiedExternalPort
 	}
 	return kafkaInternalPort + 1
 }
@@ -422,14 +435,15 @@ func (r *ConfigMapResource) preparePandaproxy(cfgRpk *config.Config) {
 				Port:    internal.Port,
 			},
 			Name: PandaproxyPortInternalName,
-		}}
+		},
+	}
 
 	if r.pandaCluster.PandaproxyAPIExternal() != nil {
 		cfgRpk.Pandaproxy.PandaproxyAPI = append(cfgRpk.Pandaproxy.PandaproxyAPI,
 			config.NamedSocketAddress{
 				SocketAddress: config.SocketAddress{
 					Address: "0.0.0.0",
-					Port:    calculateExternalPort(internal.Port),
+					Port:    calculateExternalPort(internal.Port, 0),
 				},
 				Name: PandaproxyPortExternalName,
 			})
@@ -615,4 +629,17 @@ func generatePassword(length int) (string, error) {
 	}
 
 	return string(bytes), nil
+}
+
+// GetConfigHash returns md5 hash of configmap contents so two configmaps can be
+// compared
+func (r *ConfigMapResource) GetConfigHash(ctx context.Context) (string, error) {
+	obj, err := r.obj(ctx)
+	if err != nil {
+		return "", err
+	}
+	configMap := obj.(*corev1.ConfigMap)
+	configString := configMap.Data[configKey]
+	md5Hash := md5.Sum([]byte(configString)) // nolint:gosec // this is not encrypting secure info
+	return fmt.Sprintf("%x", md5Hash), nil
 }

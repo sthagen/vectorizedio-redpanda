@@ -59,69 +59,6 @@ make_partition_response_error(model::partition_id p_id, error_code error) {
     };
 }
 
-int32_t
-control_record_size(int64_t ts_delta, int32_t offset_delta, const iobuf& key) {
-    static constexpr size_t zero_vint_size = vint::vint_size(0);
-    return sizeof(model::record_attributes::type) // attributes
-           + vint::vint_size(ts_delta)            // timestamp delta
-           + vint::vint_size(offset_delta)        // offset_delta
-           + vint::vint_size(key.size_bytes())    // key size
-           + key.size_bytes()                     // key payload
-           + zero_vint_size                       // value size
-           + zero_vint_size;                      // headers size
-}
-
-iobuf make_control_record_batch_key() {
-    iobuf b;
-    response_writer w(b);
-    /**
-     * control record batch schema:
-     *   [version, type]
-     */
-    w.write(model::current_control_record_version);
-    w.write(model::control_record_type::unknown);
-    return b;
-}
-
-/**
- * here we make sure that our internal control batches are correctly adapted
- * for Kafka clients
- */
-model::record_batch adapt_fetch_batch(model::record_batch&& batch) {
-    // pass through data batches
-    if (likely(batch.header().type == model::record_batch_type::raft_data)) {
-        return std::move(batch);
-    }
-    /**
-     * We set control type flag and remove payload from internal batch types
-     */
-    batch.header().attrs.set_control_type();
-    iobuf records;
-
-    batch.for_each_record([&records](model::record r) {
-        auto key = make_control_record_batch_key();
-        auto key_size = key.size_bytes();
-        auto r_size = control_record_size(
-          r.timestamp_delta(), r.offset_delta(), key);
-        model::append_record_to_buffer(
-          records,
-          model::record(
-            r_size,
-            r.attributes(),
-            r.timestamp_delta(),
-            r.offset_delta(),
-            key_size,
-            std::move(key),
-            0,
-            iobuf{},
-            std::vector<model::record_header>{}));
-    });
-    auto header = batch.header();
-    storage::internal::reset_size_checksum_metadata(header, records);
-    return model::record_batch(
-      header, std::move(records), model::record_batch::tag_ctor_ng{});
-}
-
 /**
  * Low-level handler for reading from an ntp. Runs on ntp's home core.
  */
@@ -152,16 +89,29 @@ static ss::future<read_result> read_from_partition(
 
     reader_config.strict_max_bytes = config.strict_max_bytes;
     auto rdr = co_await part.make_reader(reader_config);
-    auto result = co_await std::move(rdr.reader)
-                    .consume(
-                      kafka_batch_serializer(),
-                      deadline ? *deadline : model::no_timeout);
-    auto data = std::make_unique<iobuf>(std::move(result.data));
+    std::exception_ptr e;
+    std::unique_ptr<iobuf> data;
     std::vector<cluster::rm_stm::tx_range> aborted_transactions;
-    part.probe().add_records_fetched(result.record_count);
-    if (result.record_count > 0) {
-        aborted_transactions = co_await part.aborted_transactions(
-          result.base_offset, result.last_offset, std::move(rdr.ot_state));
+    try {
+        auto result = co_await rdr.reader.consume(
+          kafka_batch_serializer(), deadline ? *deadline : model::no_timeout);
+        data = std::make_unique<iobuf>(std::move(result.data));
+        part.probe().add_records_fetched(result.record_count);
+        if (result.record_count > 0) {
+            // Reader should live at least until this point to hold on to the
+            // segment locks so that prefix truncation doesn't happen.
+            aborted_transactions = co_await part.aborted_transactions(
+              result.base_offset, result.last_offset, std::move(rdr.ot_state));
+        }
+
+    } catch (...) {
+        e = std::current_exception();
+    }
+
+    co_await std::move(rdr.reader).release()->finally();
+
+    if (e) {
+        std::rethrow_exception(e);
     }
 
     if (foreign_read) {
@@ -172,6 +122,7 @@ static ss::future<read_result> read_from_partition(
           lso,
           std::move(aborted_transactions));
     }
+
     co_return read_result(
       std::move(data), start_o, hw, lso, std::move(aborted_transactions));
 }
@@ -331,7 +282,28 @@ static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
   std::vector<ntp_fetch_config> ntp_fetch_configs,
   bool foreign_read,
   std::optional<model::timeout_clock::time_point> deadline) {
-    return ssx::parallel_transform(
+    size_t total_max_bytes = 0;
+    for (const auto& c : ntp_fetch_configs) {
+        total_max_bytes += c.cfg.max_bytes;
+    }
+
+    auto max_bytes_per_fetch
+      = config::shard_local_cfg().kafka_max_bytes_per_fetch();
+    if (total_max_bytes > max_bytes_per_fetch) {
+        auto per_partition = max_bytes_per_fetch / ntp_fetch_configs.size();
+        vlog(
+          klog.info,
+          "Fetch requested very large response ({}), clamping each partition's "
+          "max_bytes to {} bytes",
+          total_max_bytes,
+          per_partition);
+
+        for (auto& c : ntp_fetch_configs) {
+            c.cfg.max_bytes = per_partition;
+        }
+    }
+
+    auto results = co_await ssx::parallel_transform(
       std::move(ntp_fetch_configs),
       [&cluster_pm, &coproc_pm, deadline, foreign_read](
         const ntp_fetch_config& ntp_cfg) {
@@ -343,6 +315,17 @@ static ss::future<std::vector<read_result>> fetch_ntps_in_parallel(
                 return res;
             });
       });
+
+    size_t total_size = 0;
+    for (const auto& r : results) {
+        total_size += r.data_size_bytes();
+    }
+    vlog(
+      klog.debug,
+      "fetch_ntps_in_parallel: for {} partitions returning {} total bytes",
+      results.size(),
+      total_size);
+    co_return results;
 }
 
 /**

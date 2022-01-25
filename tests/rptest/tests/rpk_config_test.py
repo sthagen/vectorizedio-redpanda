@@ -7,13 +7,10 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-from ducktape.utils.util import wait_until
-from ducktape.mark.resource import cluster
-
+from rptest.services.cluster import cluster
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.clients.rpk_remote import RpkRemoteTool
-from rptest.services.rpk_consumer import RpkConsumer
-from rptest.services.redpanda import RedpandaService
+from rptest.services.redpanda import RedpandaService, RESTART_LOG_ALLOW_LIST
 
 import yaml
 import random
@@ -177,7 +174,7 @@ tune_swappiness: false
 
                 assert actual_config['rpk'] == expected_config
 
-    @cluster(num_nodes=3)
+    @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_config_change_then_restart_node(self):
         for node in self.redpanda.nodes:
             rpk = RpkRemoteTool(self.redpanda, node)

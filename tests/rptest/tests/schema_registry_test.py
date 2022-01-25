@@ -9,14 +9,13 @@
 
 import http.client
 import json
-import logging
 import uuid
 import requests
 import time
 import random
 import os
 
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from ducktape.services.background_thread import BackgroundThreadService
 
 from rptest.clients.types import TopicSpec
@@ -217,6 +216,13 @@ class SchemaRegistryTest(RedpandaTest):
         return self._request("GET",
                              f"subjects/{subject}/versions/{version}",
                              headers=headers)
+
+    def _get_subjects_subject_versions_version_referenced_by(
+            self, subject, version, headers=HTTP_GET_HEADERS):
+        return self._request(
+            "GET",
+            f"subjects/{subject}/versions/{version}/referencedBy",
+            headers=headers)
 
     def _get_subjects_subject_versions(self,
                                        subject,
@@ -918,7 +924,7 @@ class SchemaRegistryTest(RedpandaTest):
 
         # Expose into StressTest
         logger = self.logger
-        python = "python3.8"
+        python = "python3"
         script_name = "schema_registry_test_helper.py"
 
         dir = os.path.dirname(os.path.realpath(__file__))
@@ -1000,3 +1006,9 @@ class SchemaRegistryTest(RedpandaTest):
         self.logger.info(result_raw)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.text.strip() == simple_proto_def.strip()
+
+        result_raw = self._get_subjects_subject_versions_version_referenced_by(
+            "simple", 1)
+        self.logger.info(result_raw)
+        assert result_raw.status_code == requests.codes.ok
+        assert result_raw.json() == [2]

@@ -14,6 +14,7 @@
 #include "model/fundamental.h"
 #include "model/timestamp.h"
 #include "resource_mgmt/io_priority.h"
+#include "ssx/future-util.h"
 #include "storage/batch_cache.h"
 #include "storage/compacted_index_writer.h"
 #include "storage/fs_utils.h"
@@ -60,17 +61,18 @@ log_manager::log_manager(log_config config, kvstore& kvstore) noexcept
     _compaction_timer.rearm(_jitter());
 }
 void log_manager::trigger_housekeeping() {
-    (void)ss::with_gate(_open_gate, [this] {
-        auto next_housekeeping = _jitter();
-        return housekeeping().finally([this, next_housekeeping] {
-            // all of these *MUST* be in the finally
-            if (_open_gate.is_closed()) {
-                return;
-            }
+    ssx::background = ssx::spawn_with_gate_then(_open_gate, [this] {
+                          auto next_housekeeping = _jitter();
+                          return housekeeping().finally(
+                            [this, next_housekeeping] {
+                                // all of these *MUST* be in the finally
+                                if (_open_gate.is_closed()) {
+                                    return;
+                                }
 
-            _compaction_timer.rearm(next_housekeeping);
-        });
-    }).handle_exception([](std::exception_ptr e) {
+                                _compaction_timer.rearm(next_housekeeping);
+                            });
+                      }).handle_exception([](std::exception_ptr e) {
         vlog(stlog.info, "Error processing housekeeping(): {}", e);
     });
 }
@@ -144,22 +146,30 @@ ss::future<> log_manager::housekeeping() {
           }
       });
 }
+
+/**
+ *
+ * @param read_buf_size size of underlying ss::input_stream's buffer
+ */
 ss::future<ss::lw_shared_ptr<segment>> log_manager::make_log_segment(
   const ntp_config& ntp,
   model::offset base_offset,
   model::term_id term,
   ss::io_priority_class pc,
-  record_version_type version,
-  size_t buf_size) {
+  size_t read_buf_size,
+  unsigned read_ahead,
+  record_version_type version) {
     return ss::with_gate(
-      _open_gate, [this, &ntp, base_offset, term, pc, version, buf_size] {
+      _open_gate,
+      [this, &ntp, base_offset, term, pc, version, read_buf_size, read_ahead] {
           return make_segment(
             ntp,
             base_offset,
             term,
             pc,
             version,
-            buf_size,
+            read_buf_size,
+            read_ahead,
             _config.sanitize_fileops,
             create_cache(ntp.cache_enabled()));
       });
@@ -220,7 +230,9 @@ ss::future<log> log_manager::do_manage(ntp_config cfg) {
                  _config.sanitize_fileops,
                  cfg.is_compacted(),
                  [this, cache_enabled] { return create_cache(cache_enabled); },
-                 _abort_source)
+                 _abort_source,
+                 config::shard_local_cfg().storage_read_buffer_size(),
+                 config::shard_local_cfg().storage_read_readahead_count())
           .then([this, cfg = std::move(cfg)](segment_set segments) mutable {
               auto l = storage::make_disk_backed_log(
                 std::move(cfg), *this, std::move(segments), _kvstore);

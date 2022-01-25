@@ -55,7 +55,7 @@ public:
       cache& cache,
       s3::bucket_name bucket,
       const manifest& m,
-      manifest::key path,
+      const manifest::key& name,
       retry_chain_node& parent);
 
     remote_segment(const remote_segment&) = delete;
@@ -89,9 +89,7 @@ public:
     data_stream(size_t pos, ss::io_priority_class);
 
     /// Hydrate the segment
-    ///
-    /// Method returns key of the segment in cache.
-    ss::future<std::filesystem::path> hydrate();
+    ss::future<> hydrate();
 
     retry_chain_node* get_retry_chain_node() { return &_rtc; }
 
@@ -105,19 +103,25 @@ private:
     remote& _api;
     cache& _cache;
     s3::bucket_name _bucket;
-    const manifest& _manifest;
-    manifest::key _path;
+    const model::ntp& _ntp;
+    remote_segment_path _path;
+
+    model::term_id _term;
+    model::offset _base_rp_offset;
+    model::offset _base_offset_delta;
+    model::offset _max_rp_offset;
+
     retry_chain_node _rtc;
     retry_chain_logger _ctxlog;
     /// Notifies the background hydration fiber
     ss::condition_variable _bg_cvar;
 
-    using expiry_handler
-      = std::function<void(ss::promise<std::filesystem::path>&)>;
+    using expiry_handler = std::function<void(ss::promise<ss::file>&)>;
 
     /// List of fibers that wait for the segment to be hydrated
-    ss::expiring_fifo<ss::promise<std::filesystem::path>, expiry_handler>
-      _wait_list;
+    ss::expiring_fifo<ss::promise<ss::file>, expiry_handler> _wait_list;
+
+    ss::file _data_file;
 };
 
 class remote_segment_batch_consumer;
@@ -154,7 +158,7 @@ public:
     remote_segment_batch_reader(const remote_segment_batch_reader&) = delete;
     remote_segment_batch_reader& operator=(const remote_segment_batch_reader&)
       = delete;
-    ~remote_segment_batch_reader() noexcept = default;
+    ~remote_segment_batch_reader() noexcept;
 
     ss::future<result<ss::circular_buffer<model::record_batch>>> read_some(
       model::timeout_clock::time_point, storage::offset_translator_state&);
@@ -184,17 +188,19 @@ private:
 
     ss::lw_shared_ptr<remote_segment> _seg;
     storage::log_reader_config _config;
-    std::unique_ptr<storage::continuous_batch_parser> _parser;
     ss::circular_buffer<model::record_batch> _ringbuf;
     std::optional<std::reference_wrapper<storage::offset_translator_state>>
       _cur_ot_state;
     size_t _total_size{0};
     retry_chain_node _rtc;
     retry_chain_logger _ctxlog;
+    std::unique_ptr<storage::continuous_batch_parser> _parser;
     model::term_id _term;
-    model::offset _initial_delta;
     model::offset _cur_rp_offset;
     model::offset _cur_delta;
+    size_t _bytes_consumed{0};
+    ss::gate _gate;
+    bool _stopped{false};
 };
 
 } // namespace cloud_storage

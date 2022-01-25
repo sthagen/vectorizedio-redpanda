@@ -30,6 +30,7 @@ enum class errc : int16_t {
     configuration_change_in_progress,
     node_does_not_exists,
     leadership_transfer_in_progress,
+    transfer_to_current_leader,
     node_already_exists,
     invalid_configuration_update,
     not_voter,
@@ -72,6 +73,8 @@ struct errc_category final : public std::error_category {
             return "Node does not exists in configuration";
         case errc::leadership_transfer_in_progress:
             return "Node is currently transferring leadership";
+        case errc::transfer_to_current_leader:
+            return "Target for leadership transfer is current leader";
         case errc::node_already_exists:
             return "Node does already exists in configuration";
         case errc::invalid_configuration_update:
@@ -86,7 +89,7 @@ struct errc_category final : public std::error_category {
         case errc::replicate_batcher_cache_error:
             return "unable to append batch to replicate batcher cache";
         case errc::group_not_exists:
-            return "raft group does not exists on target broker";
+            return "raft group does not exist on target broker";
         case errc::replicate_first_stage_exception:
             return "unable to finish replicate since exception was thrown in "
                    "first phase";

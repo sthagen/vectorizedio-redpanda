@@ -9,10 +9,9 @@
 
 import http.client
 import json
-import logging
 import uuid
 import requests
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from ducktape.mark import ignore
 from ducktape.utils.util import wait_until
 
@@ -661,6 +660,7 @@ class PandaProxyTest(RedpandaTest):
             })
         assert sc_res.status_code == requests.codes.no_content
 
+    @ignore  # https://github.com/vectorizedio/redpanda/issues/3454
     @cluster(num_nodes=3)
     def test_consumer_group_binary_v2(self):
         """

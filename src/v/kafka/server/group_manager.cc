@@ -195,22 +195,26 @@ void group_manager::handle_topic_delta(
         return;
     }
 
-    (void)ss::with_gate(_gate, [this, tps = std::move(tps)]() mutable {
-        return ss::do_with(
-          std::move(tps),
-          [this](const std::vector<model::topic_partition>& tps) {
-              return cleanup_removed_topic_partitions(tps);
+    ssx::background
+      = ssx::spawn_with_gate_then(
+          _gate,
+          [this, tps = std::move(tps)]() mutable {
+              return ss::do_with(
+                std::move(tps),
+                [this](const std::vector<model::topic_partition>& tps) {
+                    return cleanup_removed_topic_partitions(tps);
+                });
+          })
+          .handle_exception([](std::exception_ptr e) {
+              vlog(klog.warn, "Topic clean-up encountered error: {}", e);
           });
-    }).handle_exception([](std::exception_ptr e) {
-        vlog(klog.warn, "Topic clean-up encountered error: {}", e);
-    });
 }
 
 void group_manager::handle_leader_change(
   model::term_id term,
   ss::lw_shared_ptr<cluster::partition> part,
   std::optional<model::node_id> leader) {
-    (void)with_gate(_gate, [this, term, part = std::move(part), leader] {
+    ssx::spawn_with_gate(_gate, [this, term, part = std::move(part), leader] {
         if (auto it = _partitions.find(part->ntp()); it != _partitions.end()) {
             /*
              * In principle a race could occur by which a validate_group_status
@@ -229,9 +233,12 @@ void group_manager::handle_leader_change(
                 it->second->loading = true;
             }
             return ss::with_semaphore(
-              it->second->sem, 1, [this, term, p = it->second, leader] {
-                  return handle_partition_leader_change(term, p, leader);
-              });
+                     it->second->sem,
+                     1,
+                     [this, term, p = it->second, leader] {
+                         return handle_partition_leader_change(term, p, leader);
+                     })
+              .finally([p = it->second] {});
         }
         return ss::make_ready_future<>();
     });
@@ -296,8 +303,8 @@ ss::future<> group_manager::handle_partition_leader_change(
      * is rarely contended we take a writer lock only when leadership
      * changes (infrequent event)
      */
-    return p->catchup_lock.hold_write_lock().then(
-      [this, term, timeout, p](ss::basic_rwlock<>::holder unit) {
+    return p->catchup_lock.hold_write_lock()
+      .then([this, term, timeout, p](ss::basic_rwlock<>::holder unit) {
           return inject_noop(p->partition, timeout)
             .then([this, term, timeout, p] {
                 /*
@@ -334,7 +341,8 @@ ss::future<> group_manager::handle_partition_leader_change(
                   });
             })
             .finally([unit = std::move(unit)] {});
-      });
+      })
+      .finally([p] {});
 }
 
 /*

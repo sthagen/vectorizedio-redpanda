@@ -30,10 +30,10 @@ public:
     ss::future<canonical_schema> make_canonical_schema(unparsed_schema schema);
 
     ///\brief Check the schema parses with the native format
-    ss::future<void> validate_schema(const canonical_schema& schema);
+    ss::future<void> validate_schema(canonical_schema schema);
 
     ///\brief Construct a schema in the native format
-    ss::future<valid_schema> make_valid_schema(const canonical_schema& schema);
+    ss::future<valid_schema> make_valid_schema(canonical_schema schema);
 
     struct insert_result {
         schema_version version;
@@ -41,7 +41,7 @@ public:
         bool inserted;
     };
 
-    ss::future<insert_result> project_ids(const canonical_schema& schema);
+    ss::future<insert_result> project_ids(canonical_schema schema);
 
     ss::future<bool> upsert(
       seq_marker marker,
@@ -75,6 +75,10 @@ public:
 
     ///\brief Return whether there are any references to a subject version.
     ss::future<bool> is_referenced(const subject& sub, schema_version ver);
+
+    ///\brief Return the schema_ids that reference a subject version.
+    ss::future<std::vector<schema_id>>
+    referenced_by(const subject& sub, std::optional<schema_version> ver);
 
     ///\brief Delete a subject.
     ss::future<std::vector<schema_version>> delete_subject(

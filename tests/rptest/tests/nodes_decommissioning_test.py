@@ -8,28 +8,26 @@
 # by the Apache License, Version 2.0
 
 import random
-import time
 
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from ducktape.utils.util import wait_until
-from rptest.clients.kafka_cat import KafkaCat
-import requests
 
 from rptest.clients.types import TopicSpec
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.services.admin import Admin
-from rptest.services.honey_badger import HoneyBadger
-from kafka import KafkaProducer
-from kafka import KafkaConsumer
+from rptest.services.redpanda import CHAOS_LOG_ALLOW_LIST, RESTART_LOG_ALLOW_LIST
 
 
 class NodesDecommissioningTest(EndToEndTest):
     """
     Basic nodes decommissioning test.
     """
-    @cluster(num_nodes=6)
+    @cluster(
+        num_nodes=6,
+        # A decom can look like a restart in terms of logs from peers dropping
+        # connections with it
+        log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_decommissioning_working_node(self):
-
         self.start_redpanda(num_nodes=4)
         topics = []
         for partition_count in range(1, 5):
@@ -41,7 +39,7 @@ class NodesDecommissioningTest(EndToEndTest):
                 topics.append(spec)
 
         for spec in topics:
-            self.redpanda.create_topic(spec)
+            self.client().create_topic(spec)
             self.topic = spec.name
 
         self.start_producer(1)
@@ -65,7 +63,7 @@ class NodesDecommissioningTest(EndToEndTest):
 
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=45)
 
-    @cluster(num_nodes=6)
+    @cluster(num_nodes=6, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     def test_decommissioning_crashed_node(self):
 
         self.start_redpanda(num_nodes=4)
@@ -79,7 +77,7 @@ class NodesDecommissioningTest(EndToEndTest):
                 topics.append(spec)
 
         for spec in topics:
-            self.redpanda.create_topic(spec)
+            self.client().create_topic(spec)
             self.topic = spec.name
 
         self.start_producer(1)

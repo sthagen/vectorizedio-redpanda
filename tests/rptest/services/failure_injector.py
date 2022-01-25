@@ -7,7 +7,6 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import datetime
 import signal
 import threading
 from ducktape.utils.util import wait_until
@@ -28,7 +27,7 @@ class FailureSpec:
         self.node = node
 
     def __str__(self):
-        return f"type: {self.type}, length: {self.length} seconds, node: {self.node}"
+        return f"type: {self.type}, length: {self.length} seconds, node: {self.node.account.hostname}"
 
 
 class FailureInjector:

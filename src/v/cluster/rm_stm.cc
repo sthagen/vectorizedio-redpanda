@@ -247,9 +247,32 @@ ss::future<checked<model::term_id, tx_errc>> rm_stm::do_begin_tx(
 
     // checking / setting pid fencing
     auto fence_it = _log_state.fence_pid_epoch.find(pid.get_id());
-    if (
-      fence_it == _log_state.fence_pid_epoch.end()
-      || pid.get_epoch() > fence_it->second) {
+    auto is_new_pid = fence_it == _log_state.fence_pid_epoch.end();
+    if (is_new_pid || pid.get_epoch() > fence_it->second) {
+        if (!is_new_pid && pid.get_epoch() > fence_it->second) {
+            auto old_pid = model::producer_identity{
+              .id = pid.get_id(), .epoch = fence_it->second};
+            // there is a fence, it might be that tm_stm failed, forget about
+            // an ongoing transaction, assigned next pid for the same tx.id and
+            // started a new transaction without aborting the previous one.
+            //
+            // at the same time it's possible that it already aborted the old
+            // tx before starting this. do_abort_tx is idempotent so calling it
+            // just in case to proactivly abort the tx instead of waiting for
+            // the timeout
+            //
+            // moreover do_abort_tx is co-idempotent with do_commit_tx so if a
+            // tx was committed calling do_abort_tx will do nothing
+            auto ar = co_await do_abort_tx(
+              old_pid, std::nullopt, _sync_timeout);
+            if (ar == tx_errc::stale) {
+                co_return tx_errc::stale;
+            }
+            if (ar != tx_errc::none) {
+                co_return tx_errc::unknown_server_error;
+            }
+        }
+
         auto batch = make_fence_batch(
           rm_stm::fence_control_record_version, pid);
         auto reader = model::make_memory_record_batch_reader(std::move(batch));
@@ -434,6 +457,13 @@ ss::future<tx_errc> rm_stm::do_commit_tx(
     if (!co_await sync(timeout)) {
         co_return tx_errc::stale;
     }
+    // catching up with all previous end_tx operations (commit | abort)
+    // to avoid writing the same commit | abort marker twice
+    if (_mem_state.last_end_tx >= model::offset{0}) {
+        if (!co_await wait_no_throw(_mem_state.last_end_tx, timeout)) {
+            co_return tx_errc::stale;
+        }
+    }
 
     auto preparing_it = _mem_state.preparing.find(pid);
     auto prepare_it = _log_state.prepared.find(pid);
@@ -520,8 +550,10 @@ ss::future<tx_errc> rm_stm::do_commit_tx(
           pid);
         co_return tx_errc::unknown_server_error;
     }
-    if (!co_await wait_no_throw(
-          model::offset(r.value().last_offset()), timeout)) {
+    if (_mem_state.last_end_tx < r.value().last_offset) {
+        _mem_state.last_end_tx = r.value().last_offset;
+    }
+    if (!co_await wait_no_throw(r.value().last_offset, timeout)) {
         co_return tx_errc::unknown_server_error;
     }
 
@@ -579,39 +611,49 @@ ss::future<tx_errc> rm_stm::abort_tx(
 
 // abort_tx is invoked strictly after a tx is canceled on the tm_stm
 // the purpose of abort is to put tx_range into the list of aborted txes
-// and to fence off the old epoch
+// and to fence off the old epoch.
+// we need to check tx_seq to filter out stale requests
 ss::future<tx_errc> rm_stm::do_abort_tx(
   model::producer_identity pid,
-  model::tx_seq tx_seq,
+  std::optional<model::tx_seq> tx_seq,
   model::timeout_clock::duration timeout) {
     // doesn't make sense to fence off an abort because transaction
     // manager has already decided to abort and acked to a client
-
     if (!co_await sync(timeout)) {
         co_return tx_errc::stale;
+    }
+    // catching up with all previous end_tx operations (commit | abort)
+    // to avoid writing the same commit | abort marker twice
+    if (_mem_state.last_end_tx >= model::offset{0}) {
+        if (!co_await wait_no_throw(_mem_state.last_end_tx, timeout)) {
+            co_return tx_errc::stale;
+        }
     }
 
     if (!is_known_session(pid)) {
         co_return tx_errc::none;
     }
 
-    auto origin = get_abort_origin(pid, tx_seq);
-    if (origin == abort_origin::past) {
-        // rejecting a delayed abort command to prevent aborting
-        // a wrong transaction
-        co_return tx_errc::request_rejected;
-    }
-    if (origin == abort_origin::future) {
-        // impossible situation: before transactional coordinator may issue
-        // abort of the current transaction it should begin it and abort all
-        // previous transactions with the same pid
-        vlog(
-          clusterlog.error,
-          "Rejecting abort (pid:{}, tx_seq: {}) because it isn't consistent "
-          "with the current ongoing transaction",
-          pid,
-          tx_seq);
-        co_return tx_errc::request_rejected;
+    if (tx_seq) {
+        auto origin = get_abort_origin(pid, tx_seq.value());
+        if (origin == abort_origin::past) {
+            // rejecting a delayed abort command to prevent aborting
+            // a wrong transaction
+            co_return tx_errc::request_rejected;
+        }
+        if (origin == abort_origin::future) {
+            // impossible situation: before transactional coordinator may issue
+            // abort of the current transaction it should begin it and abort all
+            // previous transactions with the same pid
+            vlog(
+              clusterlog.error,
+              "Rejecting abort (pid:{}, tx_seq: {}) because it isn't "
+              "consistent "
+              "with the current ongoing transaction",
+              pid,
+              tx_seq.value());
+            co_return tx_errc::request_rejected;
+        }
     }
 
     // preventing prepare and replicte once we
@@ -633,6 +675,9 @@ ss::future<tx_errc> rm_stm::do_abort_tx(
           r.error(),
           pid);
         co_return tx_errc::unknown_server_error;
+    }
+    if (_mem_state.last_end_tx < r.value().last_offset) {
+        _mem_state.last_end_tx = r.value().last_offset;
     }
 
     // don't need to wait for apply because tx is already aborted on the
@@ -674,6 +719,91 @@ ss::future<result<raft::replicate_result>> rm_stm::replicate(
 ss::future<> rm_stm::stop() {
     auto_abort_timer.cancel();
     return raft::state_machine::stop();
+}
+
+rm_stm::transaction_info::status_t
+rm_stm::get_tx_status(model::producer_identity pid) const {
+    if (_mem_state.preparing.contains(pid)) {
+        return transaction_info::status_t::preparing;
+    }
+
+    if (_log_state.prepared.contains(pid)) {
+        return transaction_info::status_t::prepared;
+    }
+
+    return transaction_info::status_t::ongoing;
+}
+
+std::optional<rm_stm::expiration_info>
+rm_stm::get_expiration_info(model::producer_identity pid) const {
+    auto it = _mem_state.expiration.find(pid);
+    if (it == _mem_state.expiration.end()) {
+        return std::nullopt;
+    }
+
+    return it->second;
+}
+
+ss::future<result<rm_stm::transaction_set>> rm_stm::get_transactions() {
+    if (!co_await sync(_sync_timeout)) {
+        co_return errc::not_leader;
+    }
+
+    transaction_set ans;
+
+    // When redpanda starts writing the first batch of a transaction it
+    // estimates its offset and only when the write passes it updates the offset
+    // to the exact value; so for a short period of time (while tx is in the
+    // initiating state) lso_bound is the offset of the last operation known at
+    // moment the transaction started and when the first tx batch is written
+    // it's updated to the first offset of the transaction
+    for (auto& [id, offset] : _mem_state.estimated) {
+        transaction_info tx_info;
+        tx_info.lso_bound = offset;
+        tx_info.status = rm_stm::transaction_info::status_t::initiating;
+        tx_info.info = get_expiration_info(id);
+        ans.emplace(id, tx_info);
+    }
+
+    for (auto& [id, offset] : _mem_state.tx_start) {
+        transaction_info tx_info;
+        tx_info.lso_bound = offset;
+        tx_info.status = get_tx_status(id);
+        tx_info.info = get_expiration_info(id);
+        ans.emplace(id, tx_info);
+    }
+
+    for (auto& [id, offset] : _log_state.ongoing_map) {
+        transaction_info tx_info;
+        tx_info.lso_bound = offset.first;
+        tx_info.status = get_tx_status(id);
+        tx_info.info = get_expiration_info(id);
+        ans.emplace(id, tx_info);
+    }
+
+    co_return ans;
+}
+
+ss::future<std::error_code> rm_stm::mark_expired(model::producer_identity pid) {
+    return get_tx_lock(pid.get_id())->with([this, pid]() {
+        return do_mark_expired(pid);
+    });
+}
+
+ss::future<std::error_code>
+rm_stm::do_mark_expired(model::producer_identity pid) {
+    if (!co_await sync(_sync_timeout)) {
+        co_return std::error_code(tx_errc::leader_not_found);
+    }
+    if (!is_known_session(pid)) {
+        co_return std::error_code(tx_errc::pid_not_found);
+    }
+
+    // We should delete information about expiration for pid, because inside
+    // try_abort_old_tx it checks is tx expired or not.
+    _mem_state.expiration.erase(pid);
+    co_await do_try_abort_old_tx(pid);
+    co_return std::error_code(tx_errc::none);
 }
 
 bool rm_stm::check_seq(model::batch_identity bid) {
@@ -979,7 +1109,7 @@ void rm_stm::track_tx(
 
 void rm_stm::abort_old_txes() {
     _is_autoabort_active = true;
-    (void)ss::with_gate(_gate, [this] {
+    ssx::spawn_with_gate(_gate, [this] {
         return _state_lock.hold_read_lock().then(
           [this](ss::basic_rwlock<>::holder unit) mutable {
               return do_abort_old_txes().finally([this, u = std::move(unit)] {

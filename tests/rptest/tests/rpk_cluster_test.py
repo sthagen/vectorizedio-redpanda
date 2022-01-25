@@ -12,7 +12,7 @@ import re
 import zipfile
 import json
 
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from ducktape.utils.util import wait_until
 
 from rptest.tests.redpanda_test import RedpandaTest
@@ -86,6 +86,8 @@ class RpkClusterTest(RedpandaTest):
                 # dmidecode doesn't work in ducktape containers, ignore
                 # errors about it.
                 continue
+            if re.match(r".* error querying .*\.ntp\..* i\/o timeout", l):
+                self.logger.error(f"Non-fatal transitory NTP error: {l}")
             else:
                 self.logger.error(f"Bad output line: {l}")
                 filtered_errors.append(l)
@@ -104,7 +106,6 @@ class RpkClusterTest(RedpandaTest):
 
     @cluster(num_nodes=3)
     def test_get_config(self):
-        rpk_bin = self.redpanda.find_binary('rpk')
         node = self.redpanda.nodes[0]
 
         config_output = self._rpk.admin_config_print(node)

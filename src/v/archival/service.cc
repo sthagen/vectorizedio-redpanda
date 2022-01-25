@@ -120,7 +120,7 @@ ss::future<archival::configuration>
 scheduler_service_impl::get_archival_service_config(
   ss::scheduling_group sg, ss::io_priority_class p) {
     vlog(archival_log.debug, "Generating archival configuration");
-    auto disable_metrics = rpc::metrics_disabled(
+    auto disable_metrics = net::metrics_disabled(
       config::shard_local_cfg().disable_metrics());
 
     auto time_limit = config::shard_local_cfg()
@@ -190,19 +190,17 @@ scheduler_service_impl::scheduler_service_impl(
   : scheduler_service_impl(config.local(), remote, api, pm, tt) {}
 
 void scheduler_service_impl::rearm_timer() {
-    (void)ss::with_gate(_gate, [this] {
-        return ss::with_scheduling_group(_upload_sg, [this] {
-            return reconcile_archivers()
-              .finally([this] {
-                  if (_gate.is_closed()) {
-                      return;
-                  }
-                  _timer.rearm(_jitter());
-              })
-              .handle_exception([this](std::exception_ptr e) {
-                  vlog(_rtclog.info, "Error in timer callback: {}", e);
-              });
-        });
+    ssx::background = ssx::spawn_with_gate_then(_gate, [this] {
+                          return ss::with_scheduling_group(_upload_sg, [this] {
+                              return reconcile_archivers().finally([this] {
+                                  if (_gate.is_closed()) {
+                                      return;
+                                  }
+                                  _timer.rearm(_jitter());
+                              });
+                          });
+                      }).handle_exception([this](std::exception_ptr e) {
+        vlog(_rtclog.info, "Error in timer callback: {}", e);
     });
 }
 ss::future<> scheduler_service_impl::start() {
@@ -325,31 +323,25 @@ ss::future<ss::stop_iteration> scheduler_service_impl::add_ntp_archiver(
 
 ss::future<>
 scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
-    return ss::with_gate(
-      _gate, [this, to_create = std::move(to_create)]() mutable {
-          return ss::do_with(
-            std::move(to_create), [this](std::vector<model::ntp>& to_create) {
-                // add_ntp_archiver can potentially use two connections
-                auto concurrency = std::max(
-                  1UL, _remote.local().concurrency() / 2);
-                return ss::max_concurrent_for_each(
-                  to_create, concurrency, [this](const model::ntp& ntp) {
-                      storage::api& api = _storage_api.local();
-                      storage::log_manager& lm = api.log_mgr();
-                      auto log = lm.get(ntp);
-                      auto part = _partition_manager.local().get(ntp);
-                      if (
-                        !log.has_value() || !part
-                        || !part->get_ntp_config().is_archival_enabled()) {
-                          return ss::now();
-                      }
-                      auto svc = ss::make_lw_shared<ntp_archiver>(
-                        log->config(), _conf, _remote.local(), part, _probe);
-                      return ss::repeat([this, svc = std::move(svc)] {
-                          return add_ntp_archiver(svc);
-                      });
-                  });
-            });
+    gate_guard g(_gate);
+    // add_ntp_archiver can potentially use two connections
+    auto concurrency = std::max(1UL, _remote.local().concurrency() / 2);
+    co_await ss::max_concurrent_for_each(
+      std::move(to_create), concurrency, [this](const model::ntp& ntp) {
+          storage::api& api = _storage_api.local();
+          storage::log_manager& lm = api.log_mgr();
+          auto log = lm.get(ntp);
+          auto part = _partition_manager.local().get(ntp);
+          if (log.has_value() && part && part->is_leader()
+              && (part->get_ntp_config().is_archival_enabled()
+                  || config::shard_local_cfg().cloud_storage_enable_remote_read())) {
+              auto svc = ss::make_lw_shared<ntp_archiver>(
+                log->config(), _conf, _remote.local(), part, _probe);
+              return ss::repeat(
+                [this, svc = std::move(svc)] { return add_ntp_archiver(svc); });
+          } else {
+              return ss::now();
+          }
       });
 }
 
@@ -442,11 +434,11 @@ uint64_t scheduler_service_impl::estimate_backlog_size() {
 
 ss::future<> scheduler_service_impl::run_uploads() {
     gate_guard g(_gate);
-    try {
-        static constexpr ss::lowres_clock::duration initial_backoff = 100ms;
-        static constexpr ss::lowres_clock::duration max_backoff = 10s;
-        ss::lowres_clock::duration backoff = initial_backoff;
-        while (!_gate.is_closed()) {
+    static constexpr ss::lowres_clock::duration initial_backoff = 100ms;
+    static constexpr ss::lowres_clock::duration max_backoff = 10s;
+    ss::lowres_clock::duration backoff = initial_backoff;
+    while (!_as.abort_requested() && !_gate.is_closed()) {
+        try {
             int quota = _queue.size();
             std::vector<ss::future<ntp_archiver::batch_result>> flist;
 
@@ -510,21 +502,17 @@ ss::future<> scheduler_service_impl::run_uploads() {
                 }
                 continue;
             }
+        } catch (const ss::sleep_aborted&) {
+            vlog(_rtclog.debug, "Upload loop aborted");
+        } catch (const ss::gate_closed_exception&) {
+            vlog(_rtclog.debug, "Upload loop aborted (gate closed)");
+        } catch (const ss::abort_requested_exception&) {
+            vlog(_rtclog.debug, "Upload loop aborted (abort requested)");
+        } catch (...) {
+            vlog(
+              _rtclog.error, "Upload loop error: {}", std::current_exception());
         }
-    } catch (const ss::sleep_aborted&) {
-        vlog(_rtclog.debug, "Upload loop aborted");
-    } catch (const ss::gate_closed_exception&) {
-        vlog(_rtclog.debug, "Upload loop aborted (gate closed)");
-    } catch (const ss::abort_requested_exception&) {
-        vlog(_rtclog.debug, "Upload loop aborted (abort requested)");
-    } catch (...) {
-        vlog(_rtclog.error, "Upload loop error: {}", std::current_exception());
     }
-    // The loop can be stopped by gate or abort_source (if it was waiting inside
-    // sleep_abortable)
-    vassert(
-      _as.abort_requested() || _gate.is_closed(),
-      "Upload loop is not stopped properly");
 }
 
 } // namespace archival::internal

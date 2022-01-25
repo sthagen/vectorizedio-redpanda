@@ -11,22 +11,30 @@ import random
 import time
 import requests
 
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from ducktape.utils.util import wait_until
 from rptest.clients.kafka_cat import KafkaCat
-import requests
 
 from rptest.clients.types import TopicSpec
 from rptest.clients.rpk import RpkTool
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.services.admin import Admin
+from rptest.tests.partition_movement import PartitionMovementMixin
 from rptest.services.honey_badger import HoneyBadger
 from rptest.services.rpk_producer import RpkProducer
 from rptest.services.kaf_producer import KafProducer
 from rptest.services.rpk_consumer import RpkConsumer
 
+# Errors we should tolerate when moving partitions around
+PARTITION_MOVEMENT_LOG_ERRORS = [
+    # e.g.  raft - [follower: {id: {1}, revision: {10}}] [group_id:3, {kafka/topic/2}] - recovery_stm.cc:422 - recovery append entries error: raft group does not exists on target broker
+    "raft - .*raft group does not exist on target broker",
+    # e.g.  raft - [group_id:3, {kafka/topic/2}] consensus.cc:2317 - unable to replicate updated configuration: raft::errc::replicated_entry_truncated
+    "raft - .*unable to replicate updated configuration: .*"
+]
 
-class PartitionMovementTest(EndToEndTest):
+
+class PartitionMovementTest(PartitionMovementMixin, EndToEndTest):
     """
     Basic partition movement tests. Each test builds a number of topics and then
     performs a series of random replica set changes. After each change a
@@ -49,119 +57,6 @@ class PartitionMovementTest(EndToEndTest):
             **kwargs)
         self._ctx = ctx
 
-    @staticmethod
-    def _random_partition(metadata):
-        topic = random.choice(metadata)
-        partition = random.choice(topic["partitions"])
-        return topic["topic"], partition["partition"]
-
-    @staticmethod
-    def _choose_replacement(admin, assignments):
-        """
-        Does not produce assignments that contain duplicate nodes. This is a
-        limitation in redpanda raft implementation.
-        """
-        replication_factor = len(assignments)
-        node_ids = lambda x: set([a["node_id"] for a in x])
-
-        assert replication_factor >= 1
-        assert len(node_ids(assignments)) == replication_factor
-
-        # remove random assignment(s). we allow no changes to be made to
-        # exercise the code paths responsible for dealing with no-ops.
-        num_replacements = random.randint(0, replication_factor)
-        selected = random.sample(assignments, num_replacements)
-        for assignment in selected:
-            assignments.remove(assignment)
-
-        # choose a valid random replacement
-        replacements = []
-        brokers = admin.get_brokers()
-        while len(assignments) != replication_factor:
-            broker = random.choice(brokers)
-            node_id = broker["node_id"]
-            if node_id in node_ids(assignments):
-                continue
-            core = random.randint(0, broker["num_cores"] - 1)
-            replacement = dict(node_id=node_id, core=core)
-            assignments.append(replacement)
-            replacements.append(replacement)
-
-        return selected, replacements
-
-    @staticmethod
-    def _get_assignments(admin, topic, partition):
-        res = admin.get_partitions(topic, partition)
-
-        def normalize(a):
-            return dict(node_id=a["node_id"], core=a["core"])
-
-        return [normalize(a) for a in res["replicas"]]
-
-    @staticmethod
-    def _equal_assignments(r0, r1):
-        def to_tuple(a):
-            return a["node_id"], a["core"]
-
-        r0 = [to_tuple(a) for a in r0]
-        r1 = [to_tuple(a) for a in r1]
-        return set(r0) == set(r1)
-
-    def _get_current_partitions(self, admin, topic, partition_id):
-        def keep(p):
-            return p["ns"] == "kafka" and p["topic"] == topic and p[
-                "partition_id"] == partition_id
-
-        result = []
-        for node in self.redpanda.nodes:
-            node_id = self.redpanda.idx(node)
-            partitions = admin.get_partitions(node=node)
-            partitions = filter(keep, partitions)
-            for partition in partitions:
-                result.append(dict(node_id=node_id, core=partition["core"]))
-        return result
-
-    def _move_and_verify(self):
-        admin = Admin(self.redpanda)
-
-        # choose a random topic-partition
-        metadata = self.redpanda.describe_topics()
-        topic, partition = self._random_partition(metadata)
-        self.logger.info(f"selected topic-partition: {topic}-{partition}")
-
-        # get the partition's replica set, including core assignments. the kafka
-        # api doesn't expose core information, so we use the redpanda admin api.
-        assignments = self._get_assignments(admin, topic, partition)
-        self.logger.info(f"assignments for {topic}-{partition}: {assignments}")
-
-        # build new replica set by replacing a random assignment
-        selected, replacements = self._choose_replacement(admin, assignments)
-        self.logger.info(
-            f"replacement for {topic}-{partition}:{len(selected)}: {selected} -> {replacements}"
-        )
-        self.logger.info(
-            f"new assignments for {topic}-{partition}: {assignments}")
-
-        r = admin.set_partition_replicas(topic, partition, assignments)
-
-        def status_done():
-            info = admin.get_partitions(topic, partition)
-            self.logger.info(
-                f"current assignments for {topic}-{partition}: {info}")
-            converged = self._equal_assignments(info["replicas"], assignments)
-            return converged and info["status"] == "done"
-
-        # wait until redpanda reports complete
-        wait_until(status_done, timeout_sec=90, backoff_sec=2)
-
-        def derived_done():
-            info = self._get_current_partitions(admin, topic, partition)
-            self.logger.info(
-                f"derived assignments for {topic}-{partition}: {info}")
-            return self._equal_assignments(info, assignments)
-
-        wait_until(derived_done, timeout_sec=90, backoff_sec=2)
-
     @cluster(num_nodes=3)
     def test_moving_not_fully_initialized_partition(self):
         """
@@ -179,7 +74,7 @@ class PartitionMovementTest(EndToEndTest):
         topic = "topic-1"
         partition = 0
         spec = TopicSpec(name=topic, partition_count=1, replication_factor=3)
-        self.redpanda.create_topic(spec)
+        self.client().create_topic(spec)
         admin = Admin(self.redpanda)
 
         # choose a random topic-partition
@@ -240,12 +135,12 @@ class PartitionMovementTest(EndToEndTest):
                 topics.append(spec)
 
         for spec in topics:
-            self.redpanda.create_topic(spec)
+            self.client().create_topic(spec)
 
         for _ in range(25):
             self._move_and_verify()
 
-    @cluster(num_nodes=4)
+    @cluster(num_nodes=4, log_allow_list=PARTITION_MOVEMENT_LOG_ERRORS)
     def test_static(self):
         """
         Move partitions with data, but no active producers or consumers.
@@ -264,7 +159,7 @@ class PartitionMovementTest(EndToEndTest):
 
         self.logger.info(f"Creating topics...")
         for spec in topics:
-            self.redpanda.create_topic(spec)
+            self.client().create_topic(spec)
 
         num_records = 1000
         produced = set(
@@ -324,14 +219,14 @@ class PartitionMovementTest(EndToEndTest):
 
             self.logger.info(f"Finished verifying records in {spec}")
 
-    @cluster(num_nodes=5)
+    @cluster(num_nodes=5, log_allow_list=PARTITION_MOVEMENT_LOG_ERRORS)
     def test_dynamic(self):
         """
         Move partitions with active consumer / producer
         """
         self.start_redpanda(num_nodes=3)
         spec = TopicSpec(name="topic", partition_count=3, replication_factor=3)
-        self.redpanda.create_topic(spec)
+        self.client().create_topic(spec)
         self.topic = spec.name
         self.start_producer(1)
         self.start_consumer(1)
@@ -339,6 +234,41 @@ class PartitionMovementTest(EndToEndTest):
         for _ in range(25):
             self._move_and_verify()
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=45)
+
+    @cluster(num_nodes=5, log_allow_list=PARTITION_MOVEMENT_LOG_ERRORS)
+    def test_bootstrapping_after_move(self):
+        """
+        Move partitions with active consumer / producer
+        """
+        self.start_redpanda(num_nodes=3)
+        spec = TopicSpec(name="topic", partition_count=3, replication_factor=3)
+        self.client().create_topic(spec)
+        self.topic = spec.name
+        self.start_producer(1)
+        self.start_consumer(1)
+        self.await_startup()
+        # execute single move
+        self._move_and_verify()
+        self.run_validation(enable_idempotence=False, consumer_timeout_sec=45)
+
+        # snapshot offsets
+        rpk = RpkTool(self.redpanda)
+        partitions = rpk.describe_topic(spec.name)
+        offset_map = {}
+        for p in partitions:
+            offset_map[p.id] = p.high_watermark
+
+        # restart all the nodes
+        self.redpanda.restart_nodes(self.redpanda.nodes)
+
+        def offsets_are_recovered():
+
+            return all([
+                offset_map[p.id] == p.high_watermark
+                for p in rpk.describe_topic(spec.name)
+            ])
+
+        wait_until(offsets_are_recovered, 30, 2)
 
     @cluster(num_nodes=3)
     def test_invalid_destination(self):
@@ -348,7 +278,7 @@ class PartitionMovementTest(EndToEndTest):
 
         self.start_redpanda(num_nodes=3)
         spec = TopicSpec(name="topic", partition_count=1, replication_factor=1)
-        self.redpanda.create_topic(spec)
+        self.client().create_topic(spec)
         topic = spec.name
         partition = 0
 
@@ -421,7 +351,7 @@ class PartitionMovementTest(EndToEndTest):
         # will take a while.
         name = f"movetest"
         spec = TopicSpec(name=name, partition_count=1, replication_factor=3)
-        self.redpanda.create_topic(spec)
+        self.client().create_topic(spec)
 
         # Wait for the partition to have a leader (`rpk produce` errors
         # out if it tries to write data before this)

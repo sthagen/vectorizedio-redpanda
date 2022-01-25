@@ -12,6 +12,7 @@
 #include "coproc/script_context_frontend.h"
 
 #include "cluster/partition.h"
+#include "coproc/exception.h"
 #include "coproc/logger.h"
 #include "coproc/reference_window_consumer.hpp"
 #include "model/fundamental.h"
@@ -63,12 +64,23 @@ storage::log_reader_config get_reader(
         /// script_context_backend.cc
         end = *(++offsets.begin()) - model::offset{1};
     }
+    if (start > end) {
+        vlog(
+          coproclog.warn,
+          "Start {} detected greater then end {} for ntp: {}",
+          start,
+          end,
+          rctx.input->ntp());
+        /// It is possible for start to be greater then end in the event input
+        /// logs haven't yet been hydrated. In this case, perform no read by
+        /// setting start to end
+        start = end;
+    }
     /// The 'high watermark' of the current read. All output topics have
     /// processed all inputs below this value. When the offsets map for all
     /// outputs has values equivlent to this, it means all outputs are up to
     /// date and a new 'high watermark' can be promoted due to read progressing
     /// forward.
-    vassert(start <= end, "Offset logic error start: {} end: {}", start, end);
     rctx.last_acked = start;
     return storage::log_reader_config(
       start,
@@ -85,20 +97,30 @@ ss::future<std::optional<process_batch_request::data>>
 read_ntp(input_read_args args, ss::lw_shared_ptr<source> ctx) {
     storage::log_reader_config cfg = get_reader(
       args.abort_src, ctx->rctx, ctx->wctx);
-    auto rbr = co_await ctx->rctx.input->make_reader(cfg);
-    auto read_result = co_await std::move(rbr).for_each_ref(
-      coproc::reference_window_consumer(
-        high_offset_tracker(), storage::internal::decompress_batch_consumer()),
-      model::no_timeout);
-    auto& [info, nrbr] = read_result;
-    if (info.size == 0) {
-        co_return std::nullopt;
+    try {
+        auto rbr = co_await ctx->rctx.input->make_reader(cfg);
+        auto read_result = co_await std::move(rbr).for_each_ref(
+          coproc::reference_window_consumer(
+            high_offset_tracker(),
+            storage::internal::decompress_batch_consumer()),
+          model::no_timeout);
+        auto& [info, nrbr] = read_result;
+        if (info.size > 0) {
+            ctx->rctx.last_read = info.last + model::offset{1};
+            co_return process_batch_request::data{
+              .ids = std::vector<script_id>{args.id},
+              .ntp = ctx->rctx.input->ntp(),
+              .reader = std::move(nrbr)};
+        }
+    } catch (const ss::gate_closed_exception&) {
+        throw partition_shutdown_exception(
+          ctx->rctx.input->ntp(),
+          fmt::format(
+            "Partition {} shutdown while script {} was attempting to read",
+            ctx->rctx.input->ntp(),
+            args.id));
     }
-    ctx->rctx.last_read = info.last + model::offset{1};
-    co_return process_batch_request::data{
-      .ids = std::vector<script_id>{args.id},
-      .ntp = ctx->rctx.input->ntp(),
-      .reader = std::move(nrbr)};
+    co_return std::nullopt;
 }
 
 ss::future<std::vector<process_batch_request::data>>

@@ -24,6 +24,7 @@
 #include <seastar/core/metrics_api.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/sstring.hh>
+#include <seastar/util/defer.hh>
 
 #include <absl/container/flat_hash_map.h>
 
@@ -44,31 +45,19 @@ void set_configuration(ss::sstring p_name, T v) {
         config::shard_local_cfg().get(p_name).set_value(v);
     }).get0();
 }
-/**
- * Common scheduling groups instance for all nodes, we are limited by
- * max_scheduling_group == 16
- */
-inline scheduling_groups get_scheduling_groups() {
-    static bool started = false;
-    static scheduling_groups groups;
-    if (!started) {
-        started = true;
-        groups.create_groups().get0();
-    }
-
-    return groups;
-}
 
 class cluster_test_fixture {
 public:
     using fixture_ptr = std::unique_ptr<redpanda_thread_fixture>;
 
     cluster_test_fixture()
-      : _base_dir("cluster_test." + random_generators::gen_alphanum_string(6)) {
+      : _sgroups(create_scheduling_groups())
+      , _group_deleter([this] { _sgroups.destroy_groups().get(); })
+      , _base_dir("cluster_test." + random_generators::gen_alphanum_string(6)) {
         set_configuration("disable_metrics", true);
     }
 
-    ~cluster_test_fixture() {
+    virtual ~cluster_test_fixture() {
         std::filesystem::remove_all(std::filesystem::path(_base_dir));
     }
 
@@ -91,7 +80,7 @@ public:
             coproc_supervisor_port,
             seeds,
             ssx::sformat("{}.{}", _base_dir, node_id()),
-            get_scheduling_groups(),
+            _sgroups,
             false));
     }
 
@@ -121,7 +110,8 @@ public:
       int coproc_supervisor_port = 43189) {
         std::vector<config::seed_server> seeds = {};
         if (node_id != 0) {
-            seeds.push_back({.addr = unresolved_address("127.0.0.1", 11000)});
+            seeds.push_back(
+              {.addr = net::unresolved_address("127.0.0.1", 11000)});
         }
         add_node(
           node_id,
@@ -154,7 +144,19 @@ public:
         return _instances[id]->wait_for_controller_leadership();
     }
 
+    /**
+     * Common scheduling groups instance for all nodes, we are limited by
+     * max_scheduling_group == 16
+     */
+    scheduling_groups create_scheduling_groups() {
+        scheduling_groups groups;
+        groups.create_groups().get0();
+        return groups;
+    }
+
 private:
+    scheduling_groups _sgroups;
+    ss::deferred_action<std::function<void()>> _group_deleter;
     absl::flat_hash_map<model::node_id, fixture_ptr> _instances;
     ss::sstring _base_dir;
 };

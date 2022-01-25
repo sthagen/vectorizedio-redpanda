@@ -16,6 +16,7 @@ import requests
 import random
 import threading
 import collections
+import re
 
 import yaml
 from ducktape.services.service import Service
@@ -28,14 +29,79 @@ from rptest.clients.kafka_cat import KafkaCat
 from rptest.services.storage import ClusterStorage, NodeStorage
 from rptest.services.admin import Admin
 from rptest.clients.python_librdkafka import PythonLibrdkafka
-from rptest.clients.types import TopicSpec
-from kafka import KafkaAdminClient
 
 Partition = collections.namedtuple('Partition',
                                    ['index', 'leader', 'replicas'])
 
 MetricSample = collections.namedtuple(
     'MetricSample', ['family', 'sample', 'node', 'value', 'labels'])
+
+DEFAULT_LOG_ALLOW_LIST = [
+    # Tests currently don't run on XFS, although in future they should.
+    # https://github.com/vectorizedio/redpanda/issues/2376
+    re.compile("not on XFS. This is a non-supported setup."),
+
+    # This is expected when tests are intentionally run on low memory configurations
+    re.compile(r"Memory: '\d+' below recommended"),
+    # A client disconnecting is not bad behaviour on redpanda's part
+    re.compile(r"kafka rpc protocol.*(Connection reset by peer|Broken pipe)")
+]
+
+# Log errors that are expected in tests that restart nodes mid-test
+RESTART_LOG_ALLOW_LIST = [
+    re.compile(
+        "(raft|rpc) - .*(disconnected_endpoint|Broken pipe|Connection reset by peer)"
+    ),
+    re.compile(
+        "raft - .*recovery append entries error.*client_request_timeout"),
+]
+
+# Log errors that are expected in chaos-style tests that e.g.
+# stop redpanda nodes uncleanly
+CHAOS_LOG_ALLOW_LIST = [
+    # Unclean connection shutdown
+    re.compile(
+        "(raft|rpc) - .*(client_request_timeout|disconnected_endpoint|Broken pipe|Connection reset by peer)"
+    ),
+
+    # Torn disk writes
+    re.compile("storage - Could not parse header"),
+    re.compile("storage - Cannot continue parsing"),
+
+    # e.g. raft - [group_id:59, {kafka/test-topic-319-1639161306093460/0}] consensus.cc:2301 - unable to replicate updated configuration: raft::errc::replicated_entry_truncated
+    re.compile("raft - .*replicated_entry_truncated"),
+
+    # e.g. cluster - controller_backend.cc:466 - exception while executing partition operation: {type: update_finished, ntp: {kafka/test-topic-1944-1639161306808363/1}, offset: 413, new_assignment: { id: 1, group_id: 65, replicas: {{node_id: 3, shard: 2}, {node_id: 4, shard: 2}, {node_id: 1, shard: 0}} }, previous_assignment: {nullopt}} - std::__1::__fs::filesystem::filesystem_error (error system:39, filesystem error: remove failed: Directory not empty [/var/lib/redpanda/data/kafka/test-topic-1944-1639161306808363])
+    re.compile("cluster - .*Directory not empty"),
+    re.compile("r/heartbeat - .*cannot find consensus group"),
+
+    # raft - [follower: {id: {1}, revision: {9}}] [group_id:1, {kafka/topic-xyeyqcbyxi/0}] - recovery_stm.cc:422 - recovery append entries error: rpc::errc::exponential_backoff
+    re.compile("raft - .*recovery append entries error"),
+
+    # rpc - Service handler threw an exception: std::exception (std::exception)
+    re.compile("rpc - Service handler threw an exception: std"),
+]
+
+
+class BadLogLines(Exception):
+    def __init__(self, node_to_lines):
+        self.node_to_lines = node_to_lines
+
+    def __str__(self):
+        # Pick the first line from the first node as an example, and include it
+        # in the string output so that for single line failures, it isn't necessary
+        # for folks to search back in the log to find the culprit.
+        example_lines = next(iter(self.node_to_lines.items()))[1]
+        example = next(iter(example_lines))
+
+        summary = ','.join([
+            f'{i[0].account.hostname}({len(i[1])})'
+            for i in self.node_to_lines.items()
+        ])
+        return f"<BadLogLines nodes={summary} example=\"{example}\">"
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class MetricSamples:
@@ -84,6 +150,9 @@ class RedpandaService(Service):
     COV_KEY = "enable_cov"
     DEFAULT_COV_OPT = False
 
+    # Where we put a compressed binary if saving it after failure
+    EXECUTABLE_SAVE_PATH = "/tmp/redpanda.tar.gz"
+
     logs = {
         "redpanda_start_stdout_stderr": {
             "path": STDOUT_STDERR_CAPTURE,
@@ -96,35 +165,34 @@ class RedpandaService(Service):
         "code_coverage_profraw_file": {
             "path": COVERAGE_PROFRAW_CAPTURE,
             "collect_default": True
+        },
+        "executable": {
+            "path": EXECUTABLE_SAVE_PATH,
+            "collect_default": False
         }
     }
 
     def __init__(self,
                  context,
                  num_brokers,
-                 client_type,
+                 *,
                  enable_rp=True,
                  extra_rp_conf=None,
                  enable_pp=False,
                  enable_sr=False,
-                 topics=None,
                  num_cores=3):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
-        self._client_type = client_type
         self._enable_rp = enable_rp
         self._extra_rp_conf = extra_rp_conf or dict()
         self._enable_pp = enable_pp
         self._enable_sr = enable_sr
         self._log_level = self._context.globals.get(self.LOG_LEVEL_KEY,
                                                     self.DEFAULT_LOG_LEVEL)
-        self._topics = topics or ()
         self._num_cores = num_cores
         self._admin = Admin(self)
         self._started = []
-
-        # client is intiialized after service starts
-        self._client = None
+        self._security_config = dict()
 
         self.config_file_lock = threading.Lock()
 
@@ -189,28 +257,17 @@ class RedpandaService(Service):
                 )
                 raise RuntimeError("Unexpected files in data directory")
 
-        security_settings = dict()
         if self.sasl_enabled():
             username, password, algorithm = self.SUPERUSER_CREDENTIALS
-            security_settings = dict(security_protocol='SASL_PLAINTEXT',
-                                     sasl_mechanism=algorithm,
-                                     sasl_plain_username=username,
-                                     sasl_plain_password=password,
-                                     request_timeout_ms=30000,
-                                     api_version_auto_timeout_ms=3000)
-        self._client = KafkaAdminClient(bootstrap_servers=self.brokers_list(),
-                                        **security_settings)
+            self._security_config = dict(security_protocol='SASL_PLAINTEXT',
+                                         sasl_mechanism=algorithm,
+                                         sasl_plain_username=username,
+                                         sasl_plain_password=password,
+                                         request_timeout_ms=30000,
+                                         api_version_auto_timeout_ms=3000)
 
-        self._create_initial_topics(security_settings)
-
-    def _create_initial_topics(self, security_settings):
-        user = security_settings.get("sasl_plain_username")
-        passwd = security_settings.get("sasl_plain_password")
-
-        client = self._client_type(self, user=user, passwd=passwd)
-        for spec in self._topics:
-            self.logger.debug(f"Creating initial topic {spec}")
-            client.create_topic(spec)
+    def security_config(self):
+        return self._security_config
 
     def start_redpanda(self, node):
         cmd = (
@@ -307,6 +364,62 @@ class RedpandaService(Service):
         assert node in self._started
         return node.account.monitor_log(RedpandaService.STDOUT_STDERR_CAPTURE)
 
+    def raise_on_bad_logs(self, allow_list=None):
+        """
+        Raise a BadLogLines exception if any nodes' logs contain errors
+        not permitted by `allow_list`
+
+        :param logger: the test's logger, so that reports of bad lines are
+                       prefixed with test name.
+        :param allow_list: list of compiled regexes, or None for default
+        :return: None
+        """
+
+        if allow_list is None:
+            allow_list = DEFAULT_LOG_ALLOW_LIST
+        else:
+            combined_allow_list = DEFAULT_LOG_ALLOW_LIST
+            # Accept either compiled or string regexes
+            for a in allow_list:
+                if not isinstance(a, re.Pattern):
+                    a = re.compile(a)
+                combined_allow_list.append(a)
+            allow_list = combined_allow_list
+
+        test_name = self._context.function_name
+
+        bad_lines = collections.defaultdict(list)
+        for node in self.nodes:
+            self.logger.info(
+                f"Scanning node {node.account.hostname} log for errors...")
+
+            for line in node.account.ssh_capture(
+                    f"grep -e ERROR -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE}"
+            ):
+                line = line.strip()
+
+                allowed = False
+                for a in allow_list:
+                    if a.search(line) is not None:
+                        allowed = True
+                        break
+
+                if not allowed:
+                    bad_lines[node].append(line)
+                    self.logger.warn(
+                        f"[{test_name}] Unexpected log line on {node.account.hostname}: {line}"
+                    )
+
+        for node, lines in bad_lines.items():
+            # LeakSanitizer type errors may include raw backtraces that the devloper
+            # needs the binary to decode + investigate
+            if any(['Sanitizer' in l for l in lines]):
+                self.save_executable()
+                break
+
+        if bad_lines:
+            raise BadLogLines(bad_lines)
+
     def find_wasm_root(self):
         rp_install_path_root = self._context.globals.get(
             "rp_install_path_root", None)
@@ -316,6 +429,15 @@ class RedpandaService(Service):
         rp_install_path_root = self._context.globals.get(
             "rp_install_path_root", None)
         return f"{rp_install_path_root}/bin/{name}"
+
+    def find_raw_binary(self, name):
+        """
+        Like `find_binary`, but find the underlying executable rather tha
+        a shell wrapper.
+        """
+        rp_install_path_root = self._context.globals.get(
+            "rp_install_path_root", None)
+        return f"{rp_install_path_root}/libexec/{name}"
 
     def stop_node(self, node):
         pids = self.pids(node)
@@ -343,6 +465,9 @@ class RedpandaService(Service):
                         f"{RedpandaService.PERSISTENT_ROOT}/data/*")
         if node.account.exists(RedpandaService.CONFIG_FILE):
             node.account.remove(f"{RedpandaService.CONFIG_FILE}")
+        if not preserve_logs and node.account.exists(
+                self.EXECUTABLE_SAVE_PATH):
+            node.account.remove(self.EXECUTABLE_SAVE_PATH)
 
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
@@ -447,14 +572,23 @@ class RedpandaService(Service):
                     f"registered: peer {peer.name} admin API not yet available ({e})"
                 )
                 return False
+            found = None
+            for b in admin_brokers:
+                if b['node_id'] == idx:
+                    found = b
+                    break
 
-            found = idx in [b['node_id'] for b in admin_brokers]
             if not found:
                 self.logger.info(
                     f"registered: node {node.name} not yet found in peer {peer.name}'s broker list ({admin_brokers})"
                 )
                 return False
             else:
+                if not found['is_alive']:
+                    self.logger.info(
+                        f"registered: node {node.name} found in {peer.name}'s broker list ({admin_brokers}) but not yet marked as alive"
+                    )
+                    return False
                 self.logger.debug(
                     f"registered: node {node.name} now visible in peer {peer.name}'s broker list ({admin_brokers})"
                 )
@@ -553,18 +687,47 @@ class RedpandaService(Service):
         """Run command that computes MD5 hash of every file in redpanda data 
         directory. The results of the command are turned into a map from path
         to hash-size tuples."""
-        cmd = f"find {RedpandaService.DATA_DIR} -type f -exec md5sum '{{}}' \; -exec stat -c %s '{{}}' \;"
+        cmd = f"find {RedpandaService.DATA_DIR} -type f -exec md5sum -z '{{}}' \; -exec stat -c ' %s' '{{}}' \;"
         lines = node.account.ssh_output(cmd)
-        tokens = lines.split()
+        lines = lines.decode().split("\n")
+
+        # there is a race between `find` iterating over file names and passing
+        # those to an invocation of `md5sum` in which the file may be deleted.
+        # here we log these instances for debugging, but otherwise ignore them.
+        found = []
+        for line in lines:
+            if "No such file or directory" in line:
+                self.logger.debug(f"Skipping file that disappeared: {line}")
+                continue
+            found.append(line)
+        lines = found
+
+        # the `find` command will stick a newline at the end of the results
+        # which gets parsed as an empty line by `split` above
+        if lines[-1] == "":
+            lines.pop()
+
         return {
-            tokens[ix + 1].decode(): (tokens[ix].decode(), int(tokens[ix + 2]))
-            for ix in range(0, len(tokens), 3)
+            tokens[1].rstrip("\x00"): (tokens[0], int(tokens[2]))
+            for tokens in map(lambda l: l.split(), lines)
         }
 
     def broker_address(self, node):
         assert node in self._started
         cfg = self.read_configuration(node)
         return f"{node.account.hostname}:{one_or_many(cfg['redpanda']['kafka_api'])['port']}"
+
+    def admin_endpoint(self, node):
+        assert node in self._started
+        return f"{node.account.hostname}:9644"
+
+    def admin_endpoints_list(self):
+        brokers = [self.admin_endpoint(n) for n in self._started]
+        random.shuffle(brokers)
+        return brokers
+
+    def admin_endpoints(self):
+        return ",".join(self.admin_endpoints_list())
 
     def brokers(self, limit=None):
         return ",".join(self.brokers_list(limit))
@@ -594,7 +757,8 @@ class RedpandaService(Service):
         that exactly one (family, sample) match the query. All values for the
         sample across the requested set of nodes are returned in a flat array.
 
-        An exception will be raised unless exactly one (family, sample) matches.
+        None will be returned if less than one (family, sample) matches.
+        An exception will be raised if more than one (family, sample) matches.
 
         Example:
 
@@ -627,8 +791,7 @@ class RedpandaService(Service):
                         MetricSample(family.name, sample.name, node,
                                      sample.value, sample.labels))
         if not sample_values:
-            raise Exception(
-                f"No metric sample matching '{sample_pattern}' found")
+            return None
         return MetricSamples(sample_values)
 
     def read_configuration(self, node):
@@ -673,28 +836,6 @@ class RedpandaService(Service):
                         counts[idx] += int(sample.value)
         return all(map(lambda count: count == 0, counts.values()))
 
-    def describe_topics(self, topics=None):
-        """
-        Describe topics. Pass topics=None to describe all topics, or a pass a
-        list of topic names to restrict the call to a set of specific topics.
-
-        Sample return value:
-            [
-              {'error_code': 0,
-               'topic': 'topic-kabn',
-               'is_internal': False,
-               'partitions': [
-                 {'error_code': 0,
-                  'partition': 0,
-                  'leader': 1,
-                  'replicas': [1],
-                  'isr': [1],
-                  'offline_replicas': []}
-               }
-            ]
-        """
-        return self._client.describe_topics(topics)
-
     def partitions(self, topic):
         """
         Return partition metadata for the topic.
@@ -712,18 +853,40 @@ class RedpandaService(Service):
 
         return [make_partition(p) for p in topic["partitions"]]
 
-    def create_topic(self, specs):
-        if isinstance(specs, TopicSpec):
-            specs = [specs]
-        client = self._client_type(self)
-        for spec in specs:
-            self.logger.info(f"Creating topic {spec}")
-            client.create_topic(spec)
-
-    def delete_topic(self, name):
-        client = self._client_type(self)
-        self.logger.debug(f"Deleting topic {name}")
-        client.delete_topic(name)
-
     def cov_enabled(self):
         return self._context.globals.get(self.COV_KEY, self.DEFAULT_COV_OPT)
+
+    def save_executable(self):
+        """
+        For the currently executing test, enable preserving the redpanda
+        executable as if it were a log.  This is expensive in storage space:
+        only do it if you catch an error that you think the binary will
+        be needed to make sense of, like a LeakSanitizer error.
+
+        This function does nothing in non-CI environments: in local development
+        environments, the developer already has the binary.
+        """
+
+        if os.environ.get('CI', None) == 'false':
+            # We are on a developer workstation
+            self.logger.info("Skipping saving executable, not in CI")
+            return
+
+        self.logger.info(
+            f"Saving executable as {os.path.basename(self.EXECUTABLE_SAVE_PATH)}"
+        )
+
+        # Any node will do, they all run the same binary.  May cease to be true
+        # for future mixed-version rolling upgrade testing.
+        node = self.nodes[0]
+        binary = self.find_raw_binary('redpanda')
+        save_to = self.EXECUTABLE_SAVE_PATH
+        try:
+            node.account.ssh(f"cd /tmp ; gzip -c {binary} > {save_to}")
+        except Exception as e:
+            # Don't obstruct remaining test teardown when trying to save binary during failure
+            # handling: eat the exception and log it.
+            self.logger.exception(
+                f"Error while compressing binary {binary} to {save_to}")
+        else:
+            self._context.log_collect['executable', self] = True

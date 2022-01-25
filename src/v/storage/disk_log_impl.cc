@@ -9,6 +9,7 @@
 
 #include "storage/disk_log_impl.h"
 
+#include "config/configuration.h"
 #include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "model/namespace.h"
@@ -217,8 +218,12 @@ disk_log_impl::monitor_eviction(ss::abort_source& as) {
 
 void disk_log_impl::set_collectible_offset(model::offset o) {
     vlog(
-      gclog.debug, "[{}] setting max collectible offset {}", config().ntp(), o);
-    _max_collectible_offset = o;
+      gclog.debug,
+      "[{}] setting max collectible offset {}, prev offset {}",
+      config().ntp(),
+      o,
+      _max_collectible_offset);
+    _max_collectible_offset = std::max(_max_collectible_offset, o);
 }
 
 bool disk_log_impl::is_front_segment(const segment_set::type& ptr) const {
@@ -253,32 +258,14 @@ ss::future<> disk_log_impl::garbage_collect_segments(
       },
       [this, ctx] {
           auto ptr = _segs.front();
-          // we have to use std::max in here to prevent start_offset from being
-          // `moved backward`. The _kvstore.put calls may be reordered and we do
-          // not want to update kvstore with stall data. We leverage the fact
-          // that start_offsets updates are monotonically increasing.
-          auto start_offset = std::max(
-            ptr->offsets().dirty_offset + model::offset(1),
-            read_start_offset());
-
-          return _kvstore
-            .put(
-              kvstore::key_space::storage,
-              internal::start_offset_key(config().ntp()),
-              reflection::to_iobuf(start_offset))
-            .then([this, ptr, ctx] {
+          return update_start_offset(
+                   ptr->offsets().dirty_offset + model::offset(1))
+            .then([this, ptr, ctx](bool /*updated*/) {
                 if (!is_front_segment(ptr)) {
                     return ss::now();
                 }
                 _segs.pop_front();
                 return remove_segment_permanently(ptr, ctx);
-            })
-            .then([this] {
-                // we have to update start offset with the most recent offset as
-                // updates to kv store _start_offset may have been reordered (we
-                // execute then independently from `gc` and `prefix_truncate`
-                // apis)
-                _start_offset = read_start_offset();
             });
       });
 }
@@ -693,7 +680,14 @@ ss::future<> disk_log_impl::new_segment(
   model::offset o, model::term_id t, ss::io_priority_class pc) {
     vassert(
       o() >= 0 && t() >= 0, "offset:{} and term:{} must be initialized", o, t);
-    return _manager.make_log_segment(config(), o, t, pc)
+    return _manager
+      .make_log_segment(
+        config(),
+        o,
+        t,
+        pc,
+        config::shard_local_cfg().storage_read_buffer_size(),
+        config::shard_local_cfg().storage_read_readahead_count())
       .then([this](ss::lw_shared_ptr<segment> handles) mutable {
           return remove_empty_segments().then(
             [this, h = std::move(handles)]() mutable {
@@ -703,7 +697,7 @@ ss::future<> disk_log_impl::new_segment(
                 }
                 _segs.add(std::move(h));
                 _probe.segment_created();
-                return _stm_manager->make_snapshot();
+                _stm_manager->make_snapshot_in_background();
             });
       });
 }
@@ -976,72 +970,62 @@ ss::future<> disk_log_impl::truncate_prefix(truncate_prefix_config cfg) {
 }
 
 ss::future<> disk_log_impl::do_truncate_prefix(truncate_prefix_config cfg) {
-    if (cfg.start_offset <= _start_offset) {
-        return ss::make_ready_future<>();
-    }
-
     /*
      * Persist the desired starting offset
      */
-    return _kvstore
-      .put(
-        kvstore::key_space::storage,
-        internal::start_offset_key(config().ntp()),
-        reflection::to_iobuf(cfg.start_offset))
-      .then([this, cfg] {
-          /*
-           * Then delete all segments (potentially including the active segment)
-           * whose max offset falls below the new starting offset.
-           */
-          return _readers_cache->evict_prefix_truncate(cfg.start_offset)
-            .then([this, cfg](readers_cache::range_lock_holder cache_lock) {
-                return remove_prefix_full_segments(cfg).finally(
-                  [cache_lock = std::move(cache_lock)] {});
-            });
-      })
-      .then([this] {
-          /*
-           * The two salient scenarios that can result are:
-           *
-           * (1) The log was initially empty, or the new starting offset fell
-           * beyond the end of the log's dirty offset in which case all segments
-           * have been deleted, and the log is now empty.
-           *
-           *     In this case the log will be rolled at the next append,
-           *     creating a new segment beginning at the new starting offset.
-           *     see `make_appender` for how the next offset is determined.
-           *
-           * (2) Zero or more full segments are removed whose ending offset is
-           * ordered before the new starting offset. The new offset may have
-           * fallen within an existing segment.
-           *
-           *     Segments below the new starting offset can be garbage
-           *     collected. In this case when the new starting offset has fallen
-           *     within an existing segment, the enforcement of the new offset
-           *     is only logical, e.g. verify reader offset ranges.  Reclaiming
-           *     the space corresponding to the non-visible prefix of the
-           *     segment would require either (1) file hole punching or (2)
-           *     rewriting the segment.  The overhead is never more than one
-           *     segment, and this optimization is left as future work.
-           */
-          _start_offset = read_start_offset();
+    if (!co_await update_start_offset(cfg.start_offset)) {
+        co_return;
+    }
 
-          /*
-           * We want to maintain the following relationship for consistency:
-           *
-           *     start offset <= committed offset <= dirty offset
-           *
-           * However, it might be that the new starting offset is ordered
-           * between the commited and dirty offsets. When this occurs we pay a
-           * small penalty to resolve the inconsistency by flushing the log and
-           * advancing the committed offset to be the same as the dirty offset.
-           */
-          auto ofs = offsets();
-          if (_start_offset >= ofs.committed_offset) {
-              return flush();
-          }
-          return ss::now();
-      });
+    /*
+     * Then delete all segments (potentially including the active segment)
+     * whose max offset falls below the new starting offset.
+     */
+    {
+        auto cache_lock = co_await _readers_cache->evict_prefix_truncate(
+          cfg.start_offset);
+        co_await remove_prefix_full_segments(cfg);
+    }
+
+    /*
+     * The two salient scenarios that can result are:
+     *
+     * (1) The log was initially empty, or the new starting offset fell
+     * beyond the end of the log's dirty offset in which case all segments
+     * have been deleted, and the log is now empty.
+     *
+     *     In this case the log will be rolled at the next append,
+     *     creating a new segment beginning at the new starting offset.
+     *     see `make_appender` for how the next offset is determined.
+     *
+     * (2) Zero or more full segments are removed whose ending offset is
+     * ordered before the new starting offset. The new offset may have
+     * fallen within an existing segment.
+     *
+     *     Segments below the new starting offset can be garbage
+     *     collected. In this case when the new starting offset has fallen
+     *     within an existing segment, the enforcement of the new offset
+     *     is only logical, e.g. verify reader offset ranges.  Reclaiming
+     *     the space corresponding to the non-visible prefix of the
+     *     segment would require either (1) file hole punching or (2)
+     *     rewriting the segment.  The overhead is never more than one
+     *     segment, and this optimization is left as future work.
+     */
+
+    /*
+     * We want to maintain the following relationship for consistency:
+     *
+     *     start offset <= committed offset <= dirty offset
+     *
+     * However, it might be that the new starting offset is ordered
+     * between the commited and dirty offsets. When this occurs we pay a
+     * small penalty to resolve the inconsistency by flushing the log and
+     * advancing the committed offset to be the same as the dirty offset.
+     */
+    auto ofs = offsets();
+    if (_start_offset >= ofs.committed_offset) {
+        co_await flush();
+    }
 }
 
 ss::future<> disk_log_impl::truncate(truncate_config cfg) {
@@ -1149,6 +1133,28 @@ model::offset disk_log_impl::read_start_offset() const {
         return offset;
     }
     return model::offset{};
+}
+
+ss::future<bool> disk_log_impl::update_start_offset(model::offset o) {
+    // Critical invariant for _start_offset is that it never decreases.
+    // We update it under lock to ensure this invariant - otherwise we can
+    // never be sure that we are not overwriting a bigger value that
+    // is concurrently written to kvstore.
+    return _start_offset_lock.with([this, o] {
+        if (o <= _start_offset) {
+            return ss::make_ready_future<bool>(false);
+        }
+
+        return _kvstore
+          .put(
+            kvstore::key_space::storage,
+            internal::start_offset_key(config().ntp()),
+            reflection::to_iobuf(o))
+          .then([this, o] {
+              _start_offset = o;
+              return true;
+          });
+    });
 }
 
 ss::future<>

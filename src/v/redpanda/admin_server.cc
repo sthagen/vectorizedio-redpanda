@@ -28,6 +28,8 @@
 #include "finjector/hbadger.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
+#include "model/record.h"
+#include "net/dns.h"
 #include "raft/types.h"
 #include "redpanda/admin/api-doc/broker.json.h"
 #include "redpanda/admin/api-doc/cluster_config.json.h"
@@ -37,7 +39,6 @@
 #include "redpanda/admin/api-doc/raft.json.h"
 #include "redpanda/admin/api-doc/security.json.h"
 #include "redpanda/admin/api-doc/status.json.h"
-#include "rpc/dns.h"
 #include "security/scram_algorithm.h"
 #include "security/scram_authenticator.h"
 #include "vlog.h"
@@ -61,6 +62,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
+#include <limits>
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
@@ -72,6 +74,7 @@ static ss::logger logger{"admin_api_server"};
 admin_server::admin_server(
   admin_server_cfg cfg,
   ss::sharded<cluster::partition_manager>& pm,
+  ss::sharded<coproc::partition_manager>& cpm,
   cluster::controller* controller,
   ss::sharded<cluster::shard_table>& st,
   ss::sharded<cluster::metadata_cache>& metadata_cache)
@@ -79,6 +82,7 @@ admin_server::admin_server(
   , _server("admin")
   , _cfg(std::move(cfg))
   , _partition_manager(pm)
+  , _cp_partition_manager(cpm)
   , _controller(controller)
   , _shard_table(st)
   , _metadata_cache(metadata_cache) {}
@@ -217,6 +221,22 @@ apply_validator(json_validator& validator, rapidjson::Document const& doc) {
     }
 }
 
+/**
+ * Helper for requests with boolean URL query parameters that should
+ * be treated as false if absent, or true if "true" (case insensitive) or "1"
+ */
+static bool
+get_boolean_query_param(const ss::httpd::request& req, std::string_view name) {
+    auto key = ss::sstring(name);
+    if (!req.query_parameters.contains(key)) {
+        return false;
+    }
+
+    const ss::sstring& str_param = req.query_parameters.at(key);
+    return ss::httpd::request::case_insensitive_cmp()(str_param, "true")
+           || str_param == "1";
+}
+
 void admin_server::configure_dashboard() {
     if (_cfg.dashboard_dir) {
         auto handler = std::make_unique<dashboard_handler>(*_cfg.dashboard_dir);
@@ -257,7 +277,7 @@ ss::future<> admin_server::configure_listeners() {
                   });
             }
         }
-        auto resolved = co_await rpc::resolve_dns(ep.address);
+        auto resolved = co_await net::resolve_dns(ep.address);
         co_await ss::with_scheduling_group(_cfg.sg, [this, cred, resolved] {
             return _server.listen(resolved, cred);
         });
@@ -380,6 +400,7 @@ ss::future<> admin_server::throw_on_error(
               id));
         case cluster::errc::update_in_progress:
         case cluster::errc::waiting_for_recovery:
+        case cluster::errc::no_leader_controller:
             throw ss::httpd::base_exception(
               fmt::format("Not ready ({})", ec.message()),
               ss::httpd::reply::status_type::service_unavailable);
@@ -400,11 +421,24 @@ ss::future<> admin_server::throw_on_error(
             throw ss::httpd::base_exception(
               fmt::format("Not ready: {}", ec.message()),
               ss::httpd::reply::status_type::service_unavailable);
+        case raft::errc::transfer_to_current_leader:
+            co_return;
         case raft::errc::not_leader:
             throw co_await redirect_to_leader(req, ntp);
         default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected raft error: {}", ec.message()));
+        }
+    } else if (ec.category() == cluster::tx_error_category()) {
+        switch (cluster::tx_errc(ec.value())) {
+        case cluster::tx_errc::leader_not_found:
+            throw co_await redirect_to_leader(req, ntp);
+        case cluster::tx_errc::pid_not_found:
+            throw ss::httpd::bad_request_exception(
+              fmt_with_ctx(fmt::format, "Can not find pid for ntp:{}", ntp));
+        default:
+            throw ss::httpd::server_error_exception(
+              fmt::format("Unexpected tx_error error: {}", ec.message()));
         }
     } else {
         throw ss::httpd::server_error_exception(
@@ -612,6 +646,7 @@ void admin_server::register_cluster_config_routes() {
                 pm.visibility = ss::sstring(
                   config::to_string_view(p.get_visibility()));
                 pm.nullable = p.is_nullable();
+                pm.is_secret = p.is_secret();
 
                 if (p.is_array()) {
                     pm.type = "array";
@@ -653,7 +688,7 @@ void admin_server::register_cluster_config_routes() {
           auto doc = parse_json_body(*req);
           apply_validator(cluster_config_validator, doc);
 
-          cluster::config_update update;
+          cluster::config_update_request update;
 
           // Deserialize removes
           const auto& json_remove = doc["remove"];
@@ -674,26 +709,70 @@ void admin_server::register_cluster_config_routes() {
               update.upsert.push_back({i.name.GetString(), s});
           }
 
+          // Config property validation happens further down the line
+          // at the point that properties are set on each node in
+          // response to the deltas that we write to the controller log,
+          // but we also do an early validation pass here to avoid writing
+          // clearly wrong things into the log & give better feedback
+          // to the API consumer.
+          if (!get_boolean_query_param(*req, "force")) {
+              // A scratch copy of configuration: we must not touch
+              // the real live configuration object, that will be updated
+              // by config_manager much after config is written to controller
+              // log.
+              config::configuration cfg;
+
+              std::map<ss::sstring, ss::sstring> errors;
+              for (const auto& i : update.upsert) {
+                  // Decode to a YAML object because that's what the property
+                  // interface expects.
+                  // Don't both catching ParserException: this was encoded
+                  // just a few lines above.
+                  const auto& yaml_value = i.second;
+                  auto val = YAML::Load(yaml_value);
+
+                  if (!cfg.contains(i.first)) {
+                      errors[i.first] = "Unknown property";
+                      continue;
+                  }
+                  auto& property = cfg.get(i.first);
+                  try {
+                      property.set_value(val);
+                  } catch (...) {
+                      errors[i.first] = fmt::format(
+                        "{}", std::current_exception());
+                      vlog(
+                        logger.warn, "Invalid {}: '{}'", i.first, yaml_value);
+                  }
+              }
+
+              if (!errors.empty()) {
+                  // TODO structured response
+                  throw ss::httpd::bad_request_exception(
+                    fmt::format("Invalid properties"));
+              }
+          }
+
           vlog(
             logger.trace,
             "patch_cluster_config: {} upserts, {} removes",
             update.upsert.size(),
             update.remove.size());
 
-          auto err = co_await _controller->get_config_frontend().invoke_on(
-            cluster::config_frontend::version_shard,
-            [update](cluster::config_frontend& fe) mutable
-            -> ss::future<std::error_code> {
-                return fe.patch(update, model::timeout_clock::now() + 5s);
-            });
+          auto patch_result
+            = co_await _controller->get_config_frontend().invoke_on(
+              cluster::config_frontend::version_shard,
+              [update = std::move(update)](cluster::config_frontend& fe) mutable
+              -> ss::future<cluster::config_frontend::patch_result> {
+                  return fe.patch(
+                    std::move(update), model::timeout_clock::now() + 5s);
+              });
 
-          co_await throw_on_error(*req, err, model::controller_ntp);
+          co_await throw_on_error(
+            *req, patch_result.errc, model::controller_ntp);
 
           ss::httpd::cluster_config_json::cluster_config_write_result result;
-          result.config_version
-            = co_await _controller->get_config_manager().invoke_on(
-              cluster::controller_stm_shard,
-              [](cluster::config_manager& mgr) { return mgr.get_version(); });
+          result.config_version = patch_result.version;
           co_return ss::json::json_return_type(std::move(result));
       });
 }
@@ -1065,6 +1144,46 @@ void admin_server::register_broker_routes() {
       });
 }
 
+// Helpers for partition routes
+namespace {
+
+model::ntp parse_ntp_from_request(ss::httpd::parameters& param) {
+    auto ns = model::ns(param["namespace"]);
+    auto topic = model::topic(param["topic"]);
+
+    model::partition_id partition;
+    try {
+        partition = model::partition_id(std::stoi(param["partition"]));
+    } catch (...) {
+        throw ss::httpd::bad_param_exception(fmt::format(
+          "Partition id must be an integer: {}", param["partition"]));
+    }
+
+    if (partition() < 0) {
+        throw ss::httpd::bad_param_exception(
+          fmt::format("Invalid partition id {}", partition));
+    }
+
+    return model::ntp(std::move(ns), std::move(topic), partition);
+}
+
+bool need_redirect_to_leader(
+  model::ntp ntp, ss::sharded<cluster::metadata_cache>& metadata_cache) {
+    auto leader_id_opt = metadata_cache.local().get_leader_id(ntp);
+    if (!leader_id_opt.has_value()) {
+        throw ss::httpd::base_exception(
+          fmt_with_ctx(
+            fmt::format,
+            "Partition {} does not have a leader, cannot redirect",
+            ntp),
+          ss::httpd::reply::status_type::service_unavailable);
+    }
+
+    return leader_id_opt.value() != config::node().node_id();
+}
+
+} // namespace
+
 void admin_server::register_partition_routes() {
     /*
      * Get a list of partition summaries.
@@ -1072,27 +1191,36 @@ void admin_server::register_partition_routes() {
     ss::httpd::partition_json::get_partitions.set(
       _server._routes, [this](std::unique_ptr<ss::httpd::request>) {
           using summary = ss::httpd::partition_json::partition_summary;
-          return _partition_manager
-            .map_reduce0(
-              [](cluster::partition_manager& pm) {
-                  std::vector<summary> partitions;
-                  partitions.reserve(pm.partitions().size());
-                  for (const auto& it : pm.partitions()) {
-                      summary p;
-                      p.ns = it.first.ns;
-                      p.topic = it.first.tp.topic;
-                      p.partition_id = it.first.tp.partition;
-                      p.core = ss::this_shard_id();
-                      partitions.push_back(std::move(p));
-                  }
-                  return partitions;
-              },
-              std::vector<summary>{},
-              [](std::vector<summary> acc, std::vector<summary> update) {
-                  acc.insert(acc.end(), update.begin(), update.end());
-                  return acc;
-              })
-            .then([](std::vector<summary> partitions) {
+          auto get_summaries = [](auto& partition_manager, bool materialized) {
+              return partition_manager.map_reduce0(
+                [materialized](auto& pm) {
+                    std::vector<summary> partitions;
+                    partitions.reserve(pm.partitions().size());
+                    for (const auto& it : pm.partitions()) {
+                        summary p;
+                        p.ns = it.first.ns;
+                        p.topic = it.first.tp.topic;
+                        p.partition_id = it.first.tp.partition;
+                        p.core = ss::this_shard_id();
+                        p.materialized = materialized;
+                        partitions.push_back(std::move(p));
+                    }
+                    return partitions;
+                },
+                std::vector<summary>{},
+                [](std::vector<summary> acc, std::vector<summary> update) {
+                    acc.insert(acc.end(), update.begin(), update.end());
+                    return acc;
+                });
+          };
+          auto f1 = get_summaries(_partition_manager, false);
+          auto f2 = get_summaries(_cp_partition_manager, true);
+          return ss::when_all_succeed(std::move(f1), std::move(f2))
+            .then([](auto summaries) {
+                auto& [partitions, s2] = summaries;
+                for (auto& s : s2) {
+                    partitions.push_back(std::move(s));
+                }
                 return ss::make_ready_future<ss::json::json_return_type>(
                   std::move(partitions));
             });
@@ -1103,25 +1231,7 @@ void admin_server::register_partition_routes() {
      */
     ss::httpd::partition_json::get_partition.set(
       _server._routes, [this](std::unique_ptr<ss::httpd::request> req) {
-          auto ns = model::ns(req->param["namespace"]);
-          auto topic = model::topic(req->param["topic"]);
-
-          model::partition_id partition;
-          try {
-              partition = model::partition_id(
-                std::stoi(req->param["partition"]));
-          } catch (...) {
-              throw ss::httpd::bad_param_exception(fmt::format(
-                "Partition id must be an integer: {}",
-                req->param["partition"]));
-          }
-
-          if (partition() < 0) {
-              throw ss::httpd::bad_param_exception(
-                fmt::format("Invalid partition id {}", partition));
-          }
-
-          const model::ntp ntp(std::move(ns), std::move(topic), partition);
+          const model::ntp ntp = parse_ntp_from_request(req->param);
           const bool is_controller = ntp == model::controller_ntp;
 
           if (!is_controller && !_metadata_cache.local().contains(ntp)) {
@@ -1200,6 +1310,164 @@ void admin_server::register_partition_routes() {
           }
       });
 
+    /*
+     * Get detailed information about transactions for partition.
+     */
+    ss::httpd::partition_json::get_transactions.set(
+      _server._routes,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          const model::ntp ntp = parse_ntp_from_request(req->param);
+
+          if (need_redirect_to_leader(ntp, _metadata_cache)) {
+              throw co_await redirect_to_leader(*req, ntp);
+          }
+
+          auto shard = _shard_table.local().shard_for(ntp);
+          // Strange situation, but need to check it
+          if (!shard) {
+              throw ss::httpd::server_error_exception(fmt_with_ctx(
+                fmt::format, "Can not find shard for partition {}", ntp.tp));
+          }
+
+          co_return co_await _partition_manager.invoke_on(
+            *shard,
+            [ntp = std::move(ntp), req = std::move(req), this](
+              cluster::partition_manager& pm) mutable
+            -> ss::future<ss::json::json_return_type> {
+                auto partition = pm.get(ntp);
+                if (!partition) {
+                    throw ss::httpd::server_error_exception(fmt_with_ctx(
+                      fmt::format, "Can not find partition {}", partition));
+                }
+
+                auto rm_stm_ptr = partition->rm_stm();
+
+                if (!rm_stm_ptr) {
+                    throw ss::httpd::server_error_exception(fmt_with_ctx(
+                      fmt::format,
+                      "Can not get rm_stm for partition {}",
+                      partition));
+                }
+
+                auto transactions = co_await rm_stm_ptr->get_transactions();
+
+                if (transactions.has_error()) {
+                    co_await throw_on_error(*req, transactions.error(), ntp);
+                }
+                ss::httpd::partition_json::transactions ans;
+
+                auto offset_translator
+                  = partition->get_offset_translator_state();
+
+                for (auto& [id, tx_info] : transactions.value()) {
+                    ss::httpd::partition_json::producer_identity pid;
+                    pid.id = id.get_id();
+                    pid.epoch = id.get_epoch();
+
+                    ss::httpd::partition_json::transaction new_tx;
+                    new_tx.producer_id = pid;
+                    new_tx.status = ss::sstring(tx_info.get_status());
+
+                    new_tx.lso_bound = offset_translator->from_log_offset(
+                      tx_info.lso_bound);
+
+                    auto staleness = tx_info.get_staleness();
+                    // -1 is returned for expired transaction, because how long
+                    // transaction do not do progress is useless for expired tx.
+                    new_tx.staleness_ms = staleness.has_value()
+                                            ? staleness.value().count()
+                                            : -1;
+                    auto timeout = tx_info.get_timeout();
+                    // -1 is returned for expired transaction, because timeout
+                    // is useless for expired tx.
+                    new_tx.timeout_ms = timeout.has_value()
+                                          ? timeout.value().count()
+                                          : -1;
+
+                    if (tx_info.is_expired()) {
+                        ans.expired_transactions.push(new_tx);
+                    } else {
+                        ans.active_transactions.push(new_tx);
+                    }
+                }
+
+                co_return ss::json::json_return_type(ans);
+            });
+      });
+
+    /*
+     * Abort transaction for partition
+     */
+    ss::httpd::partition_json::mark_transaction_expired.set(
+      _server._routes,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          const model::ntp ntp = parse_ntp_from_request(req->param);
+
+          model::producer_identity pid;
+          auto node = req->get_query_param("id");
+          try {
+              pid.id = std::stoi(node);
+          } catch (...) {
+              throw ss::httpd::bad_param_exception(fmt_with_ctx(
+                fmt::format, "Transaction id must be an integer: {}", node));
+          }
+          node = req->get_query_param("epoch");
+          try {
+              int64_t epoch = std::stoi(node);
+              if (
+                epoch < std::numeric_limits<int16_t>::min()
+                || epoch > std::numeric_limits<int16_t>::max()) {
+                  throw ss::httpd::bad_param_exception(fmt_with_ctx(
+                    fmt::format, "Invalid transaction epoch {}", epoch));
+              }
+              pid.epoch = epoch;
+          } catch (...) {
+              throw ss::httpd::bad_param_exception(fmt_with_ctx(
+                fmt::format, "Transaction epoch must be an integer: {}", node));
+          }
+
+          vlog(logger.info, "Mark transaction expired for pid:{}", pid);
+
+          if (need_redirect_to_leader(ntp, _metadata_cache)) {
+              throw co_await redirect_to_leader(*req, ntp);
+          }
+
+          auto shard = _shard_table.local().shard_for(ntp);
+          // Strange situation, but need to check it
+          if (!shard) {
+              throw ss::httpd::server_error_exception(fmt_with_ctx(
+                fmt::format, "Can not find shard for partition {}", ntp.tp));
+          }
+
+          co_return co_await _partition_manager.invoke_on(
+            *shard,
+            [ntp = std::move(ntp), pid, req = std::move(req), this](
+              cluster::partition_manager& pm) mutable
+            -> ss::future<ss::json::json_return_type> {
+                auto partition = pm.get(ntp);
+                if (!partition) {
+                    throw ss::httpd::server_error_exception(fmt_with_ctx(
+                      fmt::format, "Can not find partition {}", partition));
+                }
+
+                auto rm_stm_ptr = partition->rm_stm();
+
+                if (!rm_stm_ptr) {
+                    throw ss::httpd::server_error_exception(fmt_with_ctx(
+                      fmt::format,
+                      "Can not get rm_stm for partition {}",
+                      partition));
+                }
+
+                auto res = co_await rm_stm_ptr->mark_expired(pid);
+                co_await throw_on_error(*req, res, ntp);
+
+                co_return ss::json::json_return_type(ss::json::json_void());
+            });
+      });
+
     // make sure to call reset() before each use
     static thread_local json_validator set_replicas_validator(
       make_set_replicas_validator());
@@ -1226,9 +1494,11 @@ void admin_server::register_partition_routes() {
                 fmt::format("Invalid partition id {}", partition));
           }
 
-          if (ns != model::kafka_namespace) {
+          const model::ntp ntp(std::move(ns), std::move(topic), partition);
+
+          if (ntp == model::controller_ntp) {
               throw ss::httpd::bad_request_exception(
-                fmt::format("Unsupported namespace: {}", ns));
+                fmt::format("Can't reconfigure a controller"));
           }
 
           auto doc = parse_json_body(*req);
@@ -1264,8 +1534,6 @@ void admin_server::register_partition_routes() {
               replicas.push_back(
                 model::broker_shard{.node_id = node_id, .shard = shard});
           }
-
-          const model::ntp ntp(std::move(ns), std::move(topic), partition);
 
           auto current_assignment
             = _controller->get_topics_state().local().get_partition_assignment(

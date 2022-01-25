@@ -155,16 +155,18 @@ public:
     /// Checks if it has given partition
     bool contains(model::topic_namespace_view, model::partition_id) const;
 
-    /// Updates partition leader and notify waiters if needed
-    void update_partition_leader(
-      const model::ntp&, model::term_id, std::optional<model::node_id>);
-
     std::optional<partition_assignment>
     get_partition_assignment(const model::ntp&) const;
 
     const underlying_t& topics_map() const { return _topics; }
 
+    const hierarchy_t& hierarchy_map() const { return _topics_hierarchy; }
+
     bool is_update_in_progress(const model::ntp&) const;
+
+    bool has_updates_in_progress() const {
+        return !_update_in_progress.empty();
+    }
 
 private:
     struct waiter {

@@ -169,6 +169,7 @@ func (r *PkiReconciler) prepareAPI(
 		return []resources.Resource{}, nil
 	}
 
+	// TODO(#3550): Do not create rootIssuer if nodeSecretRef is passed and mTLS is disabled
 	toApplyRoot, rootIssuerRef := r.prepareRoot(rootCertSuffix)
 	toApply = append(toApply, toApplyRoot...)
 	nodeIssuerRef = rootIssuerRef
@@ -237,6 +238,10 @@ func (r *PkiReconciler) copyNodeSecretToLocalNamespace(
 			Name:      secret.Name,
 			Namespace: r.pandaCluster.Namespace,
 			Labels:    secret.Labels,
+		},
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: "v1",
 		},
 		Type: secret.Type,
 		Data: map[string][]byte{

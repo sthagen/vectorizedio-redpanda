@@ -137,7 +137,7 @@ void consensus::do_step_down() {
 }
 
 void consensus::maybe_step_down() {
-    (void)ss::with_gate(_bg, [this] {
+    ssx::spawn_with_gate(_bg, [this] {
         return _op_lock.with([this] {
             if (_vstate == vote_state::leader) {
                 auto majority_hbeat = majority_heartbeat();
@@ -305,7 +305,7 @@ consensus::success_reply consensus::update_follower_index(
     // If RPC request or response contains term T > currentTerm:
     // set currentTerm = T, convert to follower (Raft paper: §5.1)
     if (reply.term > _term) {
-        (void)with_gate(_bg, [this, term = reply.term] {
+        ssx::spawn_with_gate(_bg, [this, term = reply.term] {
             return step_down(model::term_id(term));
         });
         return success_reply::no;
@@ -359,7 +359,7 @@ consensus::success_reply consensus::update_follower_index(
 }
 
 void consensus::maybe_promote_to_voter(vnode id) {
-    (void)ss::with_gate(_bg, [this, id] {
+    ssx::spawn_with_gate(_bg, [this, id] {
         const auto& latest_cfg = _configuration_manager.get_latest();
 
         // node is no longer part of current configuration, skip promotion
@@ -396,7 +396,7 @@ void consensus::maybe_promote_to_voter(vnode id) {
               vlog(
                 _ctxlog.trace, "node {} promotion result {}", id, ec.message());
           });
-    }).handle_exception_type([](const ss::gate_closed_exception&) {});
+    });
 }
 
 void consensus::process_append_entries_reply(
@@ -464,18 +464,20 @@ void consensus::dispatch_recovery(follower_index_metadata& idx) {
     }
     idx.is_recovering = true;
     // background
-    (void)with_gate(_bg, [this, node_id = idx.node_id] {
-        auto recovery = std::make_unique<recovery_stm>(
-          this, node_id, _scheduling);
-        auto ptr = recovery.get();
-        return ptr->apply()
-          .handle_exception([this, node_id](const std::exception_ptr& e) {
-              vlog(_ctxlog.warn, "Node {} recovery failed - {}", node_id, e);
-          })
-          .finally([r = std::move(recovery)] {});
-    }).handle_exception([this](const std::exception_ptr& e) {
-        vlog(_ctxlog.warn, "Recovery error - {}", e);
-    });
+    ssx::background
+      = ssx::spawn_with_gate_then(_bg, [this, node_id = idx.node_id] {
+            auto recovery = std::make_unique<recovery_stm>(
+              this, node_id, _scheduling);
+            auto ptr = recovery.get();
+            return ptr->apply()
+              .handle_exception([this, node_id](const std::exception_ptr& e) {
+                  vlog(
+                    _ctxlog.warn, "Node {} recovery failed - {}", node_id, e);
+              })
+              .finally([r = std::move(recovery)] {});
+        }).handle_exception([this](const std::exception_ptr& e) {
+            vlog(_ctxlog.warn, "Recovery error - {}", e);
+        });
 }
 
 ss::future<result<model::offset>> consensus::linearizable_barrier() {
@@ -540,7 +542,7 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     u.reset();
 
     // wait for responsens in background
-    (void)ss::with_gate(_bg, [futures = std::move(send_futures)]() mutable {
+    ssx::spawn_with_gate(_bg, [futures = std::move(send_futures)]() mutable {
         return ss::when_all_succeed(futures.begin(), futures.end());
     });
 
@@ -785,7 +787,7 @@ ss::future<bool> consensus::dispatch_prevote(bool leadership_transfer) {
               return f.then([ready] { return ready; });
           }
           // background
-          (void)with_gate(
+          ssx::spawn_with_gate(
             _bg, [pvstm_p = std::move(pvstm_p), f = std::move(f)]() mutable {
                 return std::move(f);
             });
@@ -831,48 +833,49 @@ void consensus::dispatch_vote(bool leadership_transfer) {
         return;
     }
     // background, acquire lock, transition state
-    (void)with_gate(_bg, [this, leadership_transfer] {
-        return dispatch_prevote(leadership_transfer)
-          .then([this, leadership_transfer](bool ready) mutable {
-              if (!ready) {
-                  return ss::make_ready_future<>();
-              }
-              auto vstm = std::make_unique<vote_stm>(this);
-              auto p = vstm.get();
+    ssx::background
+      = ssx::spawn_with_gate_then(_bg, [this, leadership_transfer] {
+            return dispatch_prevote(leadership_transfer)
+              .then([this, leadership_transfer](bool ready) mutable {
+                  if (!ready) {
+                      return ss::make_ready_future<>();
+                  }
+                  auto vstm = std::make_unique<vote_stm>(this);
+                  auto p = vstm.get();
 
-              // CRITICAL: vote performs locking on behalf of consensus
-              return p->vote(leadership_transfer)
-                .then_wrapped([this, p, vstm = std::move(vstm)](
-                                ss::future<> vote_f) mutable {
-                    try {
-                        vote_f.get();
-                    } catch (...) {
-                        vlog(
-                          _ctxlog.warn,
-                          "Error returned from voting process {}",
-                          std::current_exception());
-                    }
-                    auto f = p->wait().finally([vstm = std::move(vstm)] {});
-                    // make sure we wait for all futures when gate is closed
-                    if (_bg.is_closed()) {
-                        return f;
-                    }
-                    // background
-                    (void)with_gate(
-                      _bg,
-                      [vstm = std::move(vstm), f = std::move(f)]() mutable {
-                          return std::move(f);
-                      });
+                  // CRITICAL: vote performs locking on behalf of consensus
+                  return p->vote(leadership_transfer)
+                    .then_wrapped([this, p, vstm = std::move(vstm)](
+                                    ss::future<> vote_f) mutable {
+                        try {
+                            vote_f.get();
+                        } catch (...) {
+                            vlog(
+                              _ctxlog.warn,
+                              "Error returned from voting process {}",
+                              std::current_exception());
+                        }
+                        auto f = p->wait().finally([vstm = std::move(vstm)] {});
+                        // make sure we wait for all futures when gate is closed
+                        if (_bg.is_closed()) {
+                            return f;
+                        }
+                        // background
+                        ssx::spawn_with_gate(
+                          _bg,
+                          [vstm = std::move(vstm), f = std::move(f)]() mutable {
+                              return std::move(f);
+                          });
 
-                    return ss::make_ready_future<>();
-                });
-          })
-          .handle_exception([this](const std::exception_ptr& e) {
-              vlog(_ctxlog.warn, "Exception thrown while voting - {}", e);
-          })
-          .finally([this] { arm_vote_timeout(); });
-    });
+                        return ss::make_ready_future<>();
+                    });
+              })
+              .finally([this] { arm_vote_timeout(); });
+        }).handle_exception([this](const std::exception_ptr& e) {
+            vlog(_ctxlog.warn, "Exception thrown while voting - {}", e);
+        });
 }
+
 void consensus::arm_vote_timeout() {
     if (!_bg.is_closed()) {
         _vote_timeout.rearm(_jit());
@@ -1193,7 +1196,7 @@ ss::future<> consensus::do_start() {
 void consensus::start_dispatching_disk_append_events() {
     // forward disk appends to follower state changed condition
     // variables
-    (void)ss::with_gate(_bg, [this] {
+    ssx::spawn_with_gate(_bg, [this] {
         return ss::do_until(
           [this] { return _as.abort_requested(); },
           [this] {
@@ -1742,15 +1745,19 @@ ss::future<> consensus::truncate_to_latest_snapshot() {
     }
     // we have to prefix truncate config manage at exactly last offset included
     // in snapshot as this is the offset of configuration included in snapshot
-    // metadata
-    return _configuration_manager.prefix_truncate(_last_snapshot_index)
+    // metadata.
+    //
+    // We truncate the log before truncating offset translator to wait for
+    // readers that started reading from the start of the log before we advanced
+    // _last_snapshot_index and thus can still need offset translation info.
+    return _log
+      .truncate_prefix(storage::truncate_prefix_config(
+        details::next_offset(_last_snapshot_index), _scheduling.default_iopc))
       .then([this] {
-          return _offset_translator.prefix_truncate(_last_snapshot_index);
+          return _configuration_manager.prefix_truncate(_last_snapshot_index);
       })
       .then([this] {
-          return _log.truncate_prefix(storage::truncate_prefix_config(
-            details::next_offset(_last_snapshot_index),
-            _scheduling.default_iopc));
+          return _offset_translator.prefix_truncate(_last_snapshot_index);
       })
       .then([this] {
           // when log was prefix truncate flushed offset should be equal to at
@@ -1781,6 +1788,8 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
         return _configuration_manager
           .add(_last_snapshot_index, std::move(metadata.latest_configuration))
           .then([this, delta = metadata.log_start_delta]() mutable {
+              _probe.configuration_update();
+
               if (delta < offset_translator_delta(0)) {
                   delta = offset_translator_delta(
                     _configuration_manager.offset_delta(_last_snapshot_index));
@@ -1794,11 +1803,8 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
               return _offset_translator.prefix_truncate_reset(
                 _last_snapshot_index, delta);
           })
-          .then([this] {
-              _probe.configuration_update();
-              _log.set_collectible_offset(_last_snapshot_index);
-              return truncate_to_latest_snapshot();
-          });
+          .then([this] { return truncate_to_latest_snapshot(); })
+          .then([this] { _log.set_collectible_offset(_last_snapshot_index); });
     });
 }
 
@@ -1907,31 +1913,49 @@ ss::future<install_snapshot_reply> consensus::finish_snapshot(
 }
 
 ss::future<> consensus::write_snapshot(write_snapshot_cfg cfg) {
-    return _op_lock.with([this, cfg = std::move(cfg)]() mutable {
-        // do nothing, we already have snapshot for this offset
-        // MUST be checked under the _op_lock
-        if (cfg.last_included_index <= _last_snapshot_index) {
-            return ss::now();
-        }
-        auto max_offset = cfg.should_truncate ? _commit_index
-                                              : last_visible_index();
+    model::offset last_included_index = cfg.last_included_index;
+    bool updated = co_await _op_lock.with(
+      [this, cfg = std::move(cfg)]() mutable {
+          // do nothing, we already have snapshot for this offset
+          // MUST be checked under the _op_lock
+          if (cfg.last_included_index <= _last_snapshot_index) {
+              return ss::make_ready_future<bool>(false);
+          }
 
-        vassert(
-          cfg.last_included_index <= max_offset,
-          "Can not take snapshot, requested offset: {} is greater than max "
-          "snapshot offset: {}",
-          cfg.last_included_index,
-          _commit_index);
+          auto max_offset = last_visible_index();
+          vassert(
+            cfg.last_included_index <= max_offset,
+            "Can not take snapshot, requested offset: {} is greater than max "
+            "snapshot offset: {}",
+            cfg.last_included_index,
+            max_offset);
 
-        return do_write_snapshot(cfg.last_included_index, std::move(cfg.data))
-          .then([this, should_truncate = cfg.should_truncate] {
-              if (!should_truncate) {
-                  return ss::now();
-              }
-              return truncate_to_latest_snapshot();
+          return do_write_snapshot(cfg.last_included_index, std::move(cfg.data))
+            .then([] { return true; });
+      });
+
+    if (!updated) {
+        co_return;
+    }
+
+    // Release the lock when truncating the log because it can take some
+    // time while we wait for readers to be evicted.
+    co_await _log.truncate_prefix(storage::truncate_prefix_config(
+      details::next_offset(last_included_index), _scheduling.default_iopc));
+
+    co_await _op_lock.with([this, last_included_index] {
+        return _configuration_manager.prefix_truncate(last_included_index)
+          .then([this, last_included_index] {
+              return _offset_translator.prefix_truncate(last_included_index);
           })
-          .then([this] { _log.set_collectible_offset(_last_snapshot_index); });
+          .then([this, last_included_index] {
+              // when log was prefix truncate flushed offset should be
+              // equal to at least last snapshot index
+              _flushed_offset = std::max(last_included_index, _flushed_offset);
+          });
     });
+
+    _log.set_collectible_offset(last_included_index);
 }
 
 ss::future<>
@@ -1972,11 +1996,6 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
           // update consensus state
           _last_snapshot_index = last_included_index;
           _last_snapshot_term = term;
-          // update configuration manager
-          return _configuration_manager.prefix_truncate(_last_snapshot_index)
-            .then([this] {
-                return _offset_translator.prefix_truncate(_last_snapshot_index);
-            });
       });
 }
 
@@ -2031,7 +2050,7 @@ ss::future<result<replicate_result>> consensus::dispatch_replicate(
             return f;
         }
         // background
-        (void)with_gate(_bg, [this, stm, f = std::move(f)]() mutable {
+        ssx::spawn_with_gate(_bg, [this, stm, f = std::move(f)]() mutable {
             return std::move(f).handle_exception(
               [this](const std::exception_ptr& e) {
                   _ctxlog.error(
@@ -2159,10 +2178,10 @@ ss::future<storage::append_result> consensus::disk_append(
               // Do checkpointing in the background to avoid latency spikes in
               // the write path caused by KVStore flush debouncing.
 
-              (void)ss::with_gate(
+              ssx::spawn_with_gate(
                 _bg, [this] { return _offset_translator.maybe_checkpoint(); });
 
-              (void)ss::with_gate(
+              ssx::spawn_with_gate(
                 _bg, [this, last_offset = ret.last_offset, sz = ret.byte_size] {
                     return _configuration_manager
                       .maybe_store_highest_known_offset(last_offset, sz);
@@ -2230,17 +2249,19 @@ ss::future<> consensus::refresh_commit_index() {
 }
 
 void consensus::maybe_update_leader_commit_idx() {
-    (void)with_gate(_bg, [this] {
-        return _op_lock.get_units().then(
-          [this](ss::semaphore_units<> u) mutable {
-              // do not update committed index if not the leader, this check has
-              // to be done under the semaphore
-              if (!is_leader()) {
-                  return ss::now();
-              }
-              return do_maybe_update_leader_commit_idx(std::move(u));
-          });
-    }).handle_exception([this](const std::exception_ptr& e) {
+    ssx::background = ssx::spawn_with_gate_then(_bg, [this] {
+                          return _op_lock.get_units().then(
+                            [this](ss::semaphore_units<> u) mutable {
+                                // do not update committed index if not the
+                                // leader, this check has to be done under the
+                                // semaphore
+                                if (!is_leader()) {
+                                    return ss::now();
+                                }
+                                return do_maybe_update_leader_commit_idx(
+                                  std::move(u));
+                            });
+                      }).handle_exception([this](const std::exception_ptr& e) {
         vlog(_ctxlog.warn, "Error updating leader commit index", e);
     });
 }
@@ -2294,10 +2315,12 @@ ss::future<> consensus::maybe_commit_configuration(ss::semaphore_units<> u) {
         return replicate_configuration(std::move(u), std::move(latest_cfg))
           .then([this, contains_current](std::error_code ec) {
               if (ec) {
-                  vlog(
-                    _ctxlog.error,
-                    "unable to replicate updated configuration - {}",
-                    ec);
+                  if (ec != errc::shutting_down) {
+                      vlog(
+                        _ctxlog.error,
+                        "unable to replicate updated configuration: {}",
+                        ec.message());
+                  }
                   return;
               }
               // leader was removed, step down.
@@ -2589,7 +2612,7 @@ consensus::prepare_transfer_leadership(vnode target_rni) {
             co_return make_error_code(errc::timeout);
         }
         vlog(
-          _ctxlog.warn,
+          _ctxlog.info,
           "transfer leadership: finished waiting on node {} "
           "recovery",
           target_rni);
@@ -2635,7 +2658,7 @@ consensus::do_transfer_leadership(std::optional<model::node_id> target) {
     if (*target == _self.id()) {
         vlog(_ctxlog.warn, "Cannot transfer leadership to self");
         return seastar::make_ready_future<std::error_code>(
-          make_error_code(errc::not_leader));
+          make_error_code(errc::transfer_to_current_leader));
     }
 
     auto conf = _configuration_manager.get_latest();

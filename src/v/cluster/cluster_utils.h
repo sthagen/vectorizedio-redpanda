@@ -16,14 +16,31 @@
 #include "cluster/logger.h"
 #include "config/node_config.h"
 #include "config/tls_config.h"
+#include "net/dns.h"
 #include "outcome_future_utils.h"
 #include "rpc/connection_cache.h"
-#include "rpc/dns.h"
 #include "rpc/types.h"
 
 #include <seastar/core/sharded.hh>
 
 #include <utility>
+
+namespace detail {
+
+template<typename T, typename Fn>
+std::vector<cluster::topic_result>
+create_topic_results(const std::vector<T>& topics, Fn fn) {
+    std::vector<cluster::topic_result> results;
+    results.reserve(topics.size());
+    std::transform(
+      topics.cbegin(),
+      topics.cend(),
+      std::back_inserter(results),
+      [&fn](const T& t) { return fn(t); });
+    return results;
+}
+
+} // namespace detail
 
 namespace config {
 struct configuration;
@@ -47,28 +64,41 @@ CONCEPT(requires requires(const T& req) {
 // clang-format on
 std::vector<topic_result> create_topic_results(
   const std::vector<T>& requests, errc error_code) {
-    std::vector<topic_result> results;
-    results.reserve(requests.size());
-    std::transform(
-      std::cbegin(requests),
-      std::cend(requests),
-      std::back_inserter(results),
-      [error_code](const T& r) { return topic_result(r.tp_ns, error_code); });
-    return results;
+    return detail::create_topic_results(requests, [error_code](const T& r) {
+        return topic_result(r.tp_ns, error_code);
+    });
 }
 
-std::vector<topic_result> create_topic_results(
-  const std::vector<custom_assignable_topic_configuration>& requests,
-  errc error_code);
+inline std::vector<topic_result> create_topic_results(
+  const std::vector<model::topic_namespace>& topics, errc error_code) {
+    return detail::create_topic_results(
+      topics, [error_code](const model::topic_namespace& t) {
+          return topic_result(t, error_code);
+      });
+}
 
-std::vector<topic_result> create_topic_results(
-  const std::vector<model::topic_namespace>& topics, errc error_code);
+inline std::vector<topic_result> create_topic_results(
+  const std::vector<custom_assignable_topic_configuration>& requests,
+  errc error_code) {
+    return detail::create_topic_results(
+      requests, [error_code](const custom_assignable_topic_configuration& r) {
+          return topic_result(r.cfg.tp_ns, error_code);
+      });
+}
+
+inline std::vector<topic_result> create_topic_results(
+  const std::vector<non_replicable_topic>& requests, errc error_code) {
+    return detail::create_topic_results(
+      requests, [error_code](const non_replicable_topic& nrt) {
+          return topic_result(nrt.name, error_code);
+      });
+}
 
 ss::future<> update_broker_client(
   model::node_id,
   ss::sharded<rpc::connection_cache>&,
   model::node_id node,
-  unresolved_address addr,
+  net::unresolved_address addr,
   config::tls_config);
 
 ss::future<> remove_broker_client(
@@ -84,7 +114,7 @@ auto with_client(
   model::node_id self,
   ss::sharded<rpc::connection_cache>& cache,
   model::node_id id,
-  unresolved_address addr,
+  net::unresolved_address addr,
   config::tls_config tls_config,
   rpc::clock_type::duration connection_timeout,
   Func&& f) {
@@ -143,7 +173,7 @@ maybe_build_reloadable_certificate_credentials(config::tls_config tls_config) {
 template<typename Proto, typename Func>
 CONCEPT(requires requires(Func&& f, Proto c) { f(c); })
 auto do_with_client_one_shot(
-  unresolved_address addr,
+  net::unresolved_address addr,
   config::tls_config tls_config,
   rpc::clock_type::duration connection_timeout,
   Func&& f) {
@@ -155,7 +185,7 @@ auto do_with_client_one_shot(
               rpc::transport_configuration{
                 .server_addr = std::move(addr),
                 .credentials = std::move(cert),
-                .disable_metrics = rpc::metrics_disabled(true)});
+                .disable_metrics = net::metrics_disabled(true)});
 
             return transport->connect(connection_timeout)
               .then([transport, f = std::forward<Func>(f)]() mutable {

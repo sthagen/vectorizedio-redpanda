@@ -111,9 +111,9 @@ ss::future<std::vector<broker_ptr>> metadata_cache::all_alive_brokers() const {
 
     std::set<model::node_id> brokers_with_health;
     for (auto& st : res.value()) {
+        brokers_with_health.insert(st.id);
         if (st.is_alive) {
             auto broker = _members_table.local().get_broker(st.id);
-            brokers_with_health.insert(st.id);
             if (broker) {
                 brokers.push_back(std::move(*broker));
             }
@@ -199,5 +199,18 @@ std::optional<size_t> metadata_cache::get_default_retention_bytes() const {
 std::optional<std::chrono::milliseconds>
 metadata_cache::get_default_retention_duration() const {
     return config::shard_local_cfg().delete_retention_ms();
+}
+
+model::shadow_indexing_mode
+metadata_cache::get_default_shadow_indexing_mode() const {
+    model::shadow_indexing_mode m = model::shadow_indexing_mode::disabled;
+    if (config::shard_local_cfg().cloud_storage_enable_remote_write()) {
+        m = model::shadow_indexing_mode::archival;
+    }
+    if (config::shard_local_cfg().cloud_storage_enable_remote_read()) {
+        m = model::add_shadow_indexing_flag(
+          m, model::shadow_indexing_mode::fetch);
+    }
+    return m;
 }
 } // namespace cluster

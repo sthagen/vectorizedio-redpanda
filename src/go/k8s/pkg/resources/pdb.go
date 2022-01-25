@@ -73,7 +73,8 @@ func (r *PDBResource) Ensure(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error while fetching Service resource: %w", err)
 	}
-	return Update(ctx, &pdb, obj, r.Client, r.logger)
+	_, err = Update(ctx, &pdb, obj, r.Client, r.logger)
+	return err
 }
 
 func (r *PDBResource) obj() (k8sclient.Object, error) {
@@ -82,6 +83,10 @@ func (r *PDBResource) obj() (k8sclient.Object, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.Key().Name,
 			Namespace: r.Key().Namespace,
+		},
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PodDisruptionBudget",
+			APIVersion: "policy/v1beta1",
 		},
 		Spec: policyv1beta1.PodDisruptionBudgetSpec{
 			MinAvailable:   r.pandaCluster.Spec.PodDisruptionBudget.MinAvailable,

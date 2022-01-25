@@ -13,6 +13,7 @@
 
 #include "kafka/client/configuration.h"
 #include "kafka/client/exceptions.h"
+#include "kafka/client/logger.h"
 #include "kafka/client/transport.h"
 #include "model/metadata.h"
 #include "utils/mutex.h"
@@ -57,9 +58,14 @@ public:
     template<typename T, typename Ret = typename T::api_type::response_type>
     CONCEPT(requires(KafkaApi<typename T::api_type>))
     ss::future<Ret> dispatch(T r) {
+        using api_t = typename T::api_type;
         return _gated_mutex
           .with([this, r{std::move(r)}]() mutable {
-              return _client.dispatch(std::move(r));
+              vlog(kclog.debug, "Dispatch: {} req: {}", api_t::name, r);
+              return _client.dispatch(std::move(r)).then([](Ret res) {
+                  vlog(kclog.debug, "Dispatch: {} res: {}", api_t::name, res);
+                  return std::move(res);
+              });
           })
           .handle_exception_type([this](const std::bad_optional_access&) {
               // Short read
@@ -86,7 +92,9 @@ private:
 using shared_broker_t = ss::lw_shared_ptr<broker>;
 
 ss::future<shared_broker_t> make_broker(
-  model::node_id node_id, unresolved_address addr, const configuration& config);
+  model::node_id node_id,
+  net::unresolved_address addr,
+  const configuration& config);
 
 struct broker_hash {
     using is_transparent = void;

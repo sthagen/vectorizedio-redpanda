@@ -13,6 +13,7 @@
 #include "config/node_config.h"
 #include "model/metadata.h"
 #include "storage/chunk_cache.h"
+#include "storage/segment_appender.h"
 #include "units.h"
 
 #include <cstdint>
@@ -511,6 +512,12 @@ configuration::configuration()
       "Length of time above which growth is reset",
       {.visibility = visibility::tunable},
       10'000ms)
+  , reclaim_batch_cache_min_free(
+      *this,
+      "reclaim_batch_cache_min_free",
+      "Free memory limit that will be kept by batch cache background reclaimer",
+      {.visibility = visibility::tunable},
+      64_MiB)
   , auto_create_topics_enabled(
       *this,
       "auto_create_topics_enabled",
@@ -541,6 +548,13 @@ configuration::configuration()
       "Fail-safe maximum throttle delay on kafka requests",
       {.visibility = visibility::tunable},
       60'000ms)
+  , kafka_max_bytes_per_fetch(
+      *this,
+      "kafka_max_bytes_per_fetch",
+      "Limit fetch responses to this many bytes, even if total of partition "
+      "bytes limits is higher",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      64_MiB)
   , raft_io_timeout_ms(
       *this,
       "raft_io_timeout_ms",
@@ -593,6 +607,27 @@ configuration::configuration()
       {.example = "32768", .visibility = visibility::tunable},
       16_KiB,
       storage::internal::chunk_cache::validate_chunk_size)
+  , storage_read_buffer_size(
+      *this,
+      "storage_read_buffer_size",
+      "Size of each read buffer (one per in-flight read, per log segment)",
+      {.example = "31768", .visibility = visibility::tunable},
+      128_KiB)
+  , storage_read_readahead_count(
+      *this,
+      "storage_read_readahead_count",
+      "How many additional reads to issue ahead of current read location",
+      {.example = "1", .visibility = visibility::tunable},
+      10)
+  , segment_fallocation_step(
+      *this,
+      "segment_fallocation_step",
+      "Size for segments fallocation",
+      {.needs_restart = needs_restart::no,
+       .example = "32768",
+       .visibility = visibility::tunable},
+      32_MiB,
+      storage::segment_appender::validate_fallocation_step)
   , max_compacted_log_segment_size(
       *this,
       "max_compacted_log_segment_size",
@@ -689,6 +724,18 @@ configuration::configuration()
       "Enable archival storage",
       {.visibility = visibility::user},
       false)
+  , cloud_storage_enable_remote_read(
+      *this,
+      "cloud_storage_enable_remote_read",
+      "Enable remote read for all topics",
+      {.visibility = visibility::tunable},
+      false)
+  , cloud_storage_enable_remote_write(
+      *this,
+      "cloud_storage_enable_remote_write",
+      "Enable remote write for all topics",
+      {.visibility = visibility::tunable},
+      false)
   , cloud_storage_access_key(
       *this,
       "cloud_storage_access_key",
@@ -699,7 +746,7 @@ configuration::configuration()
       *this,
       "cloud_storage_secret_key",
       "AWS secret key",
-      {.visibility = visibility::user},
+      {.visibility = visibility::user, .secret = is_secret::yes},
       std::nullopt)
   , cloud_storage_region(
       *this,

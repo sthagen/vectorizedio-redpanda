@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM ubuntu:groovy-20210325
+FROM ubuntu:impish-20211102
 
 ENV TZ="UTC" \
     DEBIAN_FRONTEND=noninteractive
@@ -24,6 +24,7 @@ RUN apt update && \
     apt install -y \
       bind9-utils \
       bind9-dnsutils \
+      bsdmainutils \
       build-essential \
       curl \
       default-jdk \
@@ -100,6 +101,8 @@ COPY --chown=0:0 tests/java /tmp/java
 RUN mvn clean package --batch-mode --file /tmp/java/kafka-verifier --define buildDir=/opt/kafka-verifier/ && \
     mvn clean package --batch-mode --file /tmp/java/compacted-log-verifier --define buildDir=/opt/compacted-log-verifier && \
     mvn clean package --batch-mode --file /tmp/java/tx-verifier --define buildDir=/opt/tx-verifier
+
+RUN mvn clean package --batch-mode --file /tmp/java/e2e-verifiers --define buildDir=/opt/e2e-verifiers
 
 # copy ssh keys
 COPY --chown=0:0 tests/docker/ssh /root/.ssh

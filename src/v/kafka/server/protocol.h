@@ -18,7 +18,7 @@
 #include "kafka/server/fetch_metadata_cache.hh"
 #include "kafka/server/fwd.h"
 #include "kafka/server/queue_depth_monitor.h"
-#include "rpc/server.h"
+#include "net/server.h"
 #include "security/authorizer.h"
 #include "security/credential_store.h"
 #include "utils/ema.h"
@@ -30,12 +30,13 @@
 
 namespace kafka {
 
-class protocol final : public rpc::server::protocol {
+class protocol final : public net::server::protocol {
 public:
     protocol(
       ss::smp_service_group,
       ss::sharded<cluster::metadata_cache>&,
       ss::sharded<cluster::topics_frontend>&,
+      ss::sharded<cluster::config_frontend>&,
       ss::sharded<quota_manager>&,
       ss::sharded<kafka::group_router>&,
       ss::sharded<cluster::shard_table>&,
@@ -61,11 +62,14 @@ public:
     const char* name() const final { return "kafka rpc protocol"; }
     // the lifetime of all references here are guaranteed to live
     // until the end of the server (container/parent)
-    ss::future<> apply(rpc::server::resources) final;
+    ss::future<> apply(net::server::resources) final;
 
     ss::smp_service_group smp_group() const { return _smp_group; }
     cluster::topics_frontend& topics_frontend() {
         return _topics_frontend.local();
+    }
+    ss::sharded<cluster::config_frontend>& config_frontend() {
+        return _config_frontend;
     }
     cluster::metadata_cache& metadata_cache() {
         return _metadata_cache.local();
@@ -133,6 +137,7 @@ public:
 private:
     ss::smp_service_group _smp_group;
     ss::sharded<cluster::topics_frontend>& _topics_frontend;
+    ss::sharded<cluster::config_frontend>& _config_frontend;
     ss::sharded<cluster::metadata_cache>& _metadata_cache;
     ss::sharded<quota_manager>& _quota_mgr;
     ss::sharded<kafka::group_router>& _group_router;

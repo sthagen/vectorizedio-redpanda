@@ -81,7 +81,33 @@ public:
         }
     }
 
-    ~partition_record_batch_reader_impl() override = default;
+    ~partition_record_batch_reader_impl() noexcept override {
+        if (_reader) {
+            // We must not destroy this reader: it is not safe to do so
+            // without calling stop() on it.  The remote_partition is
+            // responsible for cleaning up readers, including calling
+            // stop() on them in a background fiber so that we don't have to.
+            // (https://github.com/vectorizedio/redpanda/issues/3378)
+            vlog(
+              _ctxlog.debug,
+              "partition_record_batch_reader_impl::~ releasing reader on "
+              "destruction");
+
+            try {
+                _partition->return_reader(std::move(_reader), _it->second);
+            } catch (...) {
+                // Failure to return the reader causes the reader destructor
+                // to execute synchronously inside this function.  That might
+                // succeed, if the reader was already stopped, so give it
+                // a chance rather than asserting out here.
+                vlog(
+                  _ctxlog.error,
+                  "partition_record_batch_reader_impl::~ exception while "
+                  "releasing reader: {}",
+                  std::current_exception);
+            }
+        }
+    }
     partition_record_batch_reader_impl(
       partition_record_batch_reader_impl&& o) noexcept = delete;
     partition_record_batch_reader_impl&
@@ -116,24 +142,23 @@ public:
                 co_return storage_t{};
             }
             while (co_await maybe_reset_reader()) {
+                if (_partition->_as.abort_requested()) {
+                    co_await set_end_of_stream();
+                    co_return storage_t{};
+                }
                 vlog(
                   _ctxlog.debug,
-                  "Invoking 'read_some' on current log reader {}",
+                  "Invoking 'read_some' on current log reader with config: {}",
                   _reader->config());
                 auto result = co_await _reader->read_some(deadline, *_ot_state);
-                if (
-                  !result
-                  && result.error() == storage::parser_errc::end_of_stream) {
-                    vlog(_ctxlog.debug, "EOF error while reading from stream");
-                    _reader->set_eof();
-                    // Next iteration will trigger transition in
-                    // 'maybe_reset_reader'
-                    continue;
-                } else if (!result) {
-                    vlog(_ctxlog.debug, "Unexpected error");
+                if (!result) {
+                    vlog(
+                      _ctxlog.debug,
+                      "Error while reading from stream '{}'",
+                      result.error());
+                    co_await set_end_of_stream();
                     throw std::system_error(result.error());
                 }
-                // empty result will also be propagated here
                 data_t d = std::move(result.value());
                 co_return storage_t{std::move(d)};
             }
@@ -263,7 +288,8 @@ private:
         }
         vlog(
           _ctxlog.debug,
-          "maybe_reset_stream completed {} {}",
+          "maybe_reset_reader completed, reader is present: {}, is end of "
+          "stream: {}",
           static_cast<bool>(_reader),
           is_end_of_stream());
         co_return static_cast<bool>(_reader);
@@ -306,7 +332,7 @@ ss::future<> remote_partition::start() {
     (void)run_eviction_loop();
 
     _stm_timer.set_callback([this] {
-        gc_stale_materialized_segments();
+        gc_stale_materialized_segments(false);
         if (!_as.abort_requested()) {
             _stm_timer.rearm(_stm_jitter());
         }
@@ -330,29 +356,59 @@ ss::future<> remote_partition::run_eviction_loop() {
         }
     } catch (const ss::broken_condition_variable&) {
     }
+    for (auto& rs : _eviction_list) {
+        co_await std::visit([](auto&& rs) { return rs->stop(); }, rs);
+    }
     vlog(_ctxlog.debug, "remote partition eviction loop stopped");
 }
 
-void remote_partition::gc_stale_materialized_segments() {
+void remote_partition::gc_stale_materialized_segments(bool force_collection) {
+    // The remote_segment instances are materialized on demand. They are
+    // collected after some period of inactivity.
+    // To prevent high memory consumption in some corner cases the
+    // materialization of the new remote_segment triggers GC. The idea is
+    // that remote_partition should have only one remote_segment in materialized
+    // state when it's constantly in use and zero if not in use.
     vlog(
       _ctxlog.debug,
       "collecting stale materialized segments, {} segments materialized, {} "
       "segments total",
       _materialized.size(),
       _segments.size());
+
     auto now = ss::lowres_clock::now();
+    auto max_idle = force_collection ? stm_max_idle_time : 0ms;
+
     std::vector<model::offset> offsets;
     for (auto& st : _materialized) {
-        if (
-          now - st.atime > stm_max_idle_time
-          && !st.segment->download_in_progress() && st.segment.owned()) {
-            vlog(
-              _ctxlog.debug,
-              "reader for segment with base offset {} is stale",
-              st.offset_key);
-            // this will delete and unlink the object from
-            // _materialized collection
-            offsets.push_back(st.offset_key);
+        auto deadline = st.atime + max_idle;
+        if (now >= deadline && !st.segment->download_in_progress()) {
+            if (st.segment.owned()) {
+                vlog(
+                  _ctxlog.debug,
+                  "reader for segment with base offset {} is stale",
+                  st.offset_key);
+                // this will delete and unlink the object from
+                // _materialized collection
+                offsets.push_back(st.offset_key);
+            } else {
+                vlog(
+                  _ctxlog.debug,
+                  "Materialized segment {} not stale: {} {} {} {} readers={}",
+                  st.manifest_key,
+                  now - st.atime > stm_max_idle_time,
+                  st.segment->download_in_progress(),
+                  st.segment.owned(),
+                  st.segment.use_count(),
+                  st.readers.size());
+
+                // Readers hold a reference to the segment, so for the
+                // segment.owned() check to pass, we need to clear them out.
+                while (!st.readers.empty()) {
+                    evict_reader(std::move(st.readers.front()));
+                    st.readers.pop_front();
+                }
+            }
         }
     }
     vlog(_ctxlog.debug, "found {} eviction candidates ", offsets.size());
@@ -486,6 +542,9 @@ std::unique_ptr<remote_segment_batch_reader> remote_partition::borrow_reader(
             return st->borrow_reader(config, part->_ctxlog);
         }
     };
+    if (std::holds_alternative<offloaded_segment_ptr>(st)) {
+        gc_stale_materialized_segments(true);
+    }
     return std::visit(
       visit_materialize_make_reader{
         .state = st, .part = this, .config = config, .offset_key = key},

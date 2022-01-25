@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,58 +86,76 @@ func CreateIfNotExists(
 	if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(obj); err != nil {
 		return false, fmt.Errorf("unable to add last applied annotation to %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, err)
 	}
-	err := c.Create(ctx, obj)
-	if err != nil && !errors.IsAlreadyExists(err) {
-		return false, fmt.Errorf("unable to create %s resource: %w", obj.GetObjectKind().GroupVersionKind().Kind, err)
+	// this is needed because we cannot pass obj into get as the client methods
+	// modify the input received and we don't want to mutate the object passed
+	// in
+	actual := &unstructured.Unstructured{}
+	actual.SetGroupVersionKind(gvk)
+	err := c.Get(ctx, types.NamespacedName{
+		Namespace: obj.GetNamespace(),
+		Name:      obj.GetName(),
+	}, actual)
+	if err != nil && !errors.IsNotFound(err) {
+		return false, fmt.Errorf("error while fetching %s resource: %w", obj.GetName(), err)
 	}
-	if err == nil {
-		l.Info(fmt.Sprintf("%s %s did not exist, was created", gvk.Kind, obj.GetName()))
-		return true, nil
+	if errors.IsNotFound(err) {
+		// not exists, going to create it
+		err = c.Create(ctx, obj)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			return false, fmt.Errorf("unable to create %s resource: %w", obj.GetObjectKind().GroupVersionKind().Kind, err)
+		}
+		if err == nil {
+			l.Info(fmt.Sprintf("%s %s did not exist, was created", gvk.Kind, obj.GetName()))
+			return true, nil
+		}
 	}
 	return false, nil
 }
 
 // Update ensures resource is updated if necessary. The method calculates patch
 // and applies it if something changed
+// returns true if resource was updated
 func Update(
 	ctx context.Context,
 	current client.Object,
 	modified client.Object,
 	c client.Client,
 	logger logr.Logger,
-) error {
+) (bool, error) {
 	prepareResourceForPatch(current, modified)
 	opts := []patch.CalculateOption{
 		patch.IgnoreStatusFields(),
 		patch.IgnoreVolumeClaimTemplateTypeMetaAndStatus(),
+		patch.IgnorePDBSelector(),
 	}
 	patchResult, err := patch.DefaultPatchMaker.Calculate(current, modified, opts...)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !patchResult.IsEmpty() {
 		// need to set current version first otherwise the request would get rejected
 		logger.Info(fmt.Sprintf("Resource %s (%s) changed, updating. Diff: %v",
 			modified.GetName(), modified.GetObjectKind().GroupVersionKind().Kind, string(patchResult.Patch)))
 		if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(modified); err != nil {
-			return err
+			return false, err
 		}
 
 		metaAccessor := meta.NewAccessor()
 		currentVersion, err := metaAccessor.ResourceVersion(current)
 		if err != nil {
-			return err
+			return false, err
 		}
 		err = metaAccessor.SetResourceVersion(modified, currentVersion)
 		if err != nil {
-			return err
+			return false, err
 		}
 		prepareResourceForUpdate(current, modified)
 		if err := c.Update(ctx, modified); err != nil {
-			return fmt.Errorf("failed to update resource: %w", err)
+			return false, fmt.Errorf("failed to update resource: %w", err)
 		}
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 // normalization to be done on resource before the patch is computed

@@ -14,12 +14,14 @@
 #include "cluster/simple_batch_builder.h"
 #include "cluster/tx_utils.h"
 #include "config/configuration.h"
+#include "kafka/protocol/errors.h"
 #include "kafka/protocol/response_writer.h"
 #include "kafka/protocol/schemata/describe_groups_response.h"
 #include "kafka/protocol/sync_group.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/logger.h"
 #include "likely.h"
+#include "raft/errc.h"
 #include "utils/to_string.h"
 #include "vassert.h"
 
@@ -1313,10 +1315,7 @@ void group::complete_offset_commit(
     if (p_it != _pending_offset_commits.end()) {
         // save the tp commit if it hasn't yet been seen, or we are completing
         // for an instance that is newer based on log offset
-        auto o_it = _offsets.find(tp);
-        if (o_it == _offsets.end() || o_it->second.log_offset < md.log_offset) {
-            _offsets[tp] = md;
-        }
+        try_upsert_offset(tp, md);
 
         // clear pending for this tp
         if (p_it->second.offset == md.offset) {
@@ -1422,10 +1421,7 @@ group::commit_tx(cluster::commit_group_tx_request r) {
     }
 
     for (const auto& [tp, md] : prepare_it->second.offsets) {
-        auto o_it = _offsets.find(tp);
-        if (o_it == _offsets.end() || o_it->second.log_offset < md.log_offset) {
-            _offsets[tp] = md;
-        }
+        try_upsert_offset(tp, md);
     }
 
     _prepared_txs.erase(prepare_it);
@@ -1736,6 +1732,41 @@ group::store_txn_offsets(txn_offset_commit_request r) {
     co_return txn_offset_commit_response(r, error_code::none);
 }
 
+kafka::error_code map_store_offset_error_code(std::error_code ec) {
+    if (ec.category() == raft::error_category()) {
+        switch (raft::errc(ec.value())) {
+        case raft::errc::success:
+            return error_code::none;
+        case raft::errc::timeout:
+        case raft::errc::shutting_down:
+            return error_code::request_timed_out;
+        case raft::errc::not_leader:
+            return error_code::not_coordinator;
+        case raft::errc::disconnected_endpoint:
+        case raft::errc::exponential_backoff:
+        case raft::errc::non_majority_replication:
+        case raft::errc::vote_dispatch_error:
+        case raft::errc::append_entries_dispatch_error:
+        case raft::errc::replicated_entry_truncated:
+        case raft::errc::leader_flush_failed:
+        case raft::errc::leader_append_failed:
+        case raft::errc::configuration_change_in_progress:
+        case raft::errc::node_does_not_exists:
+        case raft::errc::leadership_transfer_in_progress:
+        case raft::errc::node_already_exists:
+        case raft::errc::invalid_configuration_update:
+        case raft::errc::not_voter:
+        case raft::errc::invalid_target_node:
+        case raft::errc::replicate_batcher_cache_error:
+        case raft::errc::group_not_exists:
+        case raft::errc::replicate_first_stage_exception:
+        case raft::errc::transfer_to_current_leader:
+            return error_code::unknown_server_error;
+        }
+    }
+    return error_code::unknown_server_error;
+}
+
 group::offset_commit_stages group::store_offsets(offset_commit_request&& r) {
     cluster::simple_batch_builder builder(
       model::record_batch_type::raft_data, model::offset(0));
@@ -1784,7 +1815,14 @@ group::offset_commit_stages group::store_offsets(offset_commit_request&& r) {
     auto f = replicate_stages.replicate_finished.then(
       [this, req = std::move(r), commits = std::move(offset_commits)](
         result<raft::replicate_result> r) mutable {
-          error_code error = r ? error_code::none : error_code::not_coordinator;
+          auto error = error_code::none;
+          if (!r) {
+              vlog(
+                _ctxlog.info,
+                "Storing committed offset failed - {}",
+                r.error().message());
+              error = map_store_offset_error_code(r.error());
+          }
           if (in_state(group_state::dead)) {
               return offset_commit_response(req, error);
           }
@@ -1974,8 +2012,8 @@ group::handle_offset_fetch(offset_fetch_request&& r) {
         for (const auto& e : _offsets) {
             offset_fetch_response_partition p = {
               .partition_index = e.first.partition,
-              .committed_offset = e.second.offset,
-              .metadata = e.second.metadata,
+              .committed_offset = e.second->metadata.offset,
+              .metadata = e.second->metadata.metadata,
               .error_code = error_code::none,
             };
             // BUG: support leader_epoch (KIP-320)
@@ -2132,7 +2170,7 @@ group::remove_topic_partitions(const std::vector<model::topic_partition>& tps) {
         _pending_offset_commits.erase(tp);
         if (auto offset = _offsets.extract(tp); offset) {
             removed.emplace_back(
-              std::move(offset.key()), std::move(offset.mapped()));
+              std::move(offset.key()), std::move(offset.mapped()->metadata));
         }
     }
 

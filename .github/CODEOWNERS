@@ -2,8 +2,8 @@
 # docs, prose, legal
 #
 licenses           @senior7515 @dswang
-*.md               @bmansheim
-/docs              @bmansheim
+*.md               @coral-waters
+/docs              @coral-waters
 /CONTRIBUTING.md   @dotnwat
 
 #
@@ -39,7 +39,7 @@ licenses           @senior7515 @dswang
 /src/js                @andresaristizabal
 /src/v/archival        @lazin               @lenaan         @ztlpn
 /src/v/bytes           @dotnwat
-/src/v/cloud_storage   @lazin               @lenaan
+/src/v/cloud_storage   @lazin               @lenaan         @ztlpn
 /src/v/cluster         @mmaslankaprv        @ztlpn          @vadimplh
 /src/v/compression     @dotnwat
 /src/v/config          @mmaslankaprv
@@ -61,11 +61,11 @@ licenses           @senior7515 @dswang
 /src/v/reflection      @graphcareful        @benpope
 /src/v/resource_mgmt   @mmaslankaprv
 /src/v/rpc             @mmaslankaprv        @jcsp
-/src/v/s3              @lazin               @ivotron
+/src/v/s3              @lazin
 /src/v/security        @dotnwat
 /src/v/serde           @felixguendling      @benpope
 /src/v/ssx             @benpope
-/src/v/storage         @dotnwat             @ivotron        @lenaan      @vadimplh
+/src/v/storage         @dotnwat             @lenaan      @vadimplh
 /src/v/syschecks       @mmaslankaprv
 /src/v/test_utils      @graphcareful
 /src/v/utils           @benpope

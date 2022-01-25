@@ -21,7 +21,7 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timestamp.h"
-#include "utils/unresolved_address.h"
+#include "net/unresolved_address.h"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/net/inet_address.hh>
@@ -128,11 +128,13 @@ struct configuration final : public config_store {
     property<size_t> reclaim_max_size;
     property<std::chrono::milliseconds> reclaim_growth_window;
     property<std::chrono::milliseconds> reclaim_stable_window;
+    property<size_t> reclaim_batch_cache_min_free;
     property<bool> auto_create_topics_enabled;
     property<bool> enable_pid_file;
     property<std::chrono::milliseconds> kvstore_flush_interval;
     property<size_t> kvstore_max_segment_size;
     property<std::chrono::milliseconds> max_kafka_throttle_delay_ms;
+    property<size_t> kafka_max_bytes_per_fetch;
     property<std::chrono::milliseconds> raft_io_timeout_ms;
     property<std::chrono::milliseconds> join_retry_timeout_ms;
     property<std::chrono::milliseconds> raft_timeout_now_timeout_ms;
@@ -142,6 +144,9 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> segment_appender_flush_timeout_ms;
     property<std::chrono::milliseconds> fetch_session_eviction_timeout_ms;
     property<size_t> append_chunk_size;
+    property<size_t> storage_read_buffer_size;
+    property<int16_t> storage_read_readahead_count;
+    property<size_t> segment_fallocation_step;
     property<size_t> max_compacted_log_segment_size;
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
@@ -161,6 +166,8 @@ struct configuration final : public config_store {
 
     // Archival storage
     property<bool> cloud_storage_enabled;
+    property<bool> cloud_storage_enable_remote_read;
+    property<bool> cloud_storage_enable_remote_write;
     property<std::optional<ss::sstring>> cloud_storage_access_key;
     property<std::optional<ss::sstring>> cloud_storage_secret_key;
     property<std::optional<ss::sstring>> cloud_storage_region;

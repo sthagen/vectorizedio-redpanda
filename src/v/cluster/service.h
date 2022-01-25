@@ -40,6 +40,9 @@ public:
     virtual ss::future<create_topics_reply>
     create_topics(create_topics_request&&, rpc::streaming_context&) override;
 
+    ss::future<create_non_replicable_topics_reply> create_non_replicable_topics(
+      create_non_replicable_topics_request&&, rpc::streaming_context&) final;
+
     ss::future<configuration_update_reply> update_node_configuration(
       configuration_update_request&&, rpc::streaming_context&) final;
 
@@ -68,6 +71,9 @@ public:
 
     ss::future<config_status_reply>
     config_status(config_status_request&&, rpc::streaming_context&) final;
+
+    ss::future<config_update_reply>
+    config_update(config_update_request&&, rpc::streaming_context&) final;
 
     ss::future<get_node_health_reply> collect_node_health_report(
       get_node_health_request&&, rpc::streaming_context&) final;

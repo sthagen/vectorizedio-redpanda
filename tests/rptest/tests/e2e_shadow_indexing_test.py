@@ -7,9 +7,8 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-from ducktape.mark.resource import cluster
+from rptest.services.cluster import cluster
 from rptest.clients.kafka_cli_tools import KafkaCliTools
-from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.redpanda import RedpandaService
 from rptest.util import Scale
@@ -44,6 +43,8 @@ class EndToEndShadowIndexingTest(EndToEndTest):
         self.topic = EndToEndShadowIndexingTest.s3_topic_name
         self._extra_rp_conf = dict(
             cloud_storage_enabled=True,
+            cloud_storage_enable_remote_read=True,
+            cloud_storage_enable_remote_write=True,
             cloud_storage_access_key=EndToEndShadowIndexingTest.s3_access_key,
             cloud_storage_secret_key=EndToEndShadowIndexingTest.s3_secret_key,
             cloud_storage_region=EndToEndShadowIndexingTest.s3_region,
@@ -60,9 +61,7 @@ class EndToEndShadowIndexingTest(EndToEndTest):
         self.redpanda = RedpandaService(
             context=test_context,
             num_brokers=3,
-            client_type=KafkaCliTools,
             extra_rp_conf=self._extra_rp_conf,
-            topics=EndToEndShadowIndexingTest.topics,
         )
 
         self.kafka_tools = KafkaCliTools(self.redpanda)
@@ -75,13 +74,11 @@ class EndToEndShadowIndexingTest(EndToEndTest):
         )
 
     def setUp(self):
-        rpk = RpkTool(self.redpanda)
         self.s3_client.empty_bucket(self.s3_bucket_name)
         self.s3_client.create_bucket(self.s3_bucket_name)
         self.redpanda.start()
-        for topic in self.topics:
-            rpk.alter_topic_config(topic.name, 'redpanda.remote.write', 'true')
-            rpk.alter_topic_config(topic.name, 'redpanda.remote.read', 'true')
+        for topic in EndToEndShadowIndexingTest.topics:
+            self.kafka_tools.create_topic(topic)
 
     def tearDown(self):
         self.s3_client.empty_bucket(self.s3_bucket_name)
