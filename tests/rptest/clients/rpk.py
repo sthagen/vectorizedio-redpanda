@@ -16,11 +16,16 @@ DEFAULT_PRODUCE_TIMEOUT = 5
 
 
 class RpkException(Exception):
-    def __init__(self, msg):
+    def __init__(self, msg, stderr=""):
         self.msg = msg
+        self.stderr = stderr
 
     def __str__(self):
-        return f"RpkException<{self.msg}>"
+        if self.stderr:
+            err = f" error: {self.stderr}"
+        else:
+            err = ""
+        return f"RpkException<{self.msg}{err}>"
 
 
 class RpkPartition:
@@ -35,6 +40,14 @@ class RpkPartition:
         return "id: {}, leader: {}, replicas: {}, hw: {}, start_offset: {}".format(
             self.id, self.leader, self.replicas, self.high_watermark,
             self.start_offset)
+
+    def __eq__(self, other):
+        if other is None:
+            return False
+        return self.id == other.id and self.leader == other.leader \
+            and self.replicas == other.replicas \
+            and self.high_watermark == other.high_watermark \
+            and self.start_offset == other.start_offset
 
 
 class RpkClusterInfoNode:
@@ -59,7 +72,21 @@ class RpkTool:
             cfg = [f"{k}:{v}" for k, v in config.items()]
             for it in cfg:
                 cmd += ["--topic-config", it]
-        return self._run_topic(cmd)
+        output = self._run_topic(cmd)
+        self._check_stdout_success(output)
+        return output
+
+    def _check_stdout_success(self, output):
+        """
+        Helper for topic operations where rpk does not surface errors
+        in return codes
+        (https://github.com/vectorizedio/redpanda/issues/3397)
+        """
+
+        lines = output.strip().split("\n")
+        status_line = lines[1]
+        if not status_line.endswith("OK"):
+            raise RpkException(f"Bad status: '{status_line}'")
 
     def sasl_allow_principal(self, principal, operations, resource,
                              resource_name, username, password, mechanism):
@@ -186,6 +213,12 @@ class RpkTool:
         cmd = ['alter-config', topic, "--delete", key]
         self._run_topic(cmd)
 
+    def add_topic_partitions(self, topic, additional):
+        cmd = ['add-partitions', topic, '--num', str(additional)]
+        output = self._run_topic(cmd)
+        self._check_stdout_success(output)
+        return output
+
     def consume(self,
                 topic,
                 n=None,
@@ -227,7 +260,9 @@ class RpkTool:
         return self._execute(cmd)
 
     def wasm_gen(self, directory):
-        cmd = [self._rpk_binary(), 'wasm', 'generate', directory]
+        cmd = [
+            self._rpk_binary(), 'wasm', 'generate', '--skip-version', directory
+        ]
         return self._execute(cmd)
 
     def _run_topic(self, cmd, stdin=None, timeout=None):
@@ -280,8 +315,10 @@ class RpkTool:
 
     def _admin_host(self, node=None):
         if node is None:
-            node = self._redpanda.nodes[0]
-        return f"{node.account.hostname}:9644"
+            return ",".join(
+                [f"{n.account.hostname}:9644" for n in self._redpanda.nodes])
+        else:
+            return f"{node.account.hostname}:9644"
 
     def admin_config_print(self, node):
         return self._execute([
@@ -291,7 +328,6 @@ class RpkTool:
         ])
 
     def cluster_config_export(self, file, all):
-        node = self._redpanda.nodes[0]
         cmd = [
             self._rpk_binary(), '--api-urls',
             self._admin_host(), "cluster", "config", "export", "--filename",
@@ -338,9 +374,10 @@ class RpkTool:
         self._redpanda.logger.debug(output)
 
         if p.returncode:
+            self._redpanda.logger.error(error)
             raise RpkException(
-                'command %s returned %d, output: %s, error: %s' %
-                (' '.join(cmd), p.returncode, output, error))
+                'command %s returned %d, output: %s' %
+                (' '.join(cmd), p.returncode, output), error)
 
         return output
 

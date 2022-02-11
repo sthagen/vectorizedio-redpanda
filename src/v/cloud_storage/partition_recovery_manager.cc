@@ -2,7 +2,6 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "cloud_storage/logger.h"
-#include "cloud_storage/manifest.h"
 #include "cloud_storage/types.h"
 #include "config/configuration.h"
 #include "hashing/xx.h"
@@ -162,7 +161,8 @@ ss::future<bool> partition_downloader::download_log() {
     co_return false;
 }
 
-static bool same_ntp(const manifest_path_components& c, const model::ntp& ntp) {
+static bool
+same_ntp(const partition_manifest_path_components& c, const model::ntp& ntp) {
     return c._ns == ntp.ns && c._topic == ntp.tp.topic
            && c._part == ntp.tp.partition;
 }
@@ -230,7 +230,7 @@ partition_downloader::build_offset_map(const recovery_material& mat) {
             }
             offset_map.insert_or_assign(
               segm.second.base_offset,
-              segment{.name = segm.first, .meta = segm.second});
+              segment{.manifest_key = segm.first, .meta = segm.second});
         }
     }
     co_return std::move(offset_map);
@@ -249,9 +249,9 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
       retention);
     auto mat = co_await find_recovery_material(manifest_key);
     auto offset_map = co_await build_offset_map(mat);
-    manifest target(_ntpc.ntp(), _ntpc.get_initial_revision());
+    partition_manifest target(_ntpc.ntp(), _ntpc.get_initial_revision());
     for (const auto& kv : offset_map) {
-        target.add(kv.second.name, kv.second.meta);
+        target.add(kv.second.manifest_key, kv.second.meta);
     }
     if (cst_log.is_enabled(ss::log_level::debug)) {
         std::stringstream ostr;
@@ -333,7 +333,7 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
 ss::future<partition_downloader::download_part>
 partition_downloader::download_log_with_capped_size(
   const offset_map_t& offset_map,
-  const manifest& manifest,
+  const partition_manifest& manifest,
   const std::filesystem::path& prefix,
   size_t max_size) {
     vlog(_ctxlog.info, "Starting log download with size limit at {}", max_size);
@@ -347,13 +347,13 @@ partition_downloader::download_log_with_capped_size(
               _ctxlog.debug,
               "Max size {} reached, skipping {}",
               total_size,
-              it->second.name);
+              it->second.manifest_key);
             break;
         } else {
             vlog(
               _ctxlog.debug,
               "Found {}, total log size {}",
-              it->second.name,
+              it->second.manifest_key,
               total_size);
         }
         staged_downloads.push_front(it->second);
@@ -379,7 +379,7 @@ partition_downloader::download_log_with_capped_size(
 ss::future<partition_downloader::download_part>
 partition_downloader::download_log_with_capped_time(
   const offset_map_t& offset_map,
-  const manifest& manifest,
+  const partition_manifest& manifest,
   const std::filesystem::path& prefix,
   model::timestamp_clock::duration retention_time) {
     vlog(
@@ -403,13 +403,13 @@ partition_downloader::download_log_with_capped_time(
               "Time threshold {} reached at {}, skipping {}",
               time_threshold,
               meta.max_timestamp,
-              it->second.name);
+              it->second.manifest_key);
             break;
         } else {
             vlog(
               _ctxlog.debug,
               "Found {}, max_timestamp {} is within the time threshold {}",
-              it->second.name,
+              it->second.manifest_key,
               meta.max_timestamp,
               time_threshold);
         }
@@ -432,10 +432,10 @@ partition_downloader::download_log_with_capped_time(
     co_return dlpart;
 }
 
-ss::future<manifest>
+ss::future<partition_manifest>
 partition_downloader::download_manifest(const remote_manifest_path& key) {
     vlog(_ctxlog.info, "Downloading manifest {}", key);
-    manifest manifest(_ntpc.ntp(), _ntpc.get_initial_revision());
+    partition_manifest manifest(_ntpc.ntp(), _ntpc.get_initial_revision());
     auto result = co_await _remote->download_manifest(
       _bucket, key, manifest, _rtcnode);
     if (result != download_result::success) {
@@ -470,7 +470,7 @@ partition_downloader::find_matching_partition_manifests(
                       size_t,
                       const ss::sstring&) {
         std::filesystem::path path(key);
-        auto res = get_manifest_path_components(path);
+        auto res = get_partition_manifest_path_components(path);
         if (
           res.has_value() && same_ntp(*res, _ntpc.ntp())
           && res->_rev >= topic_rev) {
@@ -498,8 +498,10 @@ open_output_file_stream(const std::filesystem::path& path) {
 
 ss::future<> partition_downloader::download_segment_file(
   const segment& segm, const download_part& part) {
+    auto name = generate_segment_name(
+      segm.manifest_key.base_offset, segm.manifest_key.term);
     auto remote_path = generate_remote_segment_path(
-      _ntpc.ntp(), segm.meta.ntp_revision, segm.name, segm.meta.archiver_term);
+      _ntpc.ntp(), segm.meta.ntp_revision, name, segm.meta.archiver_term);
 
     vlog(
       _ctxlog.info,
@@ -510,8 +512,8 @@ ss::future<> partition_downloader::download_segment_file(
     offset_translator otl{segm.meta.delta_offset};
 
     auto localpath = part.part_prefix
-                     / std::string{
-                       otl.get_adjusted_segment_name(segm.name, _rtcnode)()};
+                     / std::string{otl.get_adjusted_segment_name(
+                       segm.manifest_key, _rtcnode)()};
 
     if (co_await ss::file_exists(localpath.string())) {
         // we don't need to re-download file if it's already on disk
@@ -533,9 +535,11 @@ ss::future<> partition_downloader::download_segment_file(
         co_await ss::remove_file(localpath.string());
     }
 
-    auto stream = [this, part, remote_path, localpath, otl](
+    auto stream = [this, part, remote_path, _localpath{localpath}, _otl{otl}](
                     uint64_t len,
                     ss::input_stream<char> in) -> ss::future<uint64_t> {
+        auto localpath{_localpath};
+        auto otl{_otl};
         vlog(
           _ctxlog.info,
           "Copying s3 path {} to local location {}",

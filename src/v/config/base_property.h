@@ -104,9 +104,13 @@ public:
     virtual std::optional<std::string_view> units_name() const = 0;
     virtual bool is_nullable() const = 0;
     virtual bool is_array() const = 0;
-    std::optional<std::string_view> example() const { return _meta.example; }
+    virtual std::optional<std::string_view> example() const = 0;
 
-    virtual std::optional<validation_error> validate() const = 0;
+    /**
+     * Validation of a proposed new value before it has been assigned
+     * to this property.
+     */
+    virtual std::optional<validation_error> validate(YAML::Node) const = 0;
     virtual base_property& operator=(const base_property&) = 0;
     virtual ~base_property() noexcept = default;
 
@@ -114,9 +118,9 @@ private:
     friend std::ostream& operator<<(std::ostream&, const base_property&);
     std::string_view _name;
     std::string_view _desc;
-    metadata _meta;
 
 protected:
+    metadata _meta;
     void assert_live_settable() const;
 };
 }; // namespace config

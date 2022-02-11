@@ -147,9 +147,10 @@ ss::future<> members_manager::handle_raft0_cfg_update(
           auto diff = calculate_brokers_diff(_members_table.local(), cfg);
           auto added_brokers = diff.additions;
           return _members_table
-            .invoke_on_all([cfg = std::move(cfg)](members_table& m) mutable {
-                m.update_brokers(cfg.brokers());
-            })
+            .invoke_on_all(
+              [cfg = std::move(cfg), update_offset](members_table& m) mutable {
+                  m.update_brokers(update_offset, cfg.brokers());
+              })
             .then([this, diff = std::move(diff)]() mutable {
                 // update internode connections
                 return update_connections(std::move(diff));
@@ -179,15 +180,17 @@ members_manager::apply_update(model::record_batch b) {
     if (b.header().type == model::record_batch_type::raft_configuration) {
         co_return co_await apply_raft_configuration_batch(std::move(b));
     }
+
+    auto update_offset = b.base_offset();
     // handle node managements command
     auto cmd = co_await cluster::deserialize(std::move(b), accepted_commands);
 
     co_return co_await ss::visit(
       cmd,
-      [this](decommission_node_cmd cmd) mutable {
+      [this, update_offset](decommission_node_cmd cmd) mutable {
           auto id = cmd.key;
-          return dispatch_updates_to_cores(cmd).then(
-            [this, id](std::error_code error) {
+          return dispatch_updates_to_cores(update_offset, cmd)
+            .then([this, id](std::error_code error) {
                 auto f = ss::now();
                 if (!error) {
                     _allocator.local().decommission_node(id);
@@ -197,10 +200,10 @@ members_manager::apply_update(model::record_batch b) {
                 return f.then([error] { return error; });
             });
       },
-      [this](recommission_node_cmd cmd) mutable {
+      [this, update_offset](recommission_node_cmd cmd) mutable {
           auto id = cmd.key;
-          return dispatch_updates_to_cores(cmd).then(
-            [this, id](std::error_code error) {
+          return dispatch_updates_to_cores(update_offset, cmd)
+            .then([this, id](std::error_code error) {
                 auto f = ss::now();
                 if (!error) {
                     _allocator.local().recommission_node(id);
@@ -258,10 +261,12 @@ members_manager::get_node_updates() {
 }
 
 template<typename Cmd>
-ss::future<std::error_code>
-members_manager::dispatch_updates_to_cores(Cmd cmd) {
+ss::future<std::error_code> members_manager::dispatch_updates_to_cores(
+  model::offset update_offset, Cmd cmd) {
     return _members_table
-      .map([cmd](members_table& mt) { return mt.apply(cmd); })
+      .map([cmd, update_offset](members_table& mt) {
+          return mt.apply(update_offset, cmd);
+      })
       .then([](std::vector<std::error_code> results) {
           auto sentinel = results.front();
           auto state_consistent = std::all_of(
@@ -517,20 +522,35 @@ members_manager::handle_join_request(model::broker broker) {
       });
 }
 
+/**
+ * Validate that:
+ * - node_id never changes
+ * - core count only increases, never decreases.
+ *
+ * Core count decreases are forbidden because our partition placement
+ * code does not know how to re-assign partitions away from non-existent
+ * cores if some cores are removed.  This may be improved in future, at
+ * which time we may remove this restriction on core count decreases.
+ *
+ * These checks are applied early during startup based on a locally
+ * stored record from previous startup, to prevent a misconfigured node
+ * from startup up far enough to disrupt the rest of the cluster.
+ * @return
+ */
 ss::future<> members_manager::validate_configuration_invariants() {
     static const bytes invariants_key("configuration_invariants");
     auto invariants_buf = _storage.local().kvs().get(
       storage::kvstore::key_space::controller, invariants_key);
+
+    auto current = configuration_invariants(_self.id(), ss::smp::count);
 
     if (!invariants_buf) {
         // store configuration invariants
         return _storage.local().kvs().put(
           storage::kvstore::key_space::controller,
           invariants_key,
-          reflection::to_iobuf(
-            configuration_invariants(_self.id(), ss::smp::count)));
+          reflection::to_iobuf(std::move(current)));
     }
-    auto current = configuration_invariants(_self.id(), ss::smp::count);
     auto invariants = reflection::from_iobuf<configuration_invariants>(
       std::move(*invariants_buf));
     // node id changed
@@ -556,6 +576,14 @@ ss::future<> members_manager::validate_configuration_invariants() {
           ss::smp::count);
         return ss::make_exception_future(
           configuration_invariants_changed(invariants, current));
+    } else if (invariants.core_count != current.core_count) {
+        // Update the persistent invariants to reflect increased core
+        // count -- this tracks the high water mark of core count, to
+        // reject subsequent decreases.
+        return _storage.local().kvs().put(
+          storage::kvstore::key_space::controller,
+          invariants_key,
+          reflection::to_iobuf(std::move(current)));
     }
     return ss::now();
 }

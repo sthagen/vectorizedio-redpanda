@@ -25,6 +25,7 @@
 #include "model/namespace.h"
 #include "model/record_batch_types.h"
 #include "model/timeout_clock.h"
+#include "net/tls.h"
 #include "net/unresolved_address.h"
 #include "reflection/adl.h"
 #include "rpc/types.h"
@@ -193,17 +194,17 @@ metrics_reporter::build_metrics_snapshot() {
         }
         auto& metrics = it->second;
 
-        metrics.version = report.redpanda_version;
-        metrics.disks.reserve(report.disk_space.size());
+        metrics.version = report.local_state.redpanda_version;
+        metrics.disks.reserve(report.local_state.disks.size());
         std::transform(
-          report.disk_space.begin(),
-          report.disk_space.end(),
+          report.local_state.disks.begin(),
+          report.local_state.disks.end(),
           std::back_inserter(metrics.disks),
-          [](const cluster::node_disk_space& nds) {
+          [](const cluster::node::disk& nds) {
               return node_disk_space{.free = nds.free, .total = nds.total};
           });
 
-        metrics.uptime_ms = report.uptime / 1ms;
+        metrics.uptime_ms = report.local_state.uptime / 1ms;
     }
     auto& topics = _topics.local().topics_map();
     snapshot.topic_count = 0;
@@ -237,7 +238,6 @@ ss::future<> metrics_reporter::try_initialize_cluster_info() {
 
     storage::log_reader_config reader_cfg(
       model::offset(0), model::offset(2), ss::default_priority_class());
-    reader_cfg.type_filter = model::record_batch_type::raft_configuration;
     auto reader = co_await _raft0->make_reader(reader_cfg);
 
     auto batches = co_await model::consume_reader_to_memory(
@@ -291,11 +291,25 @@ ss::future<http::client> metrics_reporter::make_http_client() {
     client_configuration.disable_metrics = net::metrics_disabled::yes;
 
     if (_address.protocol == "https") {
-        client_configuration.credentials
-          = ss::make_shared<ss::tls::certificate_credentials>();
-        co_await client_configuration.credentials->set_system_trust();
-    }
+        ss::tls::credentials_builder builder;
+        builder.set_client_auth(ss::tls::client_auth::NONE);
+        auto ca_file = co_await net::find_ca_file();
+        if (ca_file) {
+            vlog(
+              _logger.trace, "using {} as metrics reporter CA store", ca_file);
+            co_await builder.set_x509_trust_file(
+              ca_file.value(), ss::tls::x509_crt_format::PEM);
+        } else {
+            vlog(
+              _logger.trace,
+              "ca file not found, defaulting to system trust store");
+            co_await builder.set_system_trust();
+        }
 
+        client_configuration.credentials
+          = co_await builder.build_reloadable_certificate_credentials();
+        client_configuration.tls_sni_hostname = _address.host;
+    }
     co_return http::client(client_configuration, _as.local());
 }
 

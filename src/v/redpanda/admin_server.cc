@@ -349,19 +349,89 @@ ss::future<ss::httpd::redirect_exception> admin_server::redirect_to_leader(
             leader_id_opt.value()),
           ss::httpd::reply::status_type::service_unavailable);
     }
+    auto leader = leader_opt.value();
 
-    // FIXME: We assume that our peers are listening on the same admin port as
-    // we are.
-    auto port = config::node_config().admin()[0].address.port();
+    // Heuristic for finding peer's admin API interface that is accessible
+    // from the client that sent this request:
+    // - if the host in the Host header matches one of our advertised kafka
+    //   addresses, then assume that the peer's advertised kafka address
+    //   with the same index will also be their public admin API address.
+    // - Assume that the peer is listening on the same port that the client
+    //   used to make this request (i.e. the port in Host)
+    //
+    // This will work reliably if all node configs have symmetric kafka listener
+    // sections (i.e. all specify the same number of listeners in the same
+    // order, for example all nodes have an internal and an external listener in
+    // that order), and the hostname used for connecting to the admin API
+    // matches one of the hostnames used for a kafka listener.
+    //
+    // The generic fallback if the heuristic fails is to use the peer's
+    // internal RPC address.  This works if the user is e.g. connecting
+    // by IP address to a k8s cluster's internal pod IP.
 
-    // FIXME: We assume that our peer is listening on the same network interface
-    // as they use for RPCs.
+    auto host_hdr = req.get_header("host");
+
+    std::string port;        // String like :123, or blank for default port
+    std::string target_host; // Guessed admin API hostname of peer
+
+    if (host_hdr.empty()) {
+        vlog(
+          logger.debug,
+          "redirect: Missing Host header, falling back to internal RPC "
+          "address");
+
+        // Misbehaving client.  Guess peer address.
+        port = fmt::format(
+          ":{}", config::node_config().admin()[0].address.port());
+
+    } else {
+        // Assumption: the peer will be listening on the same port that this
+        // request was sent to: parse the port out of the Host header
+        auto colon = host_hdr.find(":");
+        if (colon == std::string::npos) {
+            // Admin is being served on a standard port, leave port string blank
+        } else {
+            port = host_hdr.substr(colon);
+        }
+
+        auto req_hostname = host_hdr.substr(0, colon);
+
+        // See if this hostname is one of our kafka advertised addresses
+        auto kafka_endpoints = config::node().advertised_kafka_api();
+        auto match_i = std::find_if(
+          kafka_endpoints.begin(),
+          kafka_endpoints.end(),
+          [req_hostname](model::broker_endpoint const& be) {
+              return be.address.host() == req_hostname;
+          });
+        if (match_i != kafka_endpoints.end()) {
+            auto listener_idx = size_t(
+              std::distance(kafka_endpoints.begin(), match_i));
+
+            auto leader_advertised_addrs = leader->kafka_advertised_listeners();
+            if (leader_advertised_addrs.size() < listener_idx + 1) {
+                vlog(
+                  logger.debug,
+                  "redirect: leader has no advertised address at matching "
+                  "index for {}, "
+                  "falling back to internal RPC address",
+                  req_hostname);
+                target_host = leader->rpc_address().host();
+            } else {
+                target_host
+                  = leader_advertised_addrs[listener_idx].address.host();
+            }
+        } else {
+            vlog(
+              logger.debug,
+              "redirect: {} did not match any kafka listeners, redirecting to "
+              "peer's internal RPC address",
+              req_hostname);
+        }
+    }
+
     auto url = fmt::format(
-      "{}://{}:{}{}",
-      req.get_protocol_name(),
-      leader_opt.value()->rpc_address().host(),
-      port,
-      req._url);
+      "{}://{}{}{}", req.get_protocol_name(), target_host, port, req._url);
 
     vlog(
       logger.info, "Redirecting admin API call to {} leader at {}", ntp, url);
@@ -736,20 +806,90 @@ void admin_server::register_cluster_config_routes() {
                       continue;
                   }
                   auto& property = cfg.get(i.first);
+
                   try {
-                      property.set_value(val);
-                  } catch (...) {
-                      errors[i.first] = fmt::format(
-                        "{}", std::current_exception());
+                      auto validation_err = property.validate(val);
+                      if (validation_err.has_value()) {
+                          errors[i.first]
+                            = validation_err.value().error_message();
+                          vlog(
+                            logger.warn,
+                            "Invalid {}: '{}' ({})",
+                            i.first,
+                            yaml_value,
+                            validation_err.value().error_message());
+                      } else {
+                          // In case any property subclass might throw
+                          // from it's value setter even after a non-throwing
+                          // call to validate (if this happens validate() was
+                          // implemented wrongly, but let's be safe)
+                          property.set_value(val);
+                      }
+                  } catch (YAML::BadConversion const& e) {
+                      // Be helpful, and give the user an example of what
+                      // the setting should look like, if we have one.
+                      ss::sstring example;
+                      auto example_opt = property.example();
+                      if (example_opt.has_value()) {
+                          example = fmt::format(
+                            ", for example '{}'", example_opt.value());
+                      }
+
+                      auto message = fmt::format(
+                        "expected type {}{}", property.type_name(), example);
+
+                      // Special case: we get BadConversion for out-of-range
+                      // values on smaller integer sizes (e.g. too
+                      // large value to an int16_t property).
+                      // ("integer" is a magic string but it's a stable part
+                      //  of our outward interface)
+                      if (property.type_name() == "integer") {
+                          int64_t n{0};
+                          try {
+                              n = val.as<int64_t>();
+                              // It's a valid integer:
+                              message = fmt::format("out of range");
+                          } catch (...) {
+                              // This was not an out-of-bounds case, use
+                              // the type error message
+                          }
+                      }
+
+                      errors[i.first] = message;
                       vlog(
-                        logger.warn, "Invalid {}: '{}'", i.first, yaml_value);
+                        logger.warn,
+                        "Invalid {}: '{}' ({})",
+                        i.first,
+                        yaml_value,
+                        std::current_exception());
+                  } catch (...) {
+                      auto message = fmt::format(
+                        "{}", std::current_exception());
+                      errors[i.first] = message;
+                      vlog(
+                        logger.warn,
+                        "Invalid {}: '{}' ({})",
+                        i.first,
+                        yaml_value,
+                        message);
                   }
               }
 
               if (!errors.empty()) {
-                  // TODO structured response
-                  throw ss::httpd::bad_request_exception(
-                    fmt::format("Invalid properties"));
+                  rapidjson::StringBuffer buf;
+                  rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+
+                  w.StartObject();
+                  for (const auto& e : errors) {
+                      w.Key(e.first.data(), e.first.size());
+                      w.String(e.second.data(), e.second.size());
+                  }
+                  w.EndObject();
+
+                  throw ss::httpd::base_exception(
+                    buf.GetString(),
+                    ss::httpd::reply::status_type::bad_request,
+                    "json");
               }
           }
 
@@ -879,6 +1019,25 @@ parse_scram_credential(const rapidjson::Document& doc) {
     return credential;
 }
 
+static bool match_scram_credential(
+  const rapidjson::Document& doc, const security::scram_credential& creds) {
+    // Document is pre-validated via earlier parse_scram_credential call
+    const auto password = ss::sstring(doc["password"].GetString());
+    const auto algorithm = std::string_view(
+      doc["algorithm"].GetString(), doc["algorithm"].GetStringLength());
+
+    if (algorithm == security::scram_sha256_authenticator::name) {
+        return security::scram_sha256::validate_password(
+          password, creds.stored_key(), creds.salt(), creds.iterations());
+    } else if (algorithm == security::scram_sha512_authenticator::name) {
+        return security::scram_sha512::validate_password(
+          password, creds.stored_key(), creds.salt(), creds.iterations());
+    } else {
+        throw ss::httpd::bad_request_exception(
+          fmt::format("Unknown scram algorithm: {}", algorithm));
+    }
+}
+
 void admin_server::register_security_routes() {
     ss::httpd::security_json::create_user.set(
       _server._routes,
@@ -899,7 +1058,27 @@ void admin_server::register_security_routes() {
           auto err
             = co_await _controller->get_security_frontend().local().create_user(
               username, credential, model::timeout_clock::now() + 5s);
-          vlog(logger.debug, "Creating user {}:{}", err, err.message());
+          vlog(
+            logger.debug,
+            "Creating user '{}' {}:{}",
+            username,
+            err,
+            err.message());
+
+          if (err == cluster::errc::user_exists) {
+              // Idempotency: if user is same as one that already exists,
+              // suppress the user_exists error and return success.
+              const auto& credentials_store
+                = _controller->get_credential_store().local();
+              std::optional<security::scram_credential> creds
+                = credentials_store.get<security::scram_credential>(username);
+              if (
+                creds.has_value()
+                && match_scram_credential(doc, creds.value())) {
+                  co_return ss::json::json_return_type(ss::json::json_void());
+              }
+          }
+
           co_await throw_on_error(*req, err, model::controller_ntp);
           co_return ss::json::json_return_type(ss::json::json_void());
       });
@@ -913,7 +1092,12 @@ void admin_server::register_security_routes() {
           auto err
             = co_await _controller->get_security_frontend().local().delete_user(
               user, model::timeout_clock::now() + 5s);
-          vlog(logger.debug, "Deleting user {}:{}", err, err.message());
+          vlog(
+            logger.debug, "Deleting user '{}' {}:{}", user, err, err.message());
+          if (err == cluster::errc::user_does_not_exist) {
+              // Idempotency: removing a non-existent user is successful.
+              co_return ss::json::json_return_type(ss::json::json_void());
+          }
           co_await throw_on_error(*req, err, model::controller_ntp);
           co_return ss::json::json_return_type(ss::json::json_void());
       });
@@ -1043,6 +1227,76 @@ model::node_id parse_broker_id(const ss::httpd::request& req) {
 }
 
 void admin_server::register_broker_routes() {
+    ss::httpd::broker_json::get_cluster_view.set(
+      _server._routes, [this](std::unique_ptr<ss::httpd::request>) {
+          cluster::node_report_filter filter;
+
+          return _controller->get_health_monitor()
+            .local()
+            .get_cluster_health(
+              cluster::cluster_report_filter{
+                .node_report_filter = std::move(filter),
+              },
+              cluster::force_refresh::no,
+              model::no_timeout)
+            .then([this](result<cluster::cluster_health_report> h_report) {
+                if (h_report.has_error()) {
+                    throw ss::httpd::base_exception(
+                      fmt::format(
+                        "Unable to get cluster health: {}",
+                        h_report.error().message()),
+                      ss::httpd::reply::status_type::service_unavailable);
+                }
+
+                std::map<model::node_id, ss::httpd::broker_json::broker> result;
+
+                auto& members_table = _controller->get_members_table().local();
+                for (auto& broker : members_table.all_brokers()) {
+                    ss::httpd::broker_json::broker b;
+                    b.node_id = broker->id();
+                    b.num_cores = broker->properties().cores;
+                    b.membership_status = fmt::format(
+                      "{}", broker->get_membership_state());
+                    b.is_alive = true;
+                    result[broker->id()] = b;
+                }
+
+                for (auto& ns : h_report.value().node_states) {
+                    auto it = result.find(ns.id);
+                    if (it == result.end()) {
+                        continue;
+                    }
+                    it->second.is_alive = (bool)ns.is_alive;
+
+                    auto r_it = std::find_if(
+                      h_report.value().node_reports.begin(),
+                      h_report.value().node_reports.end(),
+                      [id = ns.id](const cluster::node_health_report& nhr) {
+                          return nhr.id == id;
+                      });
+                    if (r_it != h_report.value().node_reports.end()) {
+                        it->second.version = r_it->local_state.redpanda_version;
+                        for (auto& ds : r_it->local_state.disks) {
+                            ss::httpd::broker_json::disk_space_info dsi;
+                            dsi.path = ds.path;
+                            dsi.free = ds.free;
+                            dsi.total = ds.total;
+                            it->second.disk_space.push(dsi);
+                        }
+                    }
+                }
+
+                ss::httpd::broker_json::cluster_view ret;
+                ret.version = members_table.version();
+                for (auto& [_, b] : result) {
+                    ret.brokers.push(b);
+                }
+
+                return ss::make_ready_future<ss::json::json_return_type>(
+                  std::move(ret));
+            });
+      });
+
     ss::httpd::broker_json::get_brokers.set(
       _server._routes, [this](std::unique_ptr<ss::httpd::request>) {
           cluster::node_report_filter filter;
@@ -1085,8 +1339,8 @@ void admin_server::register_broker_routes() {
                           return nhr.id == id;
                       });
                     if (r_it != h_report.value().node_reports.end()) {
-                        b.version = r_it->redpanda_version;
-                        for (auto& ds : r_it->disk_space) {
+                        b.version = r_it->local_state.redpanda_version;
+                        for (auto& ds : r_it->local_state.disks) {
                             ss::httpd::broker_json::disk_space_info dsi;
                             dsi.path = ds.path;
                             dsi.free = ds.free;
@@ -1332,9 +1586,11 @@ void admin_server::register_partition_routes() {
 
           co_return co_await _partition_manager.invoke_on(
             *shard,
-            [ntp = std::move(ntp), req = std::move(req), this](
+            [_ntp = std::move(ntp), _req = std::move(req), this](
               cluster::partition_manager& pm) mutable
             -> ss::future<ss::json::json_return_type> {
+                auto ntp = std::move(_ntp);
+                auto req = std::move(_req);
                 auto partition = pm.get(ntp);
                 if (!partition) {
                     throw ss::httpd::server_error_exception(fmt_with_ctx(
@@ -1443,9 +1699,11 @@ void admin_server::register_partition_routes() {
 
           co_return co_await _partition_manager.invoke_on(
             *shard,
-            [ntp = std::move(ntp), pid, req = std::move(req), this](
+            [_ntp = std::move(ntp), pid, _req = std::move(req), this](
               cluster::partition_manager& pm) mutable
             -> ss::future<ss::json::json_return_type> {
+                auto ntp = std::move(_ntp);
+                auto req = std::move(_req);
                 auto partition = pm.get(ntp);
                 if (!partition) {
                     throw ss::httpd::server_error_exception(fmt_with_ctx(

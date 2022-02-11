@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "cloud_storage/manifest.h"
+#include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/types.h"
 #include "utils/retry_chain_node.h"
 
@@ -42,7 +42,7 @@ public:
 
     /// Get segment name adjusted for all removed offsets
     segment_name get_adjusted_segment_name(
-      const segment_name& s, retry_chain_node& fib) const;
+      const partition_manifest::key& s, retry_chain_node& fib) const;
 
 private:
     model::offset _initial_delta;

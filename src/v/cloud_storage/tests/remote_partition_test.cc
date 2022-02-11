@@ -10,8 +10,8 @@
 
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
-#include "cloud_storage/manifest.h"
 #include "cloud_storage/offset_translation_layer.h"
+#include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/remote_partition.h"
 #include "cloud_storage/remote_segment.h"
@@ -187,7 +187,7 @@ static void print_segments(const std::vector<in_memory_segment>& segments) {
 
 static std::vector<cloud_storage_fixture::expectation>
 make_imposter_expectations(
-  cloud_storage::manifest& m,
+  cloud_storage::partition_manifest& m,
   const std::vector<in_memory_segment>& segments,
   bool truncate_segments = false) {
     std::vector<cloud_storage_fixture::expectation> results;
@@ -198,7 +198,7 @@ make_imposter_expectations(
             body = s.bytes.substr(0, s.bytes.size() / 2);
         }
 
-        cloud_storage::manifest::segment_meta meta{
+        cloud_storage::partition_manifest::segment_meta meta{
           .is_compacted = false,
           .size_bytes = s.bytes.size(),
           .base_offset = s.base_offset,
@@ -211,8 +211,8 @@ make_imposter_expectations(
         m.add(s.sname, meta);
 
         delta = delta + model::offset(s.num_config_records);
-
-        auto url = m.generate_segment_path(s.sname, meta);
+        auto res = parse_segment_name(s.sname);
+        auto url = m.generate_segment_path(*res, meta);
         results.push_back(cloud_storage_fixture::expectation{
           .url = "/" + url().string(), .body = body});
     }
@@ -284,7 +284,7 @@ static auto setup_s3_imposter(
   bool truncate_segments = false) {
     // Create test data
     auto segments = make_segments(num_segments, num_batches_per_segment);
-    cloud_storage::manifest manifest(manifest_ntp, manifest_revision);
+    cloud_storage::partition_manifest manifest(manifest_ntp, manifest_revision);
     auto expectations = make_imposter_expectations(
       manifest, segments, truncate_segments);
     fixture.set_expectations_and_listen(expectations);
@@ -295,14 +295,15 @@ static auto setup_s3_imposter(
   cloud_storage_fixture& fixture, std::vector<std::vector<batch_t>> batches) {
     // Create test data
     auto segments = make_segments(batches);
-    cloud_storage::manifest manifest(manifest_ntp, manifest_revision);
+    cloud_storage::partition_manifest manifest(manifest_ntp, manifest_revision);
     auto expectations = make_imposter_expectations(manifest, segments);
     fixture.set_expectations_and_listen(expectations);
     return segments;
 }
 
-static manifest hydrate_manifest(remote& api, const s3::bucket_name& bucket) {
-    manifest m(manifest_ntp, manifest_revision);
+static partition_manifest
+hydrate_manifest(remote& api, const s3::bucket_name& bucket) {
+    partition_manifest m(manifest_ntp, manifest_revision);
     retry_chain_node rtc(1s, 200ms);
     auto key = m.get_manifest_path();
     auto res = api.download_manifest(bucket, key, m, rtc).get();
@@ -317,7 +318,7 @@ static model::record_batch_header read_single_batch_from_remote_partition(
     static auto bucket = s3::bucket_name("bucket");
     remote api(s3_connection_limit(10), conf);
     auto action = ss::defer([&api] { api.stop().get(); });
-    auto m = ss::make_lw_shared<cloud_storage::manifest>(
+    auto m = ss::make_lw_shared<cloud_storage::partition_manifest>(
       manifest_ntp, manifest_revision);
     storage::log_reader_config reader_config(
       target, target, ss::default_priority_class());
@@ -347,7 +348,7 @@ static std::vector<model::record_batch_header> scan_remote_partition(
     static auto bucket = s3::bucket_name("bucket");
     remote api(s3_connection_limit(10), conf);
     auto action = ss::defer([&api] { api.stop().get(); });
-    auto m = ss::make_lw_shared<cloud_storage::manifest>(
+    auto m = ss::make_lw_shared<cloud_storage::partition_manifest>(
       manifest_ntp, manifest_revision);
     storage::log_reader_config reader_config(
       base, max, ss::default_priority_class());
@@ -625,9 +626,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, data, data, data, data, data, data, data, data, data},
@@ -664,9 +665,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, data, data, data, data, data},
@@ -703,9 +704,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, data, data, data, data, data, data, data, data, data},
@@ -742,9 +743,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, conf},
@@ -779,9 +780,9 @@ FIXTURE_TEST(
 FIXTURE_TEST(
   test_remote_partition_scan_translate_full_5, cloud_storage_fixture) {
     constexpr int num_segments = 3;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, data},
@@ -805,9 +806,9 @@ FIXTURE_TEST(
 FIXTURE_TEST(
   test_remote_partition_scan_translate_full_6, cloud_storage_fixture) {
     constexpr int num_segments = 3;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, conf},
@@ -834,22 +835,38 @@ struct segment_layout {
 
 static segment_layout generate_segment_layout(int num_segments, int seed) {
     static constexpr size_t max_segment_size = 20;
-    static constexpr size_t max_batch_size = 100;
-    std::seed_seq seq{seed};
-    std::mt19937 re(seq);
-    std::uniform_int_distribution<unsigned> dist;
+    static constexpr size_t max_batch_size = 10;
+    static constexpr size_t max_record_bytes = 2048;
     size_t num_data_batches = 0;
-    auto gen_segment = [&re, &dist, &num_data_batches]() {
-        size_t sz = 1 + dist(re) % max_segment_size;
+    auto gen_segment = [&num_data_batches]() {
+        size_t sz = random_generators::get_int((size_t)1, max_segment_size - 1);
         std::vector<batch_t> res;
         res.reserve(sz);
+        model::record_batch_type types[] = {
+          model::record_batch_type::raft_data,
+          model::record_batch_type::raft_configuration,
+          model::record_batch_type::archival_metadata,
+        };
+        constexpr auto num_types
+          = (sizeof(types) / sizeof(model::record_batch_type));
         for (size_t i = 0; i < sz; i++) {
-            size_t batch_size = 1 + dist(re) % max_batch_size;
-            size_t type = dist(re) % 2;
+            auto type = types[random_generators::get_int(num_types - 1)];
+            size_t batch_size = random_generators::get_int(
+              (size_t)1, max_batch_size - 1);
+            if (type == model::record_batch_type::raft_configuration) {
+                // raft_configuration can only have one record
+                // archival_metadata can have more than one records
+                batch_size = 1;
+            }
+            std::vector<size_t> sizes;
+            for (int j = 0; j < batch_size; j++) {
+                sizes.push_back(
+                  random_generators::get_int(max_record_bytes - 1));
+            }
             batch_t b{
               .num_records = static_cast<int>(batch_size),
-              .type = type == 0 ? model::record_batch_type::raft_data
-                                : model::record_batch_type::raft_configuration,
+              .type = type,
+              .record_sizes = sizes,
             };
             if (b.type == model::record_batch_type::raft_data) {
                 num_data_batches++;
@@ -879,11 +896,6 @@ FIXTURE_TEST(
     auto headers_read = scan_remote_partition(*this, base, max);
     model::offset expected_offset{0};
     for (const auto& header : headers_read) {
-        vlog(
-          test_log.debug,
-          "Expected offset {}, actual header {}",
-          expected_offset,
-          header);
         BOOST_REQUIRE_EQUAL(expected_offset, header.base_offset);
         expected_offset = header.last_offset() + model::offset(1);
     }
@@ -899,11 +911,10 @@ scan_remote_partition_incrementally(
     static auto bucket = s3::bucket_name("bucket");
     remote api(s3_connection_limit(10), conf);
     auto action = ss::defer([&api] { api.stop().get(); });
-    auto m = ss::make_lw_shared<cloud_storage::manifest>(
+    auto m = ss::make_lw_shared<cloud_storage::partition_manifest>(
       manifest_ntp, manifest_revision);
 
     auto manifest = hydrate_manifest(api, bucket);
-
     auto partition = ss::make_lw_shared<remote_partition>(
       manifest, api, *imposter.cache, bucket);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
@@ -914,18 +925,27 @@ scan_remote_partition_incrementally(
 
     storage::log_reader_config reader_config(
       base, max, ss::default_priority_class());
-    reader_config.max_bytes = 4_KiB;
+
+    // starting max_bytes
+    constexpr size_t max_bytes_limit = 4_KiB;
+    reader_config.max_bytes = max_bytes_limit;
 
     auto next = base;
 
     int num_fetches = 0;
     while (next < max) {
         reader_config.start_offset = next;
+        reader_config.max_bytes = random_generators::get_int(
+          max_bytes_limit - 1);
+        vlog(test_log.info, "reader_config {}", reader_config);
         auto reader = partition->make_reader(reader_config).get().reader;
         auto headers_read
           = reader.consume(test_consumer(), model::no_timeout).get();
         if (headers_read.empty()) {
             break;
+        }
+        for (const auto& header : headers_read) {
+            vlog(test_log.info, "header {}", header);
         }
         next = headers_read.back().last_offset() + model::offset(1);
         std::copy(
@@ -934,7 +954,7 @@ scan_remote_partition_incrementally(
           std::back_inserter(headers));
         num_fetches++;
     }
-    BOOST_REQUIRE(num_fetches != 1);
+    BOOST_REQUIRE(num_fetches > 0);
     vlog(test_log.info, "{} fetch operations performed", num_fetches);
     return headers;
 }
@@ -951,13 +971,36 @@ FIXTURE_TEST(
     auto headers_read = scan_remote_partition_incrementally(*this, base, max);
     model::offset expected_offset{0};
     for (const auto& header : headers_read) {
-        vlog(
-          test_log.debug,
-          "Expected offset {}, actual header {}",
-          expected_offset,
-          header);
         BOOST_REQUIRE_EQUAL(expected_offset, header.base_offset);
         expected_offset = header.last_offset() + model::offset(1);
     }
     BOOST_REQUIRE_EQUAL(headers_read.size(), num_data_batches);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_btree_iterator_range_scan) {
+    using map_t = absl::btree_map<int, int>;
+    using iter_t = cloud_storage::details::btree_map_stable_iterator<int, int>;
+    static constexpr int N = 1000;
+    static constexpr int M = 500;
+    map_t map;
+    for (int i = 0; i < N; i++) {
+        map[i] = i * 2;
+    }
+    iter_t begin(map, 0);
+    iter_t end(map);
+    int cnt = 0;
+    for (auto i = begin; i != end; i++) {
+        BOOST_REQUIRE_EQUAL(i->first, cnt);
+        BOOST_REQUIRE_EQUAL(i->second, 2 * cnt);
+        cnt++;
+    }
+
+    cnt = M;
+    for (auto i = iter_t(map, M); i != end; i++) {
+        BOOST_REQUIRE_EQUAL(i->first, cnt);
+        BOOST_REQUIRE_EQUAL(i->second, 2 * cnt);
+        cnt++;
+    }
+
+    auto it = iter_t(map);
 }

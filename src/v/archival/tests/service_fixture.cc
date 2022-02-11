@@ -48,8 +48,9 @@ inline ss::logger fixt_log("fixture"); // NOLINT
 static constexpr int16_t httpd_port_number = 4430;
 static constexpr const char* httpd_host_name = "127.0.0.1";
 
-static cloud_storage::manifest load_manifest_from_str(std::string_view v) {
-    cloud_storage::manifest m;
+static cloud_storage::partition_manifest
+load_manifest_from_str(std::string_view v) {
+    cloud_storage::partition_manifest m;
     iobuf i;
     i.append(v.data(), v.size());
     auto s = make_iobuf_input_stream(std::move(i));
@@ -404,7 +405,7 @@ void segment_matcher<Fixture>::verify_segment(
 
 template<class Fixture>
 void segment_matcher<Fixture>::verify_manifest(
-  const cloud_storage::manifest& man) {
+  const cloud_storage::partition_manifest& man) {
     auto all_segments = list_segments(man.get_ntp());
     BOOST_REQUIRE_EQUAL(all_segments.size(), man.size());
     for (const auto& s : all_segments) {
@@ -426,7 +427,8 @@ void segment_matcher<Fixture>::verify_manifest(
 template<class Fixture>
 void segment_matcher<Fixture>::verify_manifest_content(
   const ss::sstring& manifest_content) {
-    cloud_storage::manifest m = load_manifest_from_str(manifest_content);
+    cloud_storage::partition_manifest m = load_manifest_from_str(
+      manifest_content);
     verify_manifest(m);
 }
 
@@ -454,8 +456,8 @@ enable_cloud_storage_fixture::~enable_cloud_storage_fixture() {
     config::shard_local_cfg().cloud_storage_enabled.set_value(false);
 }
 
-cloud_storage::manifest load_manifest(std::string_view v) {
-    cloud_storage::manifest m;
+cloud_storage::partition_manifest load_manifest(std::string_view v) {
+    cloud_storage::partition_manifest m;
     iobuf i;
     i.append(v.data(), v.size());
     auto s = make_iobuf_input_stream(std::move(i));
@@ -464,8 +466,11 @@ cloud_storage::manifest load_manifest(std::string_view v) {
 }
 
 archival::remote_segment_path get_segment_path(
-  const cloud_storage::manifest& manifest, const archival::segment_name& name) {
+  const cloud_storage::partition_manifest& manifest,
+  const archival::segment_name& name) {
     auto meta = manifest.get(name);
     BOOST_REQUIRE(meta);
-    return manifest.generate_segment_path(name, *meta);
+    auto key = cloud_storage::parse_segment_name(name);
+    BOOST_REQUIRE(key);
+    return manifest.generate_segment_path(*key, *meta);
 }

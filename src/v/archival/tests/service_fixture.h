@@ -11,7 +11,6 @@
 #pragma once
 
 #include "archival/ntp_archiver_service.h"
-#include "cloud_storage/manifest.h"
 #include "cloud_storage/types.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/types.h"
@@ -142,7 +141,7 @@ public:
 
     /// Verify manifest using log_manager's state,
     /// find matching segments and check the fields.
-    void verify_manifest(const cloud_storage::manifest& man);
+    void verify_manifest(const cloud_storage::partition_manifest& man);
 
     /// Verify manifest content using log_manager's state,
     /// find matching segments and check the fields.
@@ -199,7 +198,7 @@ private:
 std::tuple<archival::configuration, cloud_storage::configuration>
 get_configurations();
 
-cloud_storage::manifest load_manifest(std::string_view v);
+cloud_storage::partition_manifest load_manifest(std::string_view v);
 
-archival::remote_segment_path
-get_segment_path(const cloud_storage::manifest&, const archival::segment_name&);
+archival::remote_segment_path get_segment_path(
+  const cloud_storage::partition_manifest&, const archival::segment_name&);
