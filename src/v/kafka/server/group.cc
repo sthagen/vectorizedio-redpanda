@@ -441,7 +441,12 @@ bool group::leader_rejoined() {
 
 ss::future<join_group_response>
 group::handle_join_group(join_group_request&& r, bool is_new_group) {
-    vlog(_ctxlog.trace, "Handling join request {}", r);
+    vlog(
+      _ctxlog.trace,
+      "Handling join request {} for {} group {}",
+      r,
+      (is_new_group ? "new" : "existing"),
+      *this);
 
     auto ret = ss::make_ready_future<join_group_response>(
       join_group_response(error_code::none));
@@ -510,7 +515,7 @@ group::join_group_unknown_member(join_group_request&& r) {
           _ctxlog.trace,
           "Requesting rejoin for unknown member with new id {}",
           new_member_id);
-        add_pending_member(new_member_id);
+        add_pending_member(new_member_id, r.data.session_timeout_ms);
         return make_join_error(new_member_id, error_code::member_id_required);
     } else {
         return add_member_and_rebalance(std::move(new_member_id), std::move(r));
@@ -960,7 +965,7 @@ void group::schedule_next_heartbeat_expiration(member_ptr member) {
     member->expire_timer().arm(deadline);
 }
 
-void group::remove_pending_member(const kafka::member_id& member_id) {
+void group::remove_pending_member(kafka::member_id member_id) {
     _pending_members.erase(member_id);
     vlog(_ctxlog.trace, "Removing pending member {}", member_id);
     if (in_state(group_state::preparing_rebalance)) {
@@ -1420,6 +1425,15 @@ group::commit_tx(cluster::commit_group_tx_request r) {
         co_return make_commit_tx_reply(cluster::tx_errc::unknown_server_error);
     }
 
+    prepare_it = _prepared_txs.find(r.pid);
+    if (prepare_it == _prepared_txs.end()) {
+        vlog(
+          _ctx_txlog.error,
+          "can't find already observed prepared tx pid:{}",
+          r.pid);
+        co_return make_commit_tx_reply(cluster::tx_errc::unknown_server_error);
+    }
+
     for (const auto& [tp, md] : prepare_it->second.offsets) {
         try_upsert_offset(tp, md);
     }
@@ -1461,6 +1475,17 @@ group::begin_tx(cluster::begin_group_tx_request r) {
 
     auto fence_it = _fence_pid_epoch.find(r.pid.get_id());
     if (
+      fence_it != _fence_pid_epoch.end()
+      && r.pid.get_epoch() < fence_it->second) {
+        vlog(
+          _ctx_txlog.error,
+          "pid {} fenced out by epoch {}",
+          r.pid,
+          fence_it->second);
+        co_return make_begin_tx_reply(cluster::tx_errc::fenced);
+    }
+
+    if (
       fence_it == _fence_pid_epoch.end()
       || r.pid.get_epoch() > fence_it->second) {
         group_log_fencing fence{.group_id = id()};
@@ -1488,19 +1513,16 @@ group::begin_tx(cluster::begin_group_tx_request r) {
             co_return make_begin_tx_reply(
               cluster::tx_errc::unknown_server_error);
         }
-    }
 
-    if (fence_it == _fence_pid_epoch.end()) {
-        _fence_pid_epoch.emplace(r.pid.get_id(), r.pid.get_epoch());
-    } else if (r.pid.get_epoch() >= fence_it->second) {
-        fence_it->second = r.pid.get_epoch();
-    } else {
-        vlog(
-          _ctx_txlog.error,
-          "pid {} fenced out by epoch {}",
-          r.pid,
-          fence_it->second);
-        co_return make_begin_tx_reply(cluster::tx_errc::fenced);
+        // _fence_pid_epoch may change while the method waits for the
+        //  replicate coroutine to finish so the fence_it may become
+        //  invalidated and we need to grab it again
+        fence_it = _fence_pid_epoch.find(r.pid.get_id());
+        if (fence_it == _fence_pid_epoch.end()) {
+            _fence_pid_epoch.emplace(r.pid.get_id(), r.pid.get_epoch());
+        } else {
+            fence_it->second = r.pid.get_epoch();
+        }
     }
 
     // TODO: https://app.clubhouse.io/vectorized/story/2194
@@ -1852,9 +1874,11 @@ group::handle_commit_tx(cluster::commit_group_tx_request r) {
     } else if (
       in_state(group_state::empty) || in_state(group_state::stable)
       || in_state(group_state::preparing_rebalance)) {
-        co_return co_await _tx_mutex.with([this, r = std::move(r)]() mutable {
-            return commit_tx(std::move(r));
-        });
+        auto id = r.pid.get_id();
+        co_return co_await with_pid_lock(
+          id, [this, r = std::move(r)]() mutable {
+              return commit_tx(std::move(r));
+          });
     } else if (in_state(group_state::completing_rebalance)) {
         co_return make_commit_tx_reply(cluster::tx_errc::rebalance_in_progress);
     } else {
@@ -1871,9 +1895,11 @@ group::handle_txn_offset_commit(txn_offset_commit_request r) {
     } else if (
       in_state(group_state::empty) || in_state(group_state::stable)
       || in_state(group_state::preparing_rebalance)) {
-        co_return co_await _tx_mutex.with([this, r = std::move(r)]() mutable {
-            return store_txn_offsets(std::move(r));
-        });
+        auto id = model::producer_id(r.data.producer_id());
+        co_return co_await with_pid_lock(
+          id, [this, r = std::move(r)]() mutable {
+              return store_txn_offsets(std::move(r));
+          });
     } else if (in_state(group_state::completing_rebalance)) {
         co_return txn_offset_commit_response(
           r, error_code::rebalance_in_progress);
@@ -1893,9 +1919,11 @@ group::handle_begin_tx(cluster::begin_group_tx_request r) {
     } else if (
       in_state(group_state::empty) || in_state(group_state::stable)
       || in_state(group_state::preparing_rebalance)) {
-        co_return co_await _tx_mutex.with([this, r = std::move(r)]() mutable {
-            return begin_tx(std::move(r));
-        });
+        auto id = r.pid.get_id();
+        co_return co_await with_pid_lock(
+          id, [this, r = std::move(r)]() mutable {
+              return begin_tx(std::move(r));
+          });
     } else if (in_state(group_state::completing_rebalance)) {
         cluster::begin_group_tx_reply reply;
         reply.ec = cluster::tx_errc::rebalance_in_progress;
@@ -1917,9 +1945,11 @@ group::handle_prepare_tx(cluster::prepare_group_tx_request r) {
     } else if (
       in_state(group_state::stable) || in_state(group_state::empty)
       || in_state(group_state::preparing_rebalance)) {
-        co_return co_await _tx_mutex.with([this, r = std::move(r)]() mutable {
-            return prepare_tx(std::move(r));
-        });
+        auto id = r.pid.get_id();
+        co_return co_await with_pid_lock(
+          id, [this, r = std::move(r)]() mutable {
+              return prepare_tx(std::move(r));
+          });
     } else if (in_state(group_state::completing_rebalance)) {
         cluster::prepare_group_tx_reply reply;
         reply.ec = cluster::tx_errc::rebalance_in_progress;
@@ -1941,9 +1971,11 @@ group::handle_abort_tx(cluster::abort_group_tx_request r) {
     } else if (
       in_state(group_state::stable) || in_state(group_state::empty)
       || in_state(group_state::preparing_rebalance)) {
-        co_return co_await _tx_mutex.with([this, r = std::move(r)]() mutable {
-            return abort_tx(std::move(r));
-        });
+        auto id = r.pid.get_id();
+        co_return co_await with_pid_lock(
+          id, [this, r = std::move(r)]() mutable {
+              return abort_tx(std::move(r));
+          });
     } else if (in_state(group_state::completing_rebalance)) {
         cluster::abort_group_tx_reply reply;
         reply.ec = cluster::tx_errc::rebalance_in_progress;
@@ -2254,22 +2286,49 @@ group::remove_topic_partitions(const std::vector<model::topic_partition>& tps) {
 }
 
 std::ostream& operator<<(std::ostream& o, const group& g) {
+    const auto ntp = [&g] {
+        if (g._partition) {
+            return fmt::format("{}", g._partition->ntp());
+        } else {
+            return std::string("<none>");
+        }
+    }();
+
+    auto timer_expires =
+      [](const auto& timer) -> std::optional<group::duration_type> {
+        if (timer.armed()) {
+            return timer.get_timeout() - group::clock_type::now();
+        }
+        return std::nullopt;
+    };
+
     fmt::print(
       o,
       "id={} state={} gen={} proto_type={} proto={} leader={} "
-      "empty={} ntp=",
+      "empty={} ntp={} num_members_joining={} new_member_added={} "
+      "join_timer={}",
       g.id(),
       g.state(),
       g.generation(),
       g.protocol_type(),
       g.protocol(),
       g.leader(),
-      !g.has_members());
-    if (g._partition) {
-        o << g._partition->ntp();
-    } else {
-        o << "<none>";
+      !g.has_members(),
+      ntp,
+      g._num_members_joining,
+      g._new_member_added,
+      timer_expires(g._join_timer));
+
+    fmt::print(o, " pending members [");
+    for (const auto& m : g._pending_members) {
+        fmt::print(o, "{} expires={} ", m.first, timer_expires(m.second));
     }
+    fmt::print(o, "] full members [");
+    for (const auto& m : g._members) {
+        fmt::print(o, "{} ", m.second);
+    }
+    fmt::print(o, "]");
+
     return o;
 }
 
@@ -2294,6 +2353,30 @@ ss::sstring group_state_to_kafka_name(group_state gs) {
     default:
         std::terminate(); // make gcc happy
     }
+}
+
+void group::add_pending_member(
+  const kafka::member_id& member_id, duration_type timeout) {
+    auto res = _pending_members.try_emplace(member_id, [this, member_id] {
+        vlog(
+          _ctxlog.trace,
+          "Handling expired heartbeat for pending member {}",
+          member_id);
+        remove_pending_member(member_id);
+    });
+
+    // let existing timer expire
+    if (!res.second) {
+        return;
+    }
+
+    vlog(
+      _ctxlog.trace,
+      "Scheduling heartbeat expiration {} ms for pending {}",
+      timeout,
+      member_id);
+
+    res.first->second.arm(timeout);
 }
 
 } // namespace kafka
