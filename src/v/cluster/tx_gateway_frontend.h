@@ -62,6 +62,9 @@ public:
     ss::future<end_tx_reply>
       end_txn(end_tx_request, model::timeout_clock::duration);
 
+    using return_all_txs_res = result<std::vector<tm_transaction>, tx_errc>;
+    ss::future<return_all_txs_res> get_all_transactions();
+
     ss::future<> stop();
 
 private:
@@ -99,6 +102,7 @@ private:
     ss::future<bool> try_create_tx_topic();
 
     ss::future<checked<tm_transaction, tx_errc>> get_ongoing_tx(
+      model::term_id,
       ss::shared_ptr<tm_stm>,
       model::producer_identity,
       kafka::transactional_id,
@@ -117,6 +121,7 @@ private:
       model::tx_seq,
       model::timeout_clock::duration);
     ss::future<try_abort_reply> do_try_abort(
+      model::term_id,
       ss::shared_ptr<tm_stm>,
       kafka::transactional_id,
       model::producer_identity,
@@ -145,11 +150,12 @@ private:
       model::timeout_clock::duration,
       ss::lw_shared_ptr<available_promise<tx_errc>>);
     ss::future<checked<cluster::tm_transaction, tx_errc>> do_abort_tm_tx(
+      model::term_id,
       ss::shared_ptr<cluster::tm_stm>,
       cluster::tm_transaction,
-      model::timeout_clock::duration,
-      ss::lw_shared_ptr<available_promise<tx_errc>>);
+      model::timeout_clock::duration);
     ss::future<checked<cluster::tm_transaction, tx_errc>> do_commit_tm_tx(
+      model::term_id,
       ss::shared_ptr<cluster::tm_stm>,
       cluster::tm_transaction,
       model::timeout_clock::duration,
