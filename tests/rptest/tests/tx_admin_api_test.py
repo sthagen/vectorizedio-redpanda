@@ -10,6 +10,7 @@
 from rptest.services.cluster import cluster
 from rptest.clients.types import TopicSpec
 from ducktape.utils.util import wait_until
+from ducktape.mark import ignore
 from rptest.services.admin import Admin
 import confluent_kafka as ck
 from rptest.tests.redpanda_test import RedpandaTest
@@ -80,6 +81,7 @@ class TxAdminTest(RedpandaTest):
                     assert (tx['timeout_ms'] == 60000)
 
     @cluster(num_nodes=3)
+    @ignore  # https://github.com/redpanda-data/redpanda/issues/3849
     def test_expired_transaction(self):
         '''
         Problem: rm_stm contains timer to run try_abort_old_txs.
@@ -125,9 +127,9 @@ class TxAdminTest(RedpandaTest):
                                                   target=None)
 
                 def leader_is_changed():
-                    return self.admin.get_partition_leader(
-                        namespace="kafka", topic=topic,
-                        partition=partition) != old_leader
+                    new_leader = self.admin.get_partition_leader(
+                        namespace="kafka", topic=topic, partition=partition)
+                    return (new_leader != -1) and (new_leader != old_leader)
 
                 wait_until(leader_is_changed,
                            timeout_sec=30,
