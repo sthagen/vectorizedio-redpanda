@@ -38,9 +38,12 @@ class ClusterConfigTest(RedpandaTest):
         # Enable our feature flag
         rp_conf['enable_central_config'] = True
 
-        super(ClusterConfigTest, self).__init__(*args,
-                                                extra_rp_conf=rp_conf,
-                                                **kwargs)
+        super(ClusterConfigTest, self).__init__(
+            *args,
+            extra_rp_conf=rp_conf,
+            # Force verbose logging for the secret redaction test
+            log_level='trace',
+            **kwargs)
 
         self.admin = Admin(self.redpanda)
         self.rpk = RpkTool(self.redpanda)
@@ -354,7 +357,7 @@ class ClusterConfigTest(RedpandaTest):
 
         # Don't change these settings, they prevent the test from subsequently
         # using the cluster
-        exclude_settings = {'enable_sasl', 'enable_admin_api'}
+        exclude_settings = {'enable_sasl'}
 
         initial_config = self.admin.get_cluster_config()
 
@@ -388,6 +391,10 @@ class ClusterConfigTest(RedpandaTest):
 
             if name == 'enable_coproc':
                 # Don't try enabling coproc, it has external dependencies
+                continue
+
+            if name == 'admin_api_require_auth':
+                # Don't lock ourselves out of the admin API!
                 continue
 
             updates[name] = valid_value

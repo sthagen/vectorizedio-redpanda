@@ -91,6 +91,7 @@ public:
           app.metadata_cache,
           app.controller->get_topics_frontend(),
           app.controller->get_config_frontend(),
+          app.controller->get_feature_table(),
           app.quota_mgr,
           app.group_router,
           app.shard_table,
@@ -162,12 +163,13 @@ public:
 
             config.get("enable_pid_file").set_value(false);
             config.get("developer_mode").set_value(true);
-            config.get("enable_admin_api").set_value(false);
             config.get("join_retry_timeout_ms").set_value(100ms);
             config.get("members_backend_retry_ms").set_value(1000ms);
             config.get("disable_metrics").set_value(true);
 
             auto& node_config = config::node();
+            node_config.get("admin").set_value(
+              std::vector<model::broker_endpoint>());
             node_config.get("node_id").set_value(node_id);
             node_config.get("rack").set_value(
               std::optional<ss::sstring>(rack_name));
@@ -224,6 +226,17 @@ public:
             auto& members = app.controller->get_members_table();
             return members.local().contains(id);
         });
+
+        // Wait for feature manager to be initialized: this writes to
+        // the raft0 log on first startup, so must be complete before
+        // tests start (tests use raft0 offsets to guess at the revision
+        // ids of partitions they create)
+        co_await tests::cooperative_spin_wait_with_timeout(
+          10s, [this]() -> bool {
+              auto& feature_table = app.controller->get_feature_table().local();
+              return feature_table.get_active_version()
+                     != cluster::invalid_version;
+          });
     }
 
     ss::future<kafka::client::transport> make_kafka_client() {
@@ -328,6 +341,23 @@ public:
                     auto partition = mgr.get(ntp);
                     return partition && partition->committed_offset() >= o;
                 });
+          });
+    }
+
+    /**
+     * Predict the revision ID of the next partition to be created.  Useful
+     * if you want to pre-populate data directory.
+     */
+    ss::future<model::revision_id> get_next_partition_revision_id() {
+        auto ntp = model::controller_ntp;
+        auto shard = app.shard_table.local().shard_for(ntp);
+        assert(shard);
+        return app.partition_manager.invoke_on(
+          *shard, [ntp](cluster::partition_manager& mgr) -> model::revision_id {
+              auto partition = mgr.get(ntp);
+              assert(partition);
+              return model::revision_id{partition->last_stable_offset()}
+                     + model::revision_id{1};
           });
     }
 

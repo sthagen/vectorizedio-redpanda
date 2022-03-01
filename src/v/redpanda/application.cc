@@ -345,10 +345,10 @@ void application::hydrate_config(const po::variables_map& cfg) {
             throw std::invalid_argument("Validation errors in node config");
         }
 
-        if (config::node().enable_central_config) {
-            _config_preload = cluster::config_manager::preload().get0();
-        }
-
+        // This initial load is independent of whether the central
+        // config feature is active, since its fallback is just
+        // to read redpanda.yaml anyway
+        _config_preload = cluster::config_manager::preload().get0();
         if (_config_preload.version == cluster::config_version_unset) {
             ss::smp::invoke_on_all([&config] {
                 config::shard_local_cfg().load(config);
@@ -428,16 +428,14 @@ admin_server_cfg_from_global_cfg(scheduling_groups& sgs) {
       .endpoints_tls = config::node().admin_api_tls(),
       .dashboard_dir = config::node().dashboard_dir(),
       .admin_api_docs_dir = config::node().admin_api_doc_dir(),
-      .enable_admin_api = config::shard_local_cfg().enable_admin_api(),
-      .sg = sgs.admin_sg(),
-    };
+      .sg = sgs.admin_sg()};
 }
 
 void application::configure_admin_server() {
-    auto& conf = config::shard_local_cfg();
-    if (!conf.enable_admin_api()) {
+    if (config::node().admin().empty()) {
         return;
     }
+
     syschecks::systemd_message("constructing http server").get();
     construct_service(
       _admin,
@@ -1149,6 +1147,7 @@ void application::start_redpanda() {
             std::ref(controller->get_api()),
             std::ref(controller->get_members_frontend()),
             std::ref(controller->get_config_frontend()),
+            std::ref(controller->get_feature_table()),
             std::ref(controller->get_health_monitor()));
 
           proto->register_service<cluster::metadata_dissemination_handler>(
@@ -1188,7 +1187,7 @@ void application::start_redpanda() {
 
     quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();
 
-    if (config::shard_local_cfg().enable_admin_api()) {
+    if (!config::node().admin().empty()) {
         _admin.invoke_on_all(&admin_server::start).get0();
     }
 
@@ -1234,6 +1233,7 @@ void application::start_kafka(::stop_signal& app_signal) {
             metadata_cache,
             controller->get_topics_frontend(),
             controller->get_config_frontend(),
+            controller->get_feature_table(),
             quota_mgr,
             group_router,
             shard_table,

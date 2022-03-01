@@ -28,7 +28,8 @@ class WasmCreateTopicsTest(WasmIdentityTest):
                        script=WasmTemplateRepository.IDENTITY_TRANSFORM)
         ]
 
-    @cluster(num_nodes=3)
+    @ignore  # see: #3858
+    @cluster(num_nodes=4)
     def verify_materialized_topics_test(self):
         super().verify_materialized_topics_test()
 
@@ -67,7 +68,7 @@ class WasmDeleteTopicsTest(WasmIdentityTest):
         ]
 
     @ignore  # https://github.com/redpanda-data/redpanda/issues/3745
-    @cluster(num_nodes=3)
+    @cluster(num_nodes=4)
     def verify_materialized_topics_test(self):
         super().verify_materialized_topics_test()
 

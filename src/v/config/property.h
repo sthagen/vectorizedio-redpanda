@@ -28,6 +28,9 @@ namespace config {
 template<class T>
 class binding;
 
+template<typename T>
+class mock_property;
+
 template<class T>
 class property : public base_property {
 public:
@@ -42,18 +45,6 @@ public:
       T def = T{},
       property::validator validator = property::noop_validator)
       : base_property(conf, name, desc, meta)
-      , _value(def)
-      , _default(std::move(def))
-      , _validator(std::move(validator)) {}
-
-    property(
-      config_store& conf,
-      std::string_view name,
-      std::string_view desc,
-      required req = {},
-      T def = T{},
-      property::validator validator = property::noop_validator)
-      : base_property(conf, name, desc, {.required = req})
       , _value(def)
       , _default(std::move(def))
       , _validator(std::move(validator)) {}
@@ -212,6 +203,7 @@ private:
     };
 
     friend class binding<T>;
+    friend class mock_property<T>;
     intrusive_list<binding<T>, &binding<T>::_hook> _bindings;
 };
 
@@ -267,6 +259,10 @@ public:
       , _parent(rhs._parent)
       , _on_change(rhs._on_change) {
         if (_parent) {
+            // May not copy between shards, parent is
+            // on the rhs instance's shard.
+            oncore_debug_verify(rhs._verify_shard);
+
             // Both self and rhs now in property's binding list
             _parent->_bindings.push_back(*this);
         }
@@ -284,6 +280,12 @@ public:
         _value = std::move(rhs._value);
         _on_change = std::move(rhs._on_change);
         _parent = rhs._parent;
+
+        if (_parent) {
+            // May not move between shards, parent is
+            // on the rhs instance's shard.
+            oncore_debug_verify(rhs._verify_shard);
+        }
 
         // Steal moved-from binding's place in the property's binding list
         _hook.swap_nodes(rhs._hook);
@@ -313,6 +315,7 @@ public:
     }
 
     friend class property<T>;
+    friend class mock_property<T>;
     template<typename U>
     friend inline binding<U> mock_binding(U&&);
 };

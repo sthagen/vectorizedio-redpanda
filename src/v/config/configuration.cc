@@ -147,6 +147,13 @@ configuration::configuration()
         .max = 1000 // A system with 1M ulimit should be allowed to create at
                     // least 1000 partitions
       })
+  , admin_api_require_auth(
+      *this,
+      "admin_api_require_auth",
+      "Whether admin API clients must provide HTTP Basic authentication "
+      "headers",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false)
   , seed_server_meta_topic_partitions(
       *this, "seed_server_meta_topic_partitions")
   , raft_heartbeat_interval_ms(
@@ -175,12 +182,7 @@ configuration::configuration()
   , max_version(*this, "max_version")
 
   , use_scheduling_groups(*this, "use_scheduling_groups")
-  , enable_admin_api(
-      *this,
-      "enable_admin_api",
-      "Enable the admin API",
-      base_property::metadata{},
-      true)
+  , enable_admin_api(*this, "enable_admin_api")
   , default_num_windows(
       *this,
       "default_num_windows",
@@ -351,7 +353,7 @@ configuration::configuration()
       "metadata_status_wait_timeout_ms",
       "Maximum time to wait in metadata request for cluster health to be "
       "refreshed",
-      required::no,
+      {.visibility = visibility::tunable},
       2s)
   , transactional_id_expiration_ms(
       *this,
@@ -865,31 +867,31 @@ configuration::configuration()
       *this,
       "cloud_storage_upload_ctrl_update_interval_ms",
       "",
-      required::no,
+      {.visibility = visibility::tunable},
       60s)
   , cloud_storage_upload_ctrl_p_coeff(
       *this,
       "cloud_storage_upload_ctrl_p_coeff",
       "proportional coefficient for upload PID controller",
-      required::no,
+      {.visibility = visibility::tunable},
       -2.0)
   , cloud_storage_upload_ctrl_d_coeff(
       *this,
       "cloud_storage_upload_ctrl_d_coeff",
       "derivative coefficient for upload PID controller.",
-      required::no,
+      {.visibility = visibility::tunable},
       0.0)
   , cloud_storage_upload_ctrl_min_shares(
       *this,
       "cloud_storage_upload_ctrl_min_shares",
       "minimum number of IO and CPU shares that archival upload can use",
-      required::no,
+      {.visibility = visibility::tunable},
       100)
   , cloud_storage_upload_ctrl_max_shares(
       *this,
       "cloud_storage_upload_ctrl_max_shares",
       "maximum number of IO and CPU shares that archival upload can use",
-      required::no,
+      {.visibility = visibility::tunable},
       1000)
   , cloud_storage_cache_size(
       *this,
@@ -907,7 +909,7 @@ configuration::configuration()
       *this,
       "superusers",
       "List of superuser usernames",
-      {.visibility = visibility::user},
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
       {})
   , kafka_qdc_latency_alpha(
       *this,

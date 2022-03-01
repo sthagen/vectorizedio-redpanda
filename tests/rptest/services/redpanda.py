@@ -94,6 +94,9 @@ CHAOS_LOG_ALLOW_LIST = [
 
     # rpc - Service handler threw an exception: std::exception (std::exception)
     re.compile("rpc - Service handler threw an exception: std"),
+
+    # rpc - Service handler threw an exception: seastar::broken_promise (broken promise)"
+    re.compile("rpc - Service handler threw an exception: seastar"),
 ]
 
 
@@ -290,7 +293,8 @@ class RedpandaService(Service):
                  enable_sr=False,
                  resource_settings=None,
                  si_settings=None,
-                 log_level: Optional[str] = None):
+                 log_level: Optional[str] = None,
+                 environment: Optional[dict[str, str]] = None):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._enable_rp = enable_rp
@@ -305,6 +309,9 @@ class RedpandaService(Service):
             self._log_level = log_level
 
         self._admin = Admin(self)
+        self._admin = Admin(self,
+                            auth=(self.SUPERUSER_CREDENTIALS.username,
+                                  self.SUPERUSER_CREDENTIALS.password))
         self._started = []
         self._security_config = dict()
 
@@ -318,7 +325,14 @@ class RedpandaService(Service):
         self._si_settings = si_settings
         self._s3client = None
 
+        if environment is None:
+            environment = dict()
+        self._environment = environment
+
         self.config_file_lock = threading.Lock()
+
+    def set_environment(self, environment: dict[str, str]):
+        self._environment = environment
 
     def set_resource_settings(self, rs):
         self._resource_settings = rs
@@ -405,8 +419,12 @@ class RedpandaService(Service):
     def start_redpanda(self, node):
         preamble, res_args = self._resource_settings.to_cli()
 
+        # Pass environment variables via FOO=BAR shell expressions
+        env_preamble = " ".join(
+            [f"{k}={v}" for (k, v) in self._environment.items()])
+
         cmd = (
-            f"{preamble}nohup {self.find_binary('redpanda')}"
+            f"{preamble} {env_preamble} nohup {self.find_binary('redpanda')}"
             f" --redpanda-cfg {RedpandaService.CONFIG_FILE}"
             f" --default-log-level {self._log_level}"
             f" --logger-log-level=exception=debug:archival=debug:io=debug:cloud_storage=debug "
@@ -596,6 +614,35 @@ class RedpandaService(Service):
             return self._s3client.list_objects(
                 self._si_settings.cloud_storage_bucket)
 
+    def set_cluster_config(self, values: dict, expect_restart: bool = False):
+        """
+        Update cluster configuration and wait for all nodes to report that they
+        have seen the new config.
+
+        :param values: dict of property name to value
+        :param expect_restart: set to true if you wish to permit a node restart for needs_restart=yes properties.
+                               If you set such a property without this flag, an assertion error will be raised.
+        """
+        patch_result = self._admin.patch_cluster_config(upsert=values)
+        new_version = patch_result['config_version']
+        wait_until(
+            lambda: set([
+                n['config_version']
+                for n in self._admin.get_cluster_config_status()
+            ]) == {new_version},
+            timeout_sec=10,
+            backoff_sec=0.5,
+            err_msg=f"Config status versions did not converge on {new_version}"
+        )
+
+        any_restarts = any(n['restart']
+                           for n in self._admin.get_cluster_config_status())
+        if any_restarts and expect_restart:
+            self.restart_nodes(self.nodes)
+        elif any_restarts:
+            raise AssertionError(
+                "Nodes report restart required but expect_restart is False")
+
     def monitor_log(self, node):
         assert node in self._started
         return node.account.monitor_log(RedpandaService.STDOUT_STDERR_CAPTURE)
@@ -639,6 +686,23 @@ class RedpandaService(Service):
                     if a.search(line) is not None:
                         allowed = True
                         break
+
+                if 'LeakSanitizer' in line:
+                    # Special case for LeakSanitizer errors, where tiny leaks
+                    # are permitted, as they can occur during Seastar shutdown.
+                    # See https://github.com/redpanda-data/redpanda/issues/3626
+                    for summary_line in node.account.ssh_capture(
+                            f"grep -e \"SUMMARY: AddressSanitizer:\" {RedpandaService.STDOUT_STDERR_CAPTURE} | true"
+                    ):
+                        m = re.match(
+                            "SUMMARY: AddressSanitizer: (\d+) byte\(s\) leaked in (\d+) allocation\(s\).",
+                            summary_line.strip())
+                        if m and int(m.group(1)) < 1024:
+                            self.logger.warn(
+                                f"Ignoring memory leak, small quantity: {summary_line}"
+                            )
+                            allowed = True
+                            break
 
                 if not allowed:
                     bad_lines[node].append(line)
