@@ -314,12 +314,7 @@ ss::app_template::config application::setup_app_config() {
 
 void application::hydrate_config(const po::variables_map& cfg) {
     std::filesystem::path cfg_path(cfg["redpanda-cfg"].as<std::string>());
-    auto buf = read_fully(cfg_path).get0();
-    // see https://github.com/jbeder/yaml-cpp/issues/765
-    auto workaround = ss::uninitialized_string(buf.size_bytes());
-    auto in = iobuf::iterator_consumer(buf.cbegin(), buf.cend());
-    in.consume_to(buf.size_bytes(), workaround.begin());
-    const YAML::Node config = YAML::Load(workaround);
+    const YAML::Node config = YAML::Load(read_fully_to_string(cfg_path).get0());
     auto config_printer = [this](std::string_view service) {
         return [this, service](const config::base_property& item) {
             std::stringstream val;
@@ -329,8 +324,8 @@ void application::hydrate_config(const po::variables_map& cfg) {
     };
     _redpanda_enabled = config["redpanda"];
     if (_redpanda_enabled) {
-        ss::smp::invoke_on_all([&config] {
-            config::node().load(config);
+        ss::smp::invoke_on_all([&config, cfg_path] {
+            config::node().load(cfg_path, config);
         }).get0();
 
         auto node_config_errors = config::node().load(config);
@@ -345,37 +340,12 @@ void application::hydrate_config(const po::variables_map& cfg) {
             throw std::invalid_argument("Validation errors in node config");
         }
 
-        // This initial load is independent of whether the central
-        // config feature is active, since its fallback is just
-        // to read redpanda.yaml anyway
-        _config_preload = cluster::config_manager::preload().get0();
-        if (_config_preload.version == cluster::config_version_unset) {
-            ss::smp::invoke_on_all([&config] {
-                config::shard_local_cfg().load(config);
-            }).get0();
-
-            // This node has never seen a cluster configuration message.
-            // Bootstrap configuration from local yaml file.
-            auto errors = config::shard_local_cfg().load(config);
-
-            // Report any invalid properties.  Do not refuse to start redpanda,
-            // as the properties will have been either ignored or clamped
-            // to safe values.
-            for (const auto& i : errors) {
-                vlog(
-                  _log.warn,
-                  "Cluster property '{}' validation error: {}",
-                  i.first,
-                  i.second);
-            }
-        }
+        // This includes loading from local bootstrap file or legacy
+        // config file on first-start or upgrade cases.
+        _config_preload = cluster::config_manager::preload(config).get0();
 
         vlog(_log.info, "Cluster configuration properties:");
-        if (config::node().enable_central_config) {
-            vlog(_log.info, "(use `rpk cluster config edit` to change)");
-        } else {
-            vlog(_log.info, "(use `rpk config set <cfg> <value>` to change)");
-        }
+        vlog(_log.info, "(use `rpk cluster config edit` to change)");
         config::shard_local_cfg().for_each(config_printer("redpanda"));
 
         vlog(_log.info, "Node configuration properties:");
@@ -413,7 +383,7 @@ void application::hydrate_config(const po::variables_map& cfg) {
 void application::check_environment() {
     syschecks::systemd_message("checking environment (CPU, Mem)").get();
     syschecks::cpu();
-    syschecks::memory(config::shard_local_cfg().developer_mode());
+    syschecks::memory(config::node().developer_mode());
     if (_redpanda_enabled) {
         storage::directories::initialize(
           config::node().data_directory().as_sstring())
@@ -471,14 +441,14 @@ manager_config_from_global_config(scheduling_groups& sgs) {
     return storage::log_config(
       storage::log_config::storage_type::disk,
       config::node().data_directory().as_sstring(),
-      config::shard_local_cfg().log_segment_size(),
-      config::shard_local_cfg().compacted_log_segment_size(),
-      config::shard_local_cfg().max_compacted_log_segment_size(),
+      config::shard_local_cfg().log_segment_size.bind(),
+      config::shard_local_cfg().compacted_log_segment_size.bind(),
+      config::shard_local_cfg().max_compacted_log_segment_size.bind(),
       storage::debug_sanitize_files::no,
       priority_manager::local().compaction_priority(),
-      config::shard_local_cfg().retention_bytes(),
-      config::shard_local_cfg().log_compaction_interval_ms(),
-      config::shard_local_cfg().delete_retention_ms(),
+      config::shard_local_cfg().retention_bytes.bind(),
+      config::shard_local_cfg().log_compaction_interval_ms.bind(),
+      config::shard_local_cfg().delete_retention_ms.bind(),
       storage::with_cache(!config::shard_local_cfg().disable_batch_cache()),
       storage::batch_cache::reclaim_options{
         .growth_window = config::shard_local_cfg().reclaim_growth_window(),
@@ -613,12 +583,17 @@ void application::wire_up_redpanda_services() {
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing storage services").get();
-    auto log_cfg = manager_config_from_global_config(_scheduling_groups);
-    log_cfg.reclaim_opts.background_reclaimer_sg
-      = _scheduling_groups.cache_background_reclaim_sg();
+    construct_single_service_sharded(storage_node).get();
 
     construct_service(
-      storage, []() { return kvstore_config_from_global_config(); }, log_cfg)
+      storage,
+      []() { return kvstore_config_from_global_config(); },
+      [this]() {
+          auto log_cfg = manager_config_from_global_config(_scheduling_groups);
+          log_cfg.reclaim_opts.background_reclaimer_sg
+            = _scheduling_groups.cache_background_reclaim_sg();
+          return log_cfg;
+      })
       .get();
 
     syschecks::systemd_message("Intializing raft recovery throttle").get();
@@ -635,6 +610,15 @@ void application::wire_up_redpanda_services() {
         _scheduling_groups.raft_sg(),
         config::shard_local_cfg().raft_heartbeat_interval_ms(),
         config::shard_local_cfg().raft_heartbeat_timeout_ms(),
+        [] {
+            return raft::recovery_memory_quota::configuration{
+              .max_recovery_memory
+              = config::shard_local_cfg().raft_max_recovery_memory.bind(),
+              .default_read_buffer_size
+              = config::shard_local_cfg()
+                  .raft_recovery_default_read_size.bind(),
+            };
+        },
         std::ref(_connection_cache),
         std::ref(storage),
         std::ref(recovery_throttle))
@@ -699,6 +683,7 @@ void application::wire_up_redpanda_services() {
       partition_manager,
       shard_table,
       storage,
+      storage_node,
       std::ref(raft_group_manager),
       data_policies);
 
@@ -1008,6 +993,16 @@ void application::wire_up_redpanda_services() {
 
               c.disable_metrics = net::metrics_disabled(
                 config::shard_local_cfg().disable_metrics());
+
+              net::config_connection_rate_bindings bindings{
+                .config_general_rate
+                = config::shard_local_cfg().kafka_connection_rate_limit.bind(),
+                .config_overrides_rate
+                = config::shard_local_cfg()
+                    .kafka_connection_rate_limit_overrides.bind(),
+              };
+
+              c.connection_rate_bindings.emplace(std::move(bindings));
           });
       })
       .get();
@@ -1081,6 +1076,8 @@ void application::start(::stop_signal& app_signal) {
 
 void application::start_redpanda() {
     syschecks::systemd_message("Staring storage services").get();
+    // single instance
+    storage_node.invoke_on_all(&storage::node_api::start).get0();
     storage.invoke_on_all(&storage::api::start).get();
 
     syschecks::systemd_message("Starting the partition manager").get();
@@ -1147,6 +1144,7 @@ void application::start_redpanda() {
             std::ref(controller->get_api()),
             std::ref(controller->get_members_frontend()),
             std::ref(controller->get_config_frontend()),
+            std::ref(controller->get_feature_manager()),
             std::ref(controller->get_feature_table()),
             std::ref(controller->get_health_monitor()));
 

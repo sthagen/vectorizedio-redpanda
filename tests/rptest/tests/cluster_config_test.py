@@ -19,7 +19,6 @@ from rptest.services.admin import Admin
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.clients.rpk import RpkTool, RpkException
 from rptest.clients.rpk_remote import RpkRemoteTool
-from rptest.clients.kcl import KCL
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
 from ducktape.mark import parametrize
@@ -35,26 +34,30 @@ class ClusterConfigTest(RedpandaTest):
     def __init__(self, *args, **kwargs):
         rp_conf = BOOTSTRAP_CONFIG.copy()
 
-        # Enable our feature flag
-        rp_conf['enable_central_config'] = True
+        # Force verbose logging for the secret redaction test
+        kwargs['log_level'] = 'trace'
 
-        super(ClusterConfigTest, self).__init__(
-            *args,
-            extra_rp_conf=rp_conf,
-            # Force verbose logging for the secret redaction test
-            log_level='trace',
-            **kwargs)
+        super(ClusterConfigTest, self).__init__(*args,
+                                                extra_rp_conf=rp_conf,
+                                                **kwargs)
 
         self.admin = Admin(self.redpanda)
         self.rpk = RpkTool(self.redpanda)
 
     @cluster(num_nodes=3)
-    def test_get_config(self):
+    @parametrize(legacy=False)
+    @parametrize(legacy=True)
+    def test_get_config(self, legacy):
         """
         Verify that the config GET endpoint serves valid json with some options in it.
+
+        :param legacy: whether to use the legacy /config endpoint
         """
         admin = Admin(self.redpanda)
-        config = admin.get_cluster_config()
+        if legacy:
+            config = admin._request("GET", "config").json()
+        else:
+            config = admin.get_cluster_config()
 
         # Pick an arbitrary config property to verify that the result
         # contained some properties
@@ -64,6 +67,32 @@ class ClusterConfigTest(RedpandaTest):
 
         # Some arbitrary property to check syntax of result
         assert 'kafka_api' in node_config
+
+    @cluster(num_nodes=1)
+    def test_get_config_nodefaults(self):
+        admin = Admin(self.redpanda)
+        initial_short_config = admin.get_cluster_config(include_defaults=False)
+        long_config = admin.get_cluster_config(include_defaults=True)
+
+        assert len(long_config) > len(initial_short_config)
+
+        assert 'kafka_qdc_enable' not in initial_short_config
+
+        # After setting something to non-default is should appear
+        patch_result = self.admin.patch_cluster_config(
+            upsert={'kafka_qdc_enable': True})
+        self._wait_for_version_sync(patch_result['config_version'])
+        short_config = admin.get_cluster_config(include_defaults=False)
+        assert 'kafka_qdc_enable' in short_config
+        assert len(short_config) == len(initial_short_config) + 1
+
+        # After resetting to default it should disappear
+        patch_result = self.admin.patch_cluster_config(
+            remove=['kafka_qdc_enable'])
+        self._wait_for_version_sync(patch_result['config_version'])
+        short_config = admin.get_cluster_config(include_defaults=False)
+        assert 'kafka_qdc_enable' not in short_config
+        assert len(short_config) == len(initial_short_config)
 
     @cluster(num_nodes=3)
     def test_bootstrap(self):
@@ -80,6 +109,8 @@ class ClusterConfigTest(RedpandaTest):
         set_again = {'enable_idempotence': False}
         assert BOOTSTRAP_CONFIG['enable_idempotence'] != set_again[
             'enable_idempotence']
+        self.redpanda.set_extra_rp_conf(set_again)
+        self.redpanda.write_bootstrap_cluster_config()
 
         self.redpanda.restart_nodes(self.redpanda.nodes, set_again)
 
@@ -255,6 +286,34 @@ class ClusterConfigTest(RedpandaTest):
             raise RuntimeError(
                 f"Expected 400 but got {patch_result} for {key}={value})")
 
+    @cluster(num_nodes=1)
+    def test_dry_run(self):
+        """
+        Verify that when the dry_run flag is used, validation is done but
+        changes are not made.
+        """
+
+        # An invalid PUT
+        try:
+            self.admin.patch_cluster_config(
+                upsert={"log_message_timestamp_type": "rhubarb"}, dry_run=True)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code != 400:
+                raise
+            assert set(
+                e.response.json().keys()) == {"log_message_timestamp_type"}
+        else:
+            raise RuntimeError(f"Expected 400 but got success")
+
+        # A valid PUT
+        self.admin.patch_cluster_config(
+            upsert={"log_message_timestamp_type": "LogAppendTime"},
+            dry_run=True)
+
+        # Check the value didn't get set (i.e. remains default)
+        self._check_value_everywhere("log_message_timestamp_type",
+                                     "CreateTime")
+
     @cluster(num_nodes=3)
     def test_invalid_settings_forced(self):
         """
@@ -359,6 +418,9 @@ class ClusterConfigTest(RedpandaTest):
         # using the cluster
         exclude_settings = {'enable_sasl'}
 
+        # Don't enable coproc: it generates log errors if its companion service isn't running
+        exclude_settings.add('enable_coproc')
+
         initial_config = self.admin.get_cluster_config()
 
         for name, p in schema_properties.items():
@@ -370,6 +432,8 @@ class ClusterConfigTest(RedpandaTest):
             initial_value = initial_config[name]
             if 'example' in p:
                 valid_value = p['example']
+                if p['type'] == "array":
+                    valid_value = yaml.load(valid_value)
             elif p['type'] == 'integer':
                 if initial_value:
                     valid_value = initial_value * 2
@@ -474,7 +538,7 @@ class ClusterConfigTest(RedpandaTest):
         text = self._export(all)
 
         # Validate that RPK gives us valid yaml
-        _ = yaml.load(text)
+        _ = yaml.full_load(text)
 
         self.logger.debug(f"Exported config before modification: {text}")
 
@@ -803,25 +867,23 @@ class ClusterConfigTest(RedpandaTest):
         :param incremental: whether to use incremental kafka config API or
                             legacy config API.
         """
-        kcl = KCL(self.redpanda)
-
         # Redpanda only support incremental config changes: the legacy
         # AlterConfig API is a bad user experience
         incremental = True
 
         # Set a property by its redpanda name
-        out = kcl.alter_broker_config(
+        out = self.client().alter_broker_config(
             {"log_message_timestamp_type": "CreateTime"}, incremental)
         # kcl does not set an error exist status when config set fails, so must
         # read its output text to validate that calls are successful
         assert 'OK' in out
 
-        out = kcl.alter_broker_config(
+        out = self.client().alter_broker_config(
             {"log_message_timestamp_type": "LogAppendTime"}, incremental)
         assert 'OK' in out
         if incremental:
-            kcl.delete_broker_config(["log_message_timestamp_type"],
-                                     incremental)
+            self.client().delete_broker_config(["log_message_timestamp_type"],
+                                               incremental)
             assert 'OK' in out
 
         # Set a property by its Kafka-interop names and values
@@ -832,25 +894,26 @@ class ClusterConfigTest(RedpandaTest):
         }
         for property, value_list in kafka_props.items():
             for value in value_list:
-                out = kcl.alter_broker_config({property: value}, incremental)
+                out = self.client().alter_broker_config({property: value},
+                                                        incremental)
                 assert 'OK' in out
 
         # Set a nonexistent property
-        out = kcl.alter_broker_config({"does_not_exist": "avalue"},
-                                      incremental)
+        out = self.client().alter_broker_config({"does_not_exist": "avalue"},
+                                                incremental)
         assert 'INVALID_CONFIG' in out
 
         # Set a malformed property
-        out = kcl.alter_broker_config(
+        out = self.client().alter_broker_config(
             {"log_message_timestamp_type": "BadValue"}, incremental)
         assert 'INVALID_CONFIG' in out
 
         # Set a property on a named broker: should fail because this
         # interface is only for cluster-wide properties
-        out = kcl.alter_broker_config(
+        out = self.client().alter_broker_config(
             {"log_message_timestamp_type": "CreateTime"},
             incremental,
-            broker="1")
+            broker=1)
         assert 'INVALID_CONFIG' in out
         assert "Setting broker properties on named brokers is unsupported" in out
 
@@ -861,8 +924,7 @@ class ClusterConfigTest(RedpandaTest):
         are correctly handled with an 'unsupported' response.
         """
 
-        kcl = KCL(self.redpanda)
-        out = kcl.alter_broker_config(
+        out = self.client().alter_broker_config(
             {"log_message_timestamp_type": "CreateTime"}, incremental=False)
         self.logger.info("AlterConfigs output: {out}")
         assert 'INVALID_CONFIG' in out

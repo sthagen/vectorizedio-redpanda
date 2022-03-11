@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include "config/property.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timeout_clock.h"
@@ -45,7 +46,10 @@ struct mux_state_machine_fixture {
           _data_dir,
           storage::debug_sanitize_files::yes);
 
-        _storage.start([kv_conf]() { return kv_conf; }, default_log_cfg())
+        _storage
+          .start(
+            [kv_conf]() { return kv_conf; },
+            [this]() { return default_log_cfg(); })
           .get0();
         _storage.invoke_on_all(&storage::api::start).get0();
         _connections.start().get0();
@@ -58,6 +62,13 @@ struct mux_state_machine_fixture {
             ss::default_scheduling_group(),
             std::chrono::milliseconds(100),
             std::chrono::milliseconds(2000),
+            [] {
+                return raft::recovery_memory_quota::configuration{
+                  .max_recovery_memory
+                  = config::mock_binding<std::optional<size_t>>(std::nullopt),
+                  .default_read_buffer_size = config::mock_binding(512_KiB),
+                };
+            },
             std::ref(_connections),
             std::ref(_storage),
             std::ref(_recovery_throttle))

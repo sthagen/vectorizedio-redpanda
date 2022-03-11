@@ -58,6 +58,7 @@ func NewClusterService(
 }
 
 // Ensure will manage kubernetes v1.Service for redpanda.vectorized.io custom resource
+// nolint:dupl // TODO multiple services have the same Ensure function
 func (r *ClusterServiceResource) Ensure(ctx context.Context) error {
 	if len(r.svcPorts) == 0 {
 		return nil

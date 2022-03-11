@@ -41,7 +41,6 @@ namespace config {
 
 struct configuration final : public config_store {
     // WAL
-    property<bool> developer_mode;
     bounded_property<uint64_t> log_segment_size;
     bounded_property<uint64_t> compacted_log_segment_size;
     property<std::chrono::milliseconds> readers_cache_eviction_timeout_ms;
@@ -70,6 +69,8 @@ struct configuration final : public config_store {
     property<size_t> raft_heartbeat_disconnect_failures;
     deprecated_property min_version;
     deprecated_property max_version;
+    bounded_property<std::optional<size_t>> raft_max_recovery_memory;
+    bounded_property<size_t> raft_recovery_default_read_size;
     // Kafka
     deprecated_property use_scheduling_groups;
     deprecated_property enable_admin_api;
@@ -89,6 +90,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> tm_sync_timeout_ms;
     property<model::violation_recovery_policy> tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
+    property<uint32_t> seq_table_min_size;
     property<std::chrono::milliseconds> tx_timeout_delay_ms;
     property<model::violation_recovery_policy> rm_violation_recovery_policy;
     property<std::chrono::milliseconds> fetch_reads_debounce_timeout;
@@ -98,6 +100,8 @@ struct configuration final : public config_store {
     property<model::compression> log_compression_type;
     property<size_t> fetch_max_bytes;
     property<std::chrono::milliseconds> metadata_status_wait_timeout_ms;
+    bounded_property<std::optional<int64_t>> kafka_connection_rate_limit;
+    property<std::vector<ss::sstring>> kafka_connection_rate_limit_overrides;
     // same as transactional.id.expiration.ms in kafka
     property<std::chrono::milliseconds> transactional_id_expiration_ms;
     property<bool> enable_idempotence;
@@ -243,6 +247,8 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> metrics_reporter_tick_interval;
     property<std::chrono::milliseconds> metrics_reporter_report_interval;
     property<ss::sstring> metrics_reporter_url;
+
+    property<bool> features_auto_enable;
 
     configuration();
 

@@ -12,6 +12,7 @@
 #include "cluster/node/constants.h"
 #include "config/base_property.h"
 #include "config/node_config.h"
+#include "config/validators.h"
 #include "model/metadata.h"
 #include "storage/chunk_cache.h"
 #include "storage/segment_appender.h"
@@ -46,26 +47,23 @@ uint32_t default_raft_non_local_requests() {
 }
 
 configuration::configuration()
-  : developer_mode(
+  : log_segment_size(
     *this,
-    "developer_mode",
-    "Skips most of the checks performed at startup, not recomended for "
-    "production use",
-    {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-    false)
-  , log_segment_size(
-      *this,
-      "log_segment_size",
-      "How large in bytes should each log segment be (default 1G)",
-      {.example = "2147483648", .visibility = visibility::tunable},
-      1_GiB,
-      {.min = 1_MiB})
+    "log_segment_size",
+    "How large in bytes should each log segment be (default 1G)",
+    {.needs_restart = needs_restart::no,
+     .example = "2147483648",
+     .visibility = visibility::tunable},
+    1_GiB,
+    {.min = 1_MiB})
   , compacted_log_segment_size(
       *this,
       "compacted_log_segment_size",
       "How large in bytes should each compacted log segment be (default "
       "256MiB)",
-      {.example = "268435456", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "268435456",
+       .visibility = visibility::tunable},
       256_MiB,
       {.min = 1_MiB})
   , readers_cache_eviction_timeout_ms(
@@ -180,7 +178,23 @@ configuration::configuration()
 
   , min_version(*this, "min_version")
   , max_version(*this, "max_version")
-
+  , raft_max_recovery_memory(
+      *this,
+      "raft_max_recovery_memory",
+      "Max memory that can be used for reads in raft recovery process by "
+      "default 15% of total memory",
+      {.needs_restart = needs_restart::no,
+       .example = "41943040",
+       .visibility = visibility::tunable},
+      std::nullopt,
+      {.min = 32_MiB})
+  , raft_recovery_default_read_size(
+      *this,
+      "raft_recovery_default_read_size",
+      "default size of read issued during raft follower recovery",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      512_KiB,
+      {.min = 128, .max = 5_MiB})
   , use_scheduling_groups(*this, "use_scheduling_groups")
   , enable_admin_api(*this, "enable_admin_api")
   , default_num_windows(
@@ -291,6 +305,12 @@ configuration::configuration()
       "Time to wait state catch up before rejecting a request",
       {.visibility = visibility::user},
       10s)
+  , seq_table_min_size(
+      *this,
+      "seq_table_min_size",
+      "Minimum size of the seq table non affected by compaction",
+      {.visibility = visibility::user},
+      1000)
   , tx_timeout_delay_ms(
       *this,
       "tx_timeout_delay_ms",
@@ -355,6 +375,23 @@ configuration::configuration()
       "refreshed",
       {.visibility = visibility::tunable},
       2s)
+  , kafka_connection_rate_limit(
+      *this,
+      "kafka_connection_rate_limit",
+      "Maximum connections per second for one core",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt,
+      {.min = 1})
+  , kafka_connection_rate_limit_overrides(
+      *this,
+      "kafka_connection_rate_limit_overrides",
+      "Overrides for specific ips for maximum connections per second for one "
+      "core",
+      {.needs_restart = needs_restart::no,
+       .example = R"(['127.0.0.1:90', '50.20.1.1:40'])",
+       .visibility = visibility::user},
+      {},
+      validate_connection_rate)
   , transactional_id_expiration_ms(
       *this,
       "transactional_id_expiration_ms",
@@ -384,19 +421,19 @@ configuration::configuration()
       *this,
       "delete_retention_ms",
       "delete segments older than this - default 1 week",
-      {.visibility = visibility::user},
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
       10080min)
   , log_compaction_interval_ms(
       *this,
       "log_compaction_interval_ms",
       "How often do we trigger background compaction",
-      {.visibility = visibility::user},
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
       10s)
   , retention_bytes(
       *this,
       "retention_bytes",
       "Default max bytes per partition on disk before triggering a compaction",
-      {.visibility = visibility::user},
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt)
   , group_topic_partitions(
       *this,
@@ -667,7 +704,9 @@ configuration::configuration()
       *this,
       "max_compacted_log_segment_size",
       "Max compacted segment size after consolidation",
-      {.example = "10737418240", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "10737418240",
+       .visibility = visibility::tunable},
       5_GiB)
   , id_allocator_log_capacity(
       *this,
@@ -1078,7 +1117,14 @@ configuration::configuration()
       "cluster metrics reporter url",
       {.needs_restart = needs_restart::no,
        .visibility = visibility::deprecated},
-      "https://m.rp.vectorized.io/v2") {}
+      "https://m.rp.vectorized.io/v2")
+  , features_auto_enable(
+      *this,
+      "features_auto_enable",
+      "Whether new feature flags may auto-activate after upgrades (true) or "
+      "must wait for manual activation via the admin API (false)",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

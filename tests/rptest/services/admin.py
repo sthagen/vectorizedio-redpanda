@@ -141,21 +141,38 @@ class Admin:
     def get_status_ready(self, node=None):
         return self._request("GET", "status/ready", node=node).json()
 
-    def get_cluster_config(self, node=None):
-        return self._request("GET", "config", node=node).json()
+    def get_cluster_config(self, node=None, include_defaults=None):
+        if include_defaults is not None:
+            kwargs = {"params": {"include_defaults": include_defaults}}
+        else:
+            kwargs = {}
+
+        return self._request("GET", "cluster_config", node=node,
+                             **kwargs).json()
 
     def get_cluster_config_schema(self, node=None):
         return self._request("GET", "cluster_config/schema", node=node).json()
 
-    def patch_cluster_config(self, upsert=None, remove=None, force=False):
+    def patch_cluster_config(self,
+                             upsert=None,
+                             remove=None,
+                             force=False,
+                             dry_run=False):
         if upsert is None:
             upsert = {}
         if remove is None:
             remove = []
 
         path = "cluster_config"
+        params = {}
         if force:
-            path = path + "?force=true"
+            params['force'] = 'true'
+        if dry_run:
+            params['dry_run'] = 'true'
+
+        if params:
+            joined = "&".join([f"{k}={v}" for k, v in params.items()])
+            path = path + f"?{joined}"
 
         return self._request("PUT",
                              path,
@@ -172,6 +189,9 @@ class Admin:
 
     def get_features(self):
         return self._request("GET", "features").json()
+
+    def put_feature(self, feature_name, body):
+        return self._request("PUT", f"features/{feature_name}", json=body)
 
     def set_log_level(self, name, level, expires=None):
         """

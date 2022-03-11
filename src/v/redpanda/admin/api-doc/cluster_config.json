@@ -22,6 +22,40 @@
               "schema": {"type": "integer"},
               "required": false,
               "description": "If nonzero, skip validation of properties, and permit setting unknown properties"
+            },
+            {
+              "in": "query",
+              "name": "dry_run",
+              "schema": {"type": "integer"},
+              "required": false,
+              "description": "If nonzero, do not apply any changes (but still do validation and return 400 on errors)"
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "OK"
+            },
+            "400": {
+              "description": "Invalid properties.  Response is a map of property name to error string",
+              "schema":{
+                "type": "object"
+              }
+            }
+          }
+        },
+        {"method": "GET",
+          "summary": "Read cluster configuration",
+          "type": "void",
+          "nickname": "get_cluster_config",
+          "produces": ["application/json"],
+          "parameters": [
+            {
+              "name": "include_defaults",
+              "in": "query",
+              "schema": {"type": "boolean"},
+              "required": false,
+              "allowMultiple": false,
+              "description": "If false, only properties which have been changed from the default are included."
             }
           ],
           "responses": {
