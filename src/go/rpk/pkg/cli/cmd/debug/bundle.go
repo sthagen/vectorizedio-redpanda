@@ -35,19 +35,19 @@ import (
 	"github.com/beevik/ntp"
 	"github.com/docker/go-units"
 	"github.com/hashicorp/go-multierror"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/api/admin"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/cmd/common"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/kafka"
+	osutil "github.com/redpanda-data/redpanda/src/go/rpk/pkg/os"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/system"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/system/syslog"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/api/admin"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/cli/cmd/common"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/kafka"
-	osutil "github.com/vectorizedio/redpanda/src/go/rpk/pkg/os"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/out"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/system/syslog"
 	"gopkg.in/yaml.v2"
 )
 
@@ -203,7 +203,7 @@ func NewBundleCommand(fs afero.Fs) *cobra.Command {
 	)
 	command := &cobra.Command{
 		Use:   "bundle",
-		Short: "Collect environment data and create a bundle file for the Vectorized support team to inspect.",
+		Short: "Collect environment data and create a bundle file for the Redpanda Data support team to inspect.",
 		Long: `'rpk debug bundle' collects environment data that can help debug and diagnose
 issues with a redpanda cluster, a broker, or the machine it's running on. It
 then bundles the collected data into a zip file.

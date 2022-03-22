@@ -294,7 +294,7 @@ struct join_reply {
 /// Successor to join_request:
 /// - Include version metadata for joining node
 /// - Has fields for implementing auto-selection of
-///   node_id (https://github.com/vectorizedio/redpanda/issues/2793)
+///   node_id (https://github.com/redpanda-data/redpanda/issues/2793)
 ///   in future.
 struct join_node_request {
     explicit join_node_request(
@@ -461,7 +461,8 @@ struct topic_configuration {
       model::initial_revision_id) const;
 
     bool is_internal() const {
-        return tp_ns.ns == model::kafka_internal_namespace;
+        return tp_ns.ns == model::kafka_internal_namespace
+               || tp_ns == model::kafka_consumer_offsets_nt;
     }
 
     model::topic_namespace tp_ns;
@@ -839,6 +840,17 @@ struct finish_reallocation_reply {
     errc error;
 };
 
+struct set_maintenance_mode_request {
+    static constexpr int8_t current_version = 1;
+    model::node_id id;
+    bool enabled;
+};
+
+struct set_maintenance_mode_reply {
+    static constexpr int8_t current_version = 1;
+    errc error;
+};
+
 struct config_status_request {
     config_status status;
 };
@@ -853,6 +865,22 @@ struct feature_action_request {
 
 struct feature_action_response {
     errc error;
+};
+
+using feature_barrier_tag
+  = named_type<ss::sstring, struct feature_barrier_tag_type>;
+
+struct feature_barrier_request {
+    static constexpr int8_t current_version = 1;
+    feature_barrier_tag tag; // Each cooperative barrier must use a unique tag
+    model::node_id peer;
+    bool entered; // Has the requester entered?
+};
+
+struct feature_barrier_response {
+    static constexpr int8_t current_version = 1;
+    bool entered;  // Has the respondent entered?
+    bool complete; // Has the respondent exited?
 };
 
 struct create_non_replicable_topics_request {
@@ -1065,6 +1093,30 @@ template<>
 struct adl<cluster::feature_update_cmd_data> {
     void to(iobuf&, cluster::feature_update_cmd_data&&);
     cluster::feature_update_cmd_data from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::feature_barrier_request> {
+    void to(iobuf&, cluster::feature_barrier_request&&);
+    cluster::feature_barrier_request from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::feature_barrier_response> {
+    void to(iobuf&, cluster::feature_barrier_response&&);
+    cluster::feature_barrier_response from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::set_maintenance_mode_request> {
+    void to(iobuf&, cluster::set_maintenance_mode_request&&);
+    cluster::set_maintenance_mode_request from(iobuf_parser&);
+};
+
+template<>
+struct adl<cluster::set_maintenance_mode_reply> {
+    void to(iobuf&, cluster::set_maintenance_mode_reply&&);
+    cluster::set_maintenance_mode_reply from(iobuf_parser&);
 };
 
 } // namespace reflection

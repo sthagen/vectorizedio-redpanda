@@ -77,7 +77,8 @@ ss::future<> controller::wire_up() {
             std::ref(_members_table),
             config::shard_local_cfg().topic_memory_per_partition.bind(),
             config::shard_local_cfg().topic_fds_per_partition.bind(),
-            config::shard_local_cfg().segment_fallocation_step.bind());
+            config::shard_local_cfg().segment_fallocation_step.bind(),
+            config::shard_local_cfg().enable_rack_awareness.bind());
       })
       .then([this] { return _credentials.start(); })
       .then([this] {
@@ -100,6 +101,8 @@ ss::future<> controller::start() {
              std::move(initial_raft0_brokers))
       .then([this](consensus_ptr c) { _raft0 = c; })
       .then([this] { return _partition_leaders.start(std::ref(_tp_state)); })
+      .then(
+        [this] { return _drain_manager.start(std::ref(_partition_manager)); })
       .then([this] {
           return _members_manager.start_single(
             _raft0,
@@ -107,6 +110,7 @@ ss::future<> controller::start() {
             std::ref(_connections),
             std::ref(_partition_allocator),
             std::ref(_storage),
+            std::ref(_drain_manager),
             std::ref(_as));
       })
       .then([this] {
@@ -149,6 +153,7 @@ ss::future<> controller::start() {
             std::ref(_stm),
             std::ref(_connections),
             std::ref(_partition_leaders),
+            std::ref(_feature_table),
             std::ref(_as));
       })
       .then([this] {
@@ -197,6 +202,8 @@ ss::future<> controller::start() {
             std::ref(_storage),
             std::ref(_as));
       })
+      .then(
+        [this] { return _drain_manager.invoke_on_all(&drain_manager::start); })
       .then([this] {
           return _members_manager.invoke_on(
             members_manager::shard, &members_manager::start);
@@ -243,6 +250,7 @@ ss::future<> controller::start() {
             std::ref(_hm_frontend),
             std::ref(_hm_backend),
             std::ref(_feature_table),
+            std::ref(_connections),
             _raft0->group());
       })
       .then([this] {
@@ -351,6 +359,7 @@ ss::future<> controller::stop() {
           .then([this] { return _credentials.stop(); })
           .then([this] { return _tp_state.stop(); })
           .then([this] { return _members_manager.stop(); })
+          .then([this] { return _drain_manager.stop(); })
           .then([this] { return _partition_allocator.stop(); })
           .then([this] { return _partition_leaders.stop(); })
           .then([this] { return _feature_table.stop(); })

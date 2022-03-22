@@ -20,6 +20,7 @@
 #include "kafka/client/configuration.h"
 #include "kafka/client/fwd.h"
 #include "kafka/server/fwd.h"
+#include "net/conn_quota.h"
 #include "net/fwd.h"
 #include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/rest/fwd.h"
@@ -58,7 +59,7 @@ public:
     void wire_up_services();
     void wire_up_redpanda_services();
     void start(::stop_signal&);
-    void start_redpanda();
+    void start_redpanda(::stop_signal&);
     void start_kafka(::stop_signal&);
 
     explicit application(ss::sstring = "redpanda::main");
@@ -86,6 +87,7 @@ public:
     ss::sharded<cluster::metadata_dissemination_service>
       md_dissemination_service;
     ss::sharded<kafka::coordinator_ntp_mapper> coordinator_ntp_mapper;
+    ss::sharded<kafka::coordinator_ntp_mapper> co_coordinator_ntp_mapper;
     std::unique_ptr<cluster::controller> controller;
     ss::sharded<kafka::fetch_session_cache> fetch_session_cache;
     smp_groups smp_service_groups;
@@ -153,8 +155,10 @@ private:
 
     ss::sharded<rpc::connection_cache> _connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
+    ss::sharded<kafka::group_manager> _co_group_manager;
     ss::sharded<net::server> _rpc;
     ss::sharded<admin_server> _admin;
+    ss::sharded<net::conn_quota> _kafka_conn_quotas;
     ss::sharded<net::server> _kafka_server;
     ss::sharded<kafka::client::client> _proxy_client;
     ss::sharded<pandaproxy::rest::proxy> _proxy;

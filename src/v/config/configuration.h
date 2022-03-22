@@ -175,6 +175,8 @@ struct configuration final : public config_store {
     property<int16_t> compaction_ctrl_max_shares;
     property<std::optional<size_t>> compaction_ctrl_backlog_size;
     property<std::chrono::milliseconds> members_backend_retry_ms;
+    property<std::optional<uint32_t>> kafka_connections_max;
+    property<std::optional<uint32_t>> kafka_connections_max_per_ip;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
@@ -249,6 +251,9 @@ struct configuration final : public config_store {
     property<ss::sstring> metrics_reporter_url;
 
     property<bool> features_auto_enable;
+
+    // enables rack aware replica assignment
+    property<bool> enable_rack_awareness;
 
     configuration();
 

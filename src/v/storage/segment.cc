@@ -81,6 +81,7 @@ ss::future<> segment::close() {
      * the gate should be closed without the write lock because there may be a
      * pending background roll operation that requires the write lock.
      */
+    vlog(stlog.trace, "closing segment: {} ", *this);
     return _gate.close().then([this] {
         return write_lock().then([this](ss::rwlock::holder h) {
             return do_flush()
@@ -458,7 +459,7 @@ segment::offset_data_stream(model::offset o, ss::io_priority_class iopc) {
     }
 
     // This could be a corruption (bad index) or a runtime defect (bad file
-    // size) (https://github.com/vectorizedio/redpanda/issues/2101)
+    // size) (https://github.com/redpanda-data/redpanda/issues/2101)
     vassert(position < size_bytes(), "Index points beyond file size");
 
     return _reader.data_stream(position, iopc);

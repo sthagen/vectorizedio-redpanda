@@ -268,6 +268,27 @@ class Admin:
         path = f"partitions/{namespace}/{topic}/{partition}/mark_transaction_expired?id={pid['id']}&epoch={pid['epoch']}"
         return self._request("post", path, node=node)
 
+    def delete_partition_from_transaction(self,
+                                          tid,
+                                          namespace,
+                                          topic,
+                                          partition_id,
+                                          etag,
+                                          node=None):
+        """
+        Delete partition from transaction
+        """
+        partition_info = {
+            "namespace": namespace,
+            "topic": topic,
+            "partition_id": partition_id,
+            "etag": etag
+        }
+
+        params = "&".join([f"{k}={v}" for k, v in partition_info.items()])
+        path = f"transaction/{tid}/delete_partition/?{params}"
+        return self._request('post', path, node=node)
+
     def set_partition_replicas(self,
                                topic,
                                partition,
@@ -358,3 +379,32 @@ class Admin:
         leader = self.redpanda.get_node(details['leader_id'])
         ret = self._request('post', path=path, node=leader)
         return ret.status_code == 200
+
+    def maintenance_start(self, node):
+        """
+        Start maintenanceing on node.
+        """
+        id = self.redpanda.idx(node)
+        url = f"brokers/{id}/maintenance"
+        self.redpanda.logger.info(
+            f"Starting maintenance on node {node.name}/{id}")
+        return self._request("put", url)
+
+    def maintenance_stop(self, node):
+        """
+        Stop maintenanceing on node.
+        """
+        id = self.redpanda.idx(node)
+        url = f"brokers/{id}/maintenance"
+        self.redpanda.logger.info(
+            f"Stopping maintenance on node {node.name}/{id}")
+        return self._request("delete", url)
+
+    def maintenance_status(self, node):
+        """
+        Get maintenance status of a node.
+        """
+        id = self.redpanda.idx(node)
+        self.redpanda.logger.info(
+            f"Getting maintenance status on node {node.name}/{id}")
+        return self._request("get", "maintenance", node=node).json()

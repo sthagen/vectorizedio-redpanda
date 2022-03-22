@@ -403,6 +403,8 @@ consteval std::string_view property_type_name() {
         return "endpoint_tls_config";
     } else if constexpr (std::is_same_v<type, model::broker_endpoint>) {
         return "broker_endpoint";
+    } else if constexpr (std::is_same_v<type, model::rack_id>) {
+        return "rack_id";
     } else if constexpr (std::is_floating_point_v<type>) {
         return "number";
     } else if constexpr (std::is_integral_v<type>) {
@@ -459,7 +461,12 @@ bool property<T>::is_nullable() const {
 
 template<typename T>
 bool property<T>::is_array() const {
-    if constexpr (detail::is_collection<std::decay_t<T>>) {
+    if constexpr (
+      std::is_same_v<T, ss::sstring> || std::is_same_v<T, std::string>) {
+        // Special case for strings, which are collections but we do not
+        // want to report them that way.
+        return false;
+    } else if constexpr (detail::is_collection<std::decay_t<T>>) {
         return true;
     } else {
         return false;

@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/api/admin"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/api/admin"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/config"
-	"github.com/vectorizedio/redpanda/src/go/rpk/pkg/out"
 )
 
 // NewCommand returns the config admin command.
@@ -174,6 +174,7 @@ failure of enabling each logger is individually printed.
 var possibleLoggers = []string{
 	"admin_api_server",
 	"archival",
+	"archival-ctrl",
 	"assert",
 	"cloud_storage",
 	"cluster",
@@ -186,9 +187,12 @@ var possibleLoggers = []string{
 	"http",
 	"httpd",
 	"io",
+	"json",
 	"kafka",
 	// "kafka/client", disabled until redpanda supports slashes in the handler
 	"kvstore",
+	"metrics-reporter",
+	"offset_translator",
 	"pandaproxy",
 	// "r/heartbeat", disabled until redpanda supports slashes in the handler
 	"raft",
@@ -200,5 +204,7 @@ var possibleLoggers = []string{
 	"seastar",
 	"security",
 	"storage",
+	"storage-gc",
 	"syschecks",
+	"tx",
 }

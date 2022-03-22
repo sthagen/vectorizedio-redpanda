@@ -22,6 +22,7 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/record_batch_reader.h"
+#include "model/timeout_clock.h"
 #include "raft/consensus.h"
 #include "raft/consensus_utils.h"
 #include "raft/group_configuration.h"
@@ -137,6 +138,10 @@ public:
       timequery(model::timestamp, model::offset, ss::io_priority_class);
 
     bool is_leader() const { return _raft->is_leader(); }
+    bool has_followers() const { return _raft->has_followers(); }
+
+    void block_new_leadership() const { _raft->block_new_leadership(); }
+    void unblock_new_leadership() const { _raft->unblock_new_leadership(); }
 
     ss::future<result<model::offset>> linearizable_barrier() {
         return _raft->linearizable_barrier();
@@ -145,6 +150,11 @@ public:
     ss::future<std::error_code>
     transfer_leadership(std::optional<model::node_id> target) {
         return _raft->do_transfer_leadership(target);
+    }
+
+    ss::future<std::error_code>
+    request_leadership(model::timeout_clock::time_point timeout) {
+        return _raft->request_leadership(timeout);
     }
 
     ss::future<std::error_code> update_replica_set(

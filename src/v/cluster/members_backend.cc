@@ -16,13 +16,16 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/core/sstring.hh>
 #include <seastar/util/later.hh>
+#include <seastar/util/optimized_optional.hh>
 
 #include <absl/container/node_hash_set.h>
 #include <fmt/ostream.h>
 
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <ostream>
 #include <vector>
@@ -58,7 +61,22 @@ ss::future<> members_backend::stop() {
     return _bg.close();
 }
 
+void members_backend::setup_metrics() {
+    if (config::shard_local_cfg().disable_metrics()) {
+        return;
+    }
+    namespace sm = ss::metrics;
+    _metrics.add_group(
+      prometheus_sanitize::metrics_name("cluster:members:backend"),
+      {
+        sm::make_gauge(
+          "queued_node_operations",
+          [this] { return _updates.size(); },
+          sm::description("Number of queued node operations")),
+      });
+}
 void members_backend::start() {
+    setup_metrics();
     ssx::spawn_with_gate(_bg, [this] {
         return ss::do_until(
           [this] { return _as.local().abort_requested(); },
@@ -238,12 +256,6 @@ void members_backend::calculate_reallocations_after_node_added(
         return;
     }
 
-    vlog(
-      clusterlog.info,
-      "Targeting to move {} partitions and reallocate them to node {}",
-      to_move_from_node,
-      meta.update.id);
-
     auto cmp = [](const replicas_to_move& lhs, const replicas_to_move& rhs) {
         return lhs.left_to_move < rhs.left_to_move;
     };
@@ -325,8 +337,7 @@ ss::future<> members_backend::reconcile() {
             vlog(
               clusterlog.trace,
               "waiting for all raft0 updates to be applied - barrier offset: "
-              "{}, "
-              "raft0 dirty offset: {}",
+              "{}, raft_0 dirty offset: {}",
               barrier_result.value(),
               _raft0->dirty_offset());
         }
@@ -352,18 +363,21 @@ ss::future<> members_backend::reconcile() {
     co_await try_to_finish_update(meta);
 
     vlog(
-      clusterlog.debug,
-      "reconcile: meta.update={}, {} partition_reallocations, finished={}, "
-      "offset={}",
+      clusterlog.info,
+      "[update: {}] reconciliation loop - reallocations: {}, finished: {}",
       meta.update,
-      meta.partition_reallocations.size(),
-      meta.finished,
-      meta.update.offset);
+      meta.partition_reallocations,
+      meta.finished);
 
     // calculate necessary reallocations
     if (meta.partition_reallocations.empty()) {
         calculate_reallocations(meta);
         // if there is nothing to reallocate, just finish this update
+        vlog(
+          clusterlog.info,
+          "[update: {}] calculated reallocations: {}",
+          meta.update,
+          meta.partition_reallocations);
         if (
           meta.partition_reallocations.empty()
           && meta.update.type == members_manager::node_update_type::added) {
@@ -374,8 +388,8 @@ ss::future<> members_backend::reconcile() {
             }
             vlog(
               clusterlog.debug,
-              "reconcile: node {} addition status, reallocation finished={}",
-              meta.update.id,
+              "[update: {}] no need reallocations, finished: {}",
+              meta.update,
               meta.finished);
             co_return;
         }
@@ -420,9 +434,10 @@ ss::future<> members_backend::reconcile() {
             // retried if it fails
             vlog(
               clusterlog.info,
-              "decommissioning finished, removing node {} from cluster",
-              meta.update.id);
-            // workaround: https://github.com/vectorizedio/redpanda/issues/891
+              "[update: {}] decommissioning finished, removing node from "
+              "cluster",
+              meta.update);
+            // workaround: https://github.com/redpanda-data/redpanda/issues/891
             std::vector<model::node_id> ids{meta.update.id};
             co_await _raft0
               ->remove_members(std::move(ids), model::revision_id{0})
@@ -430,11 +445,11 @@ ss::future<> members_backend::reconcile() {
         } else {
             // Decommissioning still in progress
             vlog(
-              clusterlog.debug,
-              "decommissioning status: node {} is_draining={} "
-              "all_reallocations_finished={} allocator_empty={} "
-              "updates_in_progress={}",
-              meta.update.id,
+              clusterlog.info,
+              "[update: {}] decommissioning in progress. draining: {} "
+              "all_reallocations_finished: {}, allocator_empty: {} "
+              "updates_in_progress:{}",
+              meta.update,
               is_draining,
               all_reallocations_finished,
               allocator_empty,
@@ -486,10 +501,10 @@ void members_backend::reassign_replicas(
   partition_assignment& current_assignment,
   partition_reallocation& reallocation) {
     vlog(
-      clusterlog.info,
-      "trying to reassign partition {} replicas, current assignment: {}",
+      clusterlog.debug,
+      "[ntp: {}, {} -> -]  trying to reassign partition replicas",
       reallocation.ntp,
-      current_assignment);
+      current_assignment.replicas);
 
     // remove nodes that are going to be reassigned from current assignment.
     std::erase_if(
@@ -502,14 +517,18 @@ void members_backend::reassign_replicas(
       reallocation.constraints, current_assignment);
     if (res.has_value()) {
         reallocation.new_assignment = std::move(res.value());
-        vlog(
-          clusterlog.debug,
-          "new assignment for {} - {}",
-          reallocation.ntp,
-          reallocation.new_assignment->get_assignments());
     }
 }
+namespace {
 
+std::optional<std::vector<model::broker_shard>>
+get_new_replicas(const members_backend::partition_reallocation& r) {
+    if (r.new_assignment) {
+        return r.new_assignment->get_assignments().front().replicas;
+    }
+    return std::nullopt;
+}
+} // namespace
 ss::future<> members_backend::reallocate_replica_set(
   members_backend::partition_reallocation& meta) {
     auto current_assignment = _topics.local().get_partition_assignment(
@@ -532,6 +551,13 @@ ss::future<> members_backend::reallocate_replica_set(
         }
         // success, update state and move on
         meta.state = reallocation_state::reassigned;
+        vlog(
+          clusterlog.info,
+          "[ntp: {}, {} -> {}] new partition assignment calculated "
+          "successfully",
+          meta.ntp,
+          current_assignment->replicas,
+          get_new_replicas(meta));
         [[fallthrough]];
     }
     case reallocation_state::reassigned: {
@@ -540,9 +566,10 @@ ss::future<> members_backend::reallocate_replica_set(
           "reallocation meta in reassigned state must have new_assignment");
         vlog(
           clusterlog.info,
-          "requesting partition {} replicas move to {}",
+          "[ntp: {}, {} -> {}] dispatching request to move partition",
           meta.ntp,
-          meta.new_assignment->get_assignments());
+          current_assignment->replicas,
+          get_new_replicas(meta));
         // request topic partition move
         std::error_code error
           = co_await _topics_frontend.local().move_partition_replicas(
@@ -551,9 +578,11 @@ ss::future<> members_backend::reallocate_replica_set(
             model::timeout_clock::now() + _retry_timeout);
         if (error) {
             vlog(
-              clusterlog.debug,
-              "partition {} move error: {}",
+              clusterlog.info,
+              "[ntp: {}, {} -> {}] partition move error: {}",
               meta.ntp,
+              current_assignment->replicas,
+              get_new_replicas(meta),
               error.message());
             co_return;
         }
@@ -566,16 +595,15 @@ ss::future<> members_backend::reallocate_replica_set(
         auto reconciliation_state
           = co_await _api.local().get_reconciliation_state(meta.ntp);
         vlog(
-          clusterlog.trace,
-          "reconciliation state for {} - {}, status: {}",
+          clusterlog.info,
+          "[ntp: {}, {} -> {}] reconciliation state: {}, pending operations: "
+          "{}",
           meta.ntp,
+          current_assignment->replicas,
+          get_new_replicas(meta),
           reconciliation_state.status(),
           reconciliation_state.pending_operations());
         if (reconciliation_state.status() != reconciliation_status::done) {
-            vlog(
-              clusterlog.info,
-              "waiting for partition {} replicas to be moved",
-              meta.ntp);
             co_return;
         }
         meta.state = reallocation_state::finished;
@@ -611,4 +639,41 @@ void members_backend::handle_reallocation_finished(model::node_id id) {
     });
 }
 
+std::ostream&
+operator<<(std::ostream& o, const members_backend::partition_reallocation& r) {
+    fmt::print(
+      o,
+      "{{ntp: {}, constraints: {},  allocated: {}, state: "
+      "{},replicas_to_remove: [}}",
+      r.ntp,
+      r.constraints,
+      r.new_assignment.has_value(),
+      r.state);
+
+    if (!r.replicas_to_remove.empty()) {
+        auto it = r.replicas_to_remove.begin();
+        fmt::print(o, "{}", *it);
+        ++it;
+        for (; it != r.replicas_to_remove.end(); ++it) {
+            fmt::print(o, ", {}", *it);
+        }
+    }
+    fmt::print(o, "]");
+    return o;
+}
+std::ostream&
+operator<<(std::ostream& o, const members_backend::reallocation_state& state) {
+    switch (state) {
+    case members_backend::reallocation_state::initial:
+        return o << "initial";
+    case members_backend::reallocation_state::reassigned:
+        return o << "reassigned";
+    case members_backend::reallocation_state::requested:
+        return o << "requested";
+    case members_backend::reallocation_state::finished:
+        return o << "finished";
+    }
+
+    __builtin_unreachable();
+}
 } // namespace cluster

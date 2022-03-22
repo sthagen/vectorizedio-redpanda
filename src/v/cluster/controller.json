@@ -72,6 +72,11 @@
             "output_type": "finish_reallocation_reply"
         },
         {
+            "name": "set_maintenance_mode",
+            "input_type": "set_maintenance_mode_request",
+            "output_type": "set_maintenance_mode_reply"
+        },
+        {
             "name": "config_status",
             "input_type": "config_status_request",
             "output_type": "config_status_reply"
@@ -95,6 +100,11 @@
             "name": "feature_action",
             "input_type": "feature_action_request",
             "output_type": "feature_action_response"
+        },
+        {
+            "name": "feature_barrier",
+            "input_type": "feature_barrier_request",
+            "output_type": "feature_barrier_response"
         }
     ]
 }

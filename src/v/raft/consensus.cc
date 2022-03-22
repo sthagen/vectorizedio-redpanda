@@ -14,6 +14,7 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
+#include "model/timeout_clock.h"
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/consensus_client_protocol.h"
 #include "raft/consensus_utils.h"
@@ -27,6 +28,7 @@
 #include "raft/types.h"
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
+#include "rpc/types.h"
 #include "ssx/future-util.h"
 #include "storage/api.h"
 #include "vlog.h"
@@ -123,10 +125,20 @@ void consensus::setup_metrics() {
     _metrics.add_group(
       prometheus_sanitize::metrics_name("raft"),
       {sm::make_gauge(
-        "leader_for",
-        [this] { return is_leader(); },
-        sm::description("Number of groups for which node is a leader"),
-        labels)});
+         "leader_for",
+         [this] { return is_leader(); },
+         sm::description("Number of groups for which node is a leader"),
+         labels),
+       sm::make_gauge(
+         "configuration_change_in_progress",
+         [this] {
+             return is_leader()
+                    && _configuration_manager.get_latest().type()
+                         == configuration_type::joint;
+         },
+         sm::description("Indicates if current raft group configuration is in "
+                         "joint state i.e. configuration is being changed"),
+         labels)});
 }
 
 void consensus::do_step_down() {
@@ -940,6 +952,54 @@ ss::future<std::error_code> consensus::replace_configuration(
       });
 }
 
+template<typename Func>
+ss::future<std::error_code>
+consensus::interrupt_configuration_change(model::revision_id revision, Func f) {
+    auto u = co_await _op_lock.get_units();
+    auto latest_cfg = config();
+    // latest configuration is of joint type
+    if (latest_cfg.type() == configuration_type::simple) {
+        vlog(_ctxlog.info, "no configuration changes in progress");
+        co_return errc::invalid_configuration_update;
+    }
+    if (latest_cfg.revision_id() > revision) {
+        co_return errc::invalid_configuration_update;
+    }
+    result<group_configuration> new_cfg = f(std::move(latest_cfg));
+    if (new_cfg.has_error()) {
+        co_return new_cfg.error();
+    }
+
+    co_return co_await replicate_configuration(
+      std::move(u), std::move(new_cfg.value()));
+}
+
+ss::future<std::error_code>
+consensus::revert_configuration_change(model::revision_id revision) {
+    vlog(
+      _ctxlog.info,
+      "requested revert of current configuration change - {}",
+      config());
+    return interrupt_configuration_change(
+      revision, [](raft::group_configuration cfg) {
+          cfg.revert_configuration_change();
+          return cfg;
+      });
+}
+
+ss::future<std::error_code>
+consensus::abort_configuration_change(model::revision_id revision) {
+    vlog(
+      _ctxlog.info,
+      "requested abort of current configuration change - {}",
+      config());
+    return interrupt_configuration_change(
+      revision, [](raft::group_configuration cfg) {
+          cfg.abort_configuration_change();
+          return cfg;
+      });
+}
+
 ss::future<> consensus::start() {
     return ss::try_with_gate(_bg, [this] { return do_start(); });
 }
@@ -955,7 +1015,7 @@ ss::future<> consensus::do_start() {
          * if the group's ntp matches the pattern, then do not load the initial
          * configuration snapshto from the keyvalue store. more info here:
          *
-         * https://github.com/vectorizedio/redpanda/issues/1870
+         * https://github.com/redpanda-data/redpanda/issues/1870
          */
         const auto& ntp = _log.config().ntp();
         const auto normalized_ntp = fmt::format(
@@ -1070,7 +1130,7 @@ ss::future<> consensus::do_start() {
                * fix for incorrectly persisted configuration index. In previous
                * version of redpanda due to the issue with incorrectly assigned
                * raft configuration indicies
-               * (https://github.com/vectorizedio/redpanda/issues/2326) there
+               * (https://github.com/redpanda-data/redpanda/issues/2326) there
                * may be a persistent corruption in offset translation caused by
                * incorrectly persited configuration index. It may cause log
                * offset to be negative. Here we check if this problem exists and
@@ -2441,6 +2501,21 @@ ss::future<timeout_now_reply> consensus::timeout_now(timeout_now_request&& r) {
         });
     }
 
+    if (_node_priority_override == zero_voter_priority) {
+        vlog(
+          _ctxlog.debug,
+          "Ignoring timeout request in state {} with node voter priority zero "
+          "from node {} at term {}",
+          _vstate,
+          r.node_id,
+          r.term);
+
+        return ss::make_ready_future<timeout_now_reply>(timeout_now_reply{
+          .term = _term,
+          .result = timeout_now_reply::status::failure,
+        });
+    }
+
     // start an election immediately
     dispatch_vote(true);
 
@@ -2483,6 +2558,32 @@ consensus::transfer_leadership(transfer_leadership_request req) {
     reply.success = true;
     reply.result = errc::success;
     co_return reply;
+}
+
+ss::future<std::error_code>
+consensus::request_leadership(model::timeout_clock::time_point timeout) {
+    if (is_leader()) {
+        co_return errc::success;
+    }
+
+    if (!_leader_id) {
+        co_return errc::not_leader;
+    }
+
+    if (!config().is_voter(_self)) {
+        co_return errc::not_voter;
+    }
+
+    auto result = co_await _client_protocol.transfer_leadership(
+      _leader_id->id(),
+      transfer_leadership_request{.group = _group, .target = _self.id()},
+      rpc::client_opts(timeout));
+
+    if (result) {
+        co_return result.value().result;
+    }
+
+    co_return result.error();
 }
 
 /**
@@ -2892,6 +2993,10 @@ voter_priority consensus::next_target_priority() {
  * so it should give us fairly even distribution of leaders across the nodes.
  */
 voter_priority consensus::get_node_priority(vnode rni) const {
+    if (_node_priority_override.has_value() && rni == _self) {
+        return _node_priority_override.value();
+    }
+
     auto& latest_cfg = _configuration_manager.get_latest();
     auto& brokers = latest_cfg.brokers();
 

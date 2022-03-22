@@ -89,7 +89,9 @@ v_cc_library(
     node/local_monitor.cc
     feature_backend.cc
     feature_manager.cc
+    feature_barrier.cc
     feature_table.cc
+    drain_manager.cc
   DEPS
     Seastar::seastar
     controller_rpc

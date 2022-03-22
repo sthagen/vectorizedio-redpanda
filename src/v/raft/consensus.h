@@ -124,7 +124,11 @@ public:
     // Replace configuration of raft group with given set of nodes
     ss::future<std::error_code>
       replace_configuration(std::vector<model::broker>, model::revision_id);
-
+    // Abort ongoing configuration change - may cause data loss
+    ss::future<std::error_code> abort_configuration_change(model::revision_id);
+    // Revert current configuration change - this is safe and will never cause
+    // data loss
+    ss::future<std::error_code> revert_configuration_change(model::revision_id);
     bool is_leader() const { return _vstate == vote_state::leader; }
     bool is_candidate() const { return _vstate == vote_state::candidate; }
     std::optional<model::node_id> get_leader_id() const {
@@ -277,6 +281,12 @@ public:
     ss::future<std::error_code> prepare_transfer_leadership(vnode);
     ss::future<std::error_code>
       do_transfer_leadership(std::optional<model::node_id>);
+    /**
+     * requests leadership to be transferred to the current node. It sends
+     * transer leadership request to the current leader.
+     */
+    ss::future<std::error_code>
+      request_leadership(model::timeout_clock::time_point);
 
     ss::future<> remove_persistent_state();
 
@@ -314,6 +324,7 @@ public:
 
     std::vector<follower_metrics> get_follower_metrics() const;
     result<follower_metrics> get_follower_metrics(model::node_id) const;
+    bool has_followers() const { return _fstats.size() > 0; }
 
     offset_monitor& visible_offset_monitor() {
         return _consumable_offset_monitor;
@@ -322,6 +333,19 @@ public:
     ss::future<> refresh_commit_index();
 
     model::term_id get_term(model::offset) const;
+
+    /*
+     * Prevent the current node from becoming a leader for this group. If the
+     * node is the leader then this only takes affect if leadership is lost.
+     */
+    void block_new_leadership() {
+        _node_priority_override = raft::zero_voter_priority;
+    }
+
+    /*
+     * Allow the current node to become a leader for this group.
+     */
+    void unblock_new_leadership() { _node_priority_override.reset(); }
 
 private:
     friend replicate_entries_stm;
@@ -431,6 +455,10 @@ private:
 
     template<typename Func>
     ss::future<std::error_code> change_configuration(Func&&);
+
+    template<typename Func>
+    ss::future<std::error_code>
+      interrupt_configuration_change(model::revision_id, Func);
 
     ss::future<> maybe_commit_configuration(ss::semaphore_units<>);
     void maybe_promote_to_voter(vnode);
@@ -571,6 +599,8 @@ private:
     model::offset _majority_replicated_index;
     model::offset _visibility_upper_bound_index;
     voter_priority _target_priority = voter_priority::max();
+    std::optional<voter_priority> _node_priority_override;
+
     /**
      * We keep an idex of the most recent entry replicated with quorum
      * consistency level to make sure that all requests replicated with quorum

@@ -792,6 +792,19 @@ configuration::configuration()
       "Time between members backend reconciliation loop retries ",
       {.visibility = visibility::tunable},
       5s)
+  , kafka_connections_max(
+      *this,
+      "kafka_connections_max",
+      "Maximum number of Kafka client connections per broker",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
+  , kafka_connections_max_per_ip(
+      *this,
+      "kafka_connections_max_per_ip",
+      "Maximum number of Kafka client connections from each IP addreess, per "
+      "broker",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",
@@ -1115,8 +1128,7 @@ configuration::configuration()
       *this,
       "metrics_reporter_url",
       "cluster metrics reporter url",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::deprecated},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       "https://m.rp.vectorized.io/v2")
   , features_auto_enable(
       *this,
@@ -1124,7 +1136,13 @@ configuration::configuration()
       "Whether new feature flags may auto-activate after upgrades (true) or "
       "must wait for manual activation via the admin API (false)",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      true) {}
+      true)
+  , enable_rack_awareness(
+      *this,
+      "enable_rack_awareness",
+      "Enables rack-aware replica assignment",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

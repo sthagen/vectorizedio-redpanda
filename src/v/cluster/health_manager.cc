@@ -114,7 +114,7 @@ ss::future<bool> health_manager::ensure_partition_replication(model::ntp ntp) {
      * correctly. current the following bug is related to the allocator
      * constraints not being applied properly:
      *
-     *    https://github.com/vectorizedio/redpanda/issues/2195
+     *    https://github.com/redpanda-data/redpanda/issues/2195
      */
     {
         std::set<model::node_id> nodes;
@@ -194,6 +194,10 @@ void health_manager::tick() {
                 auto ok = co_await ensure_topic_replication(
                   model::kafka_group_nt);
 
+                if (ok) {
+                    ok = co_await ensure_topic_replication(
+                      model::kafka_consumer_offsets_nt);
+                }
                 if (ok) {
                     ok = co_await ensure_topic_replication(
                       model::id_allocator_nt);

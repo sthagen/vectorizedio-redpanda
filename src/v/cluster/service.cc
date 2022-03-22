@@ -302,6 +302,26 @@ ss::future<finish_reallocation_reply> service::finish_reallocation(
       [this, req]() mutable { return do_finish_reallocation(req); });
 }
 
+ss::future<set_maintenance_mode_reply> service::set_maintenance_mode(
+  set_maintenance_mode_request&& req, rpc::streaming_context&) {
+    return ss::with_scheduling_group(
+      get_scheduling_group(), [this, req]() mutable {
+          return _members_frontend.local()
+            .set_maintenance_mode(req.id, req.enabled)
+            .then([](std::error_code ec) {
+                if (!ec) {
+                    return set_maintenance_mode_reply{.error = errc::success};
+                }
+                if (ec.category() == cluster::error_category()) {
+                    return set_maintenance_mode_reply{
+                      .error = errc(ec.value())};
+                }
+                return set_maintenance_mode_reply{
+                  .error = errc::replication_error};
+            });
+      });
+}
+
 ss::future<config_status_reply>
 service::config_status(config_status_request&& req, rpc::streaming_context&) {
     auto ec = co_await _config_frontend.local().set_status(
@@ -449,6 +469,18 @@ service::feature_action(feature_action_request&& req, rpc::streaming_context&) {
     co_return feature_action_response{
       .error = errc::success,
     };
+}
+
+ss::future<feature_barrier_response> service::feature_barrier(
+  feature_barrier_request&& req, rpc::streaming_context&) {
+    auto result = co_await _feature_manager.invoke_on(
+      feature_manager::backend_shard,
+      [req = std::move(req)](feature_manager& fm) {
+          return fm.update_barrier(req.tag, req.peer, req.entered);
+      });
+
+    co_return feature_barrier_response{
+      .entered = result.entered, .complete = result.complete};
 }
 
 } // namespace cluster

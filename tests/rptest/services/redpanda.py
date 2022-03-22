@@ -20,7 +20,7 @@ import threading
 import collections
 import re
 import uuid
-from typing import Optional
+from typing import Mapping, Optional
 
 import yaml
 from ducktape.services.service import Service
@@ -46,7 +46,7 @@ SaslCredentials = collections.namedtuple("SaslCredentials",
 
 DEFAULT_LOG_ALLOW_LIST = [
     # Tests currently don't run on XFS, although in future they should.
-    # https://github.com/vectorizedio/redpanda/issues/2376
+    # https://github.com/redpanda-data/redpanda/issues/2376
     re.compile("not on XFS. This is a non-supported setup."),
 
     # This is expected when tests are intentionally run on low memory configurations
@@ -147,10 +147,10 @@ class NodeCrash(Exception):
 
 
 class MetricSamples:
-    def __init__(self, samples):
+    def __init__(self, samples: list[MetricSample]):
         self.samples = samples
 
-    def label_filter(self, labels):
+    def label_filter(self, labels: Mapping[str, float]):
         def f(sample):
             for key, value in labels.items():
                 assert key in sample.labels
@@ -371,6 +371,8 @@ class RedpandaService(Service):
 
         self.config_file_lock = threading.Lock()
 
+        self._saved_executable = False
+
     def set_environment(self, environment: dict[str, str]):
         self._environment = environment
 
@@ -566,41 +568,47 @@ class RedpandaService(Service):
         if write_config:
             self.write_node_conf_file(node, override_cfg_params)
 
-        if self.coproc_enabled():
-            self.start_wasm_engine(node)
-
-        # Maybe redpanda collides with something that wasn't cleaned up
-        # properly: let's peek at what's going on on the node before starting it.
-        self.logger.debug(f"Node status prior to redpanda startup:")
-        for line in node.account.ssh_capture("ps aux"):
-            self.logger.debug(line.strip())
-        for line in node.account.ssh_capture("netstat -ant"):
-            self.logger.debug(line.strip())
-
-        self.start_redpanda(node)
-
         if timeout is None:
             timeout = self.READY_TIMEOUT_SEC
 
-        try:
+        if self.coproc_enabled():
+            self.start_wasm_engine(node)
+
+        def start_rp():
+            self.start_redpanda(node)
+
             wait_until(
                 lambda: Admin.ready(node).get("status") == "ready",
                 timeout_sec=timeout,
                 err_msg=
                 f"Redpanda service {node.account.hostname} failed to start",
                 retry_on_exc=True)
+
+        self.logger.debug(f"Node status prior to redpanda startup:")
+        self.start_service(node, start_rp)
+        self._started.append(node)
+
+    def start_service(self, node, start):
+        def log_node_stats():
+            for line in node.account.ssh_capture("ps aux"):
+                self.logger.debug(line.strip())
+            for line in node.account.ssh_capture("netstat -ant"):
+                self.logger.debug(line.strip())
+
+        # Maybe the service collides with something that wasn't cleaned up
+        # properly: let's peek at what's going on on the node before starting it.
+        log_node_stats()
+
+        try:
+            start()
         except:
             # In case our failure to start is something like an "address in use", we
             # would like to know what else is going on on this node.
             self.logger.warn(
                 f"Failed to start on {node.name}, gathering node ps and netstat..."
             )
-            for line in node.account.ssh_capture("ps aux"):
-                self.logger.warn(line.strip())
-            for line in node.account.ssh_capture("netstat -ant"):
-                self.logger.warn(line.strip())
+            log_node_stats()
             raise
-        self._started.append(node)
 
     def coproc_enabled(self):
         coproc = self._extra_rp_conf.get('enable_coproc')
@@ -622,16 +630,28 @@ class RedpandaService(Service):
         if conf_value is not None:
             wasm_port = conf_value['port']
 
-        with node.account.monitor_log(
-                RedpandaService.WASM_STDOUT_STDERR_CAPTURE) as mon:
+        up_re = re.compile(f'.*:{wasm_port}')
+
+        def wasm_service_up():
+            def is_up(line):
+                self.logger.debug(line.strip())
+                return up_re.search(line) is not None
+
+            nsr = node.account.ssh_capture("netstat -ant")
+            return any([is_up(line) for line in nsr])
+
+        def start_wasm_service():
             node.account.ssh(wcmd)
-            mon.wait_until(
-                f"Starting redpanda wasm service on port: {wasm_port}",
+
+            wait_until(
+                wasm_service_up,
                 timeout_sec=RedpandaService.READY_TIMEOUT_SEC,
-                backoff_sec=0.5,
                 err_msg=
-                f"Wasm engine didn't finish startup in {RedpandaService.READY_TIMEOUT_SEC} seconds",
-            )
+                f"Wasm engine server startup within {RedpandaService.READY_TIMEOUT_SEC}s timeout",
+                retry_on_exc=True)
+
+        self.logger.debug(f"Node status prior to wasm_engine startup:")
+        self.start_service(node, start_wasm_service)
 
     def start_si(self):
         self._s3client = S3Client(
@@ -725,6 +745,7 @@ class RedpandaService(Service):
                         (node, "Redpanda process unexpectedly stopped"))
 
         if crashes:
+            self.save_executable()
             raise NodeCrash(crashes)
 
     def raise_on_bad_logs(self, allow_list=None):
@@ -793,7 +814,10 @@ class RedpandaService(Service):
         for node, lines in bad_lines.items():
             # LeakSanitizer type errors may include raw backtraces that the devloper
             # needs the binary to decode + investigate
-            if any(['Sanitizer' in l for l in lines]):
+            if any([
+                    re.findall("Sanitizer|[Aa]ssert|SEGV|Segmentation fault",
+                               l) for l in lines
+            ]):
                 self.save_executable()
                 break
 
@@ -1167,7 +1191,9 @@ class RedpandaService(Service):
         assert resp.status_code == 200
         return text_string_to_metric_families(resp.text)
 
-    def metrics_sample(self, sample_pattern, nodes=None):
+    def metrics_sample(self,
+                       sample_pattern,
+                       nodes=None) -> Optional[MetricSamples]:
         """
         Query metrics for a single sample using fuzzy name matching. This
         interface matches the sample pattern against sample names, and requires
@@ -1284,6 +1310,11 @@ class RedpandaService(Service):
         environments, the developer already has the binary.
         """
 
+        if self._saved_executable:
+            # Only ever do this once per test: the whole test runs with
+            # the same binaries.
+            return
+
         if os.environ.get('CI', None) == 'false':
             # We are on a developer workstation
             self.logger.info("Skipping saving executable, not in CI")
@@ -1306,4 +1337,5 @@ class RedpandaService(Service):
             self.logger.exception(
                 f"Error while compressing binary {binary} to {save_to}")
         else:
+            self._saved_executable = True
             self._context.log_collect['executable', self] = True

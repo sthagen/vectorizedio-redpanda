@@ -29,6 +29,8 @@
 #include "config/configuration.h"
 #include "config/endpoint_tls_config.h"
 #include "finjector/hbadger.h"
+#include "kafka/types.h"
+#include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/record.h"
@@ -544,6 +546,16 @@ ss::future<> admin_server::throw_on_error(
         case cluster::tx_errc::pid_not_found:
             throw ss::httpd::bad_request_exception(
               fmt_with_ctx(fmt::format, "Can not find pid for ntp:{}", ntp));
+        case cluster::tx_errc::partition_not_found: {
+            ss::sstring error_msg;
+            if (ntp == model::tx_manager_ntp) {
+                error_msg = fmt::format("Can not find ntp:{}", ntp);
+            } else {
+                error_msg = fmt::format(
+                  "Can not find partition({}) in transaction for delete", ntp);
+            }
+            throw ss::httpd::bad_request_exception(error_msg);
+        }
         default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected tx_error error: {}", ec.message()));
@@ -1672,6 +1684,91 @@ void admin_server::register_broker_routes() {
           co_await throw_on_error(*req, ec, model::controller_ntp, id);
           co_return ss::json::json_void();
       });
+
+    register_route<superuser>(
+      ss::httpd::broker_json::start_broker_maintenance,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          if (!_controller->get_feature_table().local().is_active(
+                cluster::feature::maintenance_mode)) {
+              throw ss::httpd::bad_request_exception(
+                "Maintenance mode feature not active (upgrade in progress?)");
+          }
+          model::node_id id = parse_broker_id(*req);
+          auto ec = co_await _controller->get_members_frontend()
+                      .local()
+                      .set_maintenance_mode(id, true);
+          co_await throw_on_error(*req, ec, model::controller_ntp, id);
+          co_return ss::json::json_void();
+      });
+
+    register_route<superuser>(
+      ss::httpd::broker_json::stop_broker_maintenance,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          if (!_controller->get_feature_table().local().is_active(
+                cluster::feature::maintenance_mode)) {
+              throw ss::httpd::bad_request_exception(
+                "Maintenance mode feature not active (upgrade in progress?)");
+          }
+          model::node_id id = parse_broker_id(*req);
+          auto ec = co_await _controller->get_members_frontend()
+                      .local()
+                      .set_maintenance_mode(id, false);
+          co_await throw_on_error(*req, ec, model::controller_ntp, id);
+          co_return ss::json::json_void();
+      });
+
+    /*
+     * Unlike start|stop_broker_maintenace, the xxx_local_maintenance versions
+     * below operate on local state only and could be used to force a node out
+     * of maintenance mode if needed. they don't require the feature flag
+     * because the feature is available locally.
+     */
+    register_route<superuser>(
+      ss::httpd::broker_json::start_local_maintenance,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          co_await _controller->get_drain_manager().invoke_on_all(
+            [](cluster::drain_manager& dm) { return dm.drain(); });
+          co_return ss::json::json_void();
+      });
+
+    register_route<superuser>(
+      ss::httpd::broker_json::stop_local_maintenance,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          co_await _controller->get_drain_manager().invoke_on_all(
+            [](cluster::drain_manager& dm) { return dm.restore(); });
+          co_return ss::json::json_void();
+      });
+
+    register_route<superuser>(
+      ss::httpd::broker_json::get_local_maintenance,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          auto status
+            = co_await _controller->get_drain_manager().local().status();
+          ss::httpd::broker_json::maintenance_status res;
+          res.draining = status.has_value();
+          if (status.has_value()) {
+              res.finished = status->finished;
+              res.errors = status->errors;
+              if (status->partitions.has_value()) {
+                  res.partitions = status->partitions.value();
+              }
+              if (status->eligible.has_value()) {
+                  res.eligible = status->eligible.value();
+              }
+              if (status->transferring.has_value()) {
+                  res.transferring = status->transferring.value();
+              }
+              if (status->failed.has_value()) {
+                  res.failed = status->failed.value();
+              }
+          }
+          co_return res;
+      });
 }
 
 // Helpers for partition routes
@@ -1706,30 +1803,35 @@ void admin_server::register_partition_routes() {
       ss::httpd::partition_json::get_partitions,
       [this](std::unique_ptr<ss::httpd::request>) {
           using summary = ss::httpd::partition_json::partition_summary;
-          auto get_summaries = [](auto& partition_manager, bool materialized) {
-              return partition_manager.map_reduce0(
-                [materialized](auto& pm) {
-                    std::vector<summary> partitions;
-                    partitions.reserve(pm.partitions().size());
-                    for (const auto& it : pm.partitions()) {
-                        summary p;
-                        p.ns = it.first.ns;
-                        p.topic = it.first.tp.topic;
-                        p.partition_id = it.first.tp.partition;
-                        p.core = ss::this_shard_id();
-                        p.materialized = materialized;
-                        partitions.push_back(std::move(p));
-                    }
-                    return partitions;
-                },
-                std::vector<summary>{},
-                [](std::vector<summary> acc, std::vector<summary> update) {
-                    acc.insert(acc.end(), update.begin(), update.end());
-                    return acc;
-                });
-          };
-          auto f1 = get_summaries(_partition_manager, false);
-          auto f2 = get_summaries(_cp_partition_manager, true);
+          auto get_summaries =
+            [](auto& partition_manager, bool materialized, auto get_leader) {
+                return partition_manager.map_reduce0(
+                  [materialized, get_leader](auto& pm) {
+                      std::vector<summary> partitions;
+                      partitions.reserve(pm.partitions().size());
+                      for (const auto& it : pm.partitions()) {
+                          summary p;
+                          p.ns = it.first.ns;
+                          p.topic = it.first.tp.topic;
+                          p.partition_id = it.first.tp.partition;
+                          p.core = ss::this_shard_id();
+                          p.materialized = materialized;
+                          p.leader = get_leader(it.second);
+                          partitions.push_back(std::move(p));
+                      }
+                      return partitions;
+                  },
+                  std::vector<summary>{},
+                  [](std::vector<summary> acc, std::vector<summary> update) {
+                      acc.insert(acc.end(), update.begin(), update.end());
+                      return acc;
+                  });
+            };
+          auto f1 = get_summaries(_partition_manager, false, [](const auto& p) {
+              return p->get_leader_id().value_or(model::node_id(-1))();
+          });
+          auto f2 = get_summaries(
+            _cp_partition_manager, true, [](const auto&) { return -1; });
           return ss::when_all_succeed(std::move(f1), std::move(f2))
             .then([](auto summaries) {
                 auto& [partitions, s2] = summaries;
@@ -2295,5 +2397,70 @@ void admin_server::register_transaction_routes() {
           }
 
           co_return ss::json::json_return_type(ans);
+      });
+
+    register_route<user>(
+      ss::httpd::transaction_json::delete_partition,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          if (need_redirect_to_leader(model::tx_manager_ntp, _metadata_cache)) {
+              throw co_await redirect_to_leader(*req, model::tx_manager_ntp);
+          }
+
+          auto transaction_id = req->param["transactional_id"];
+
+          auto namespace_from_req = req->get_query_param("namespace");
+          auto topic_from_req = req->get_query_param("topic");
+
+          auto partition_str = req->get_query_param("partition_id");
+          int64_t partition;
+          try {
+              partition = std::stoi(partition_str);
+          } catch (...) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Partition must be an integer: {}", partition_str));
+          }
+
+          if (partition < 0) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Invalid partition {}", partition));
+          }
+
+          auto etag_str = req->get_query_param("etag");
+          int64_t etag;
+          try {
+              etag = std::stoi(etag_str);
+          } catch (...) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Etag must be an integer: {}", etag_str));
+          }
+
+          if (etag < 0) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Invalid etag {}", etag));
+          }
+
+          model::ntp ntp(namespace_from_req, topic_from_req, partition);
+          cluster::tm_transaction::tx_partition partition_for_delete{
+            .ntp = ntp, .etag = model::term_id(etag)};
+          kafka::transactional_id tid(transaction_id);
+
+          auto& tx_frontend = _partition_manager.local().get_tx_frontend();
+          if (!tx_frontend.local_is_initialized()) {
+              throw ss::httpd::bad_request_exception(
+                "Transaction are disabled");
+          }
+
+          vlog(
+            logger.info,
+            "Delete partition(ntp: {}, etag: {}) from transaction({})",
+            ntp,
+            etag,
+            tid);
+
+          auto res = co_await tx_frontend.local().delete_partition_from_tx(
+            tid, partition_for_delete);
+          co_await throw_on_error(*req, res, ntp);
+          co_return ss::json::json_return_type(ss::json::json_void());
       });
 }

@@ -44,6 +44,8 @@ using revision_id = named_type<int64_t, struct revision_id_model_type>;
 using initial_revision_id
   = named_type<int64_t, struct initial_revision_id_model_type>;
 
+/// Rack id type
+using rack_id = named_type<ss::sstring, struct rack_id_model_type>;
 struct broker_properties {
     uint32_t cores;
     uint32_t available_memory_gb;
@@ -120,6 +122,11 @@ enum class violation_recovery_policy { crash = 0, best_effort };
  */
 enum class membership_state : int8_t { active, draining, removed };
 
+/*
+ * Broker maintenance mode
+ */
+enum class maintenance_state { active, inactive };
+
 std::ostream& operator<<(std::ostream&, membership_state);
 
 class broker {
@@ -128,7 +135,7 @@ public:
       node_id id,
       std::vector<broker_endpoint> kafka_advertised_listeners,
       net::unresolved_address rpc_address,
-      std::optional<ss::sstring> rack,
+      std::optional<rack_id> rack,
       broker_properties props) noexcept
       : _id(id)
       , _kafka_advertised_listeners(std::move(kafka_advertised_listeners))
@@ -140,7 +147,7 @@ public:
       node_id id,
       net::unresolved_address kafka_advertised_listener,
       net::unresolved_address rpc_address,
-      std::optional<ss::sstring> rack,
+      std::optional<rack_id> rack,
       broker_properties props) noexcept
       : broker(
         id,
@@ -159,10 +166,17 @@ public:
         return _kafka_advertised_listeners;
     }
     const net::unresolved_address& rpc_address() const { return _rpc_address; }
-    const std::optional<ss::sstring>& rack() const { return _rack; }
+    const std::optional<rack_id>& rack() const { return _rack; }
 
     membership_state get_membership_state() const { return _membership_state; }
     void set_membership_state(membership_state st) { _membership_state = st; }
+
+    maintenance_state get_maintenance_state() const {
+        return _maintenance_state;
+    }
+    void set_maintenance_state(maintenance_state st) {
+        _maintenance_state = st;
+    }
 
     bool operator==(const model::broker& other) const = default;
     bool operator<(const model::broker& other) const { return _id < other._id; }
@@ -171,10 +185,11 @@ private:
     node_id _id;
     std::vector<broker_endpoint> _kafka_advertised_listeners;
     net::unresolved_address _rpc_address;
-    std::optional<ss::sstring> _rack;
+    std::optional<rack_id> _rack;
     broker_properties _properties;
     // in memory state, not serialized
     membership_state _membership_state = membership_state::active;
+    maintenance_state _maintenance_state{maintenance_state::inactive};
 
     friend std::ostream& operator<<(std::ostream&, const broker&);
 };
@@ -332,7 +347,7 @@ struct broker_v0 {
     model::node_id id;
     net::unresolved_address kafka_address;
     net::unresolved_address rpc_address;
-    std::optional<ss::sstring> rack;
+    std::optional<rack_id> rack;
     model::broker_properties properties;
 
     model::broker to_v3() const {

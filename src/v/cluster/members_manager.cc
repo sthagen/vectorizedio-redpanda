@@ -11,6 +11,7 @@
 
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
+#include "cluster/drain_manager.h"
 #include "cluster/fwd.h"
 #include "cluster/logger.h"
 #include "cluster/members_table.h"
@@ -43,6 +44,7 @@ members_manager::members_manager(
   ss::sharded<rpc::connection_cache>& connections,
   ss::sharded<partition_allocator>& allocator,
   ss::sharded<storage::api>& storage,
+  ss::sharded<drain_manager>& drain_manager,
   ss::sharded<ss::abort_source>& as)
   : _seed_servers(config::node().seed_servers())
   , _self(make_self_broker(config::node()))
@@ -53,6 +55,7 @@ members_manager::members_manager(
   , _connection_cache(connections)
   , _allocator(allocator)
   , _storage(storage)
+  , _drain_manager(drain_manager)
   , _as(as)
   , _rpc_tls_config(config::node().rpc_server_tls())
   , _update_queue(max_updates_queue_size) {
@@ -94,7 +97,7 @@ ss::future<> members_manager::start() {
  * the controller leader will expect us to be listening for its raft messages,
  * and if we're not ready it'll back off and make joining take several seconds
  * longer than it should.
- * (ref https://github.com/vectorizedio/redpanda/issues/3030)
+ * (ref https://github.com/redpanda-data/redpanda/issues/3030)
  */
 ss::future<> members_manager::join_cluster() {
     if (is_already_member()) {
@@ -237,6 +240,23 @@ members_manager::apply_update(model::record_batch b) {
             .push_eventually(node_update{
               .id = cmd.key, .type = node_update_type::reallocation_finished})
             .then([] { return make_error_code(errc::success); });
+      },
+      [this, update_offset](maintenance_mode_cmd cmd) {
+          return dispatch_updates_to_cores(update_offset, cmd)
+            .then([this, cmd](std::error_code error) {
+                auto f = ss::now();
+                if (!error && cmd.key == _self.id()) {
+                    f = _drain_manager.invoke_on_all(
+                      [enabled = cmd.value](cluster::drain_manager& dm) {
+                          if (enabled) {
+                              return dm.drain();
+                          } else {
+                              return dm.restore();
+                          }
+                      });
+                }
+                return f.then([error] { return error; });
+            });
       });
 }
 ss::future<std::error_code>
