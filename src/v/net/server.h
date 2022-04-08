@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Vectorized, Inc.
+ * Copyright 2020 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -185,7 +185,7 @@ private:
     ss::metrics::metric_groups _metrics;
 
     std::optional<config_connection_rate_bindings> connection_rate_bindings;
-    std::optional<connection_rate> _connection_rates;
+    std::optional<connection_rate<>> _connection_rates;
 };
 
 } // namespace net

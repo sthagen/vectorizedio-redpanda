@@ -1,4 +1,4 @@
-// Copyright 2020 Vectorized, Inc.
+// Copyright 2020 Redpanda Data, Inc.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.md
@@ -50,7 +50,8 @@ static group get() {
       group_state::empty,
       conf,
       nullptr,
-      make_backward_compatible_serializer());
+      make_backward_compatible_serializer(),
+      enable_group_metrics::no);
 }
 
 static const std::vector<member_protocol> test_group_protos = {

@@ -1,4 +1,4 @@
-// Copyright 2021 Vectorized, Inc.
+// Copyright 2021 Redpanda Data, Inc.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.md
@@ -53,7 +53,9 @@ func exportConfig(
 		// Preface each property with a descriptive comment
 		var commentTokens []string
 
-		if meta.Example != "" {
+		if len(meta.EnumValues) > 0 {
+			commentTokens = append(commentTokens, fmt.Sprintf("one of %s", strings.Join(meta.EnumValues, ", ")))
+		} else if meta.Example != "" {
 			commentTokens = append(commentTokens, fmt.Sprintf("e.g. '%s'", meta.Example))
 		}
 

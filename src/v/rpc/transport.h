@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Vectorized, Inc.
+ * Copyright 2020 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -60,6 +60,8 @@ public:
     template<typename Input, typename Output>
     ss::future<result<client_context<Output>>>
       send_typed(Input, uint32_t, rpc::client_opts);
+
+    void reset_state() final;
 
 private:
     using sequence_t = named_type<uint64_t, struct sequence_tag>;

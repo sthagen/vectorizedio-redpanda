@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Vectorized, Inc.
+ * Copyright 2020 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -43,6 +43,10 @@
 #include <seastar/util/defer.hh>
 
 namespace po = boost::program_options; // NOLINT
+
+inline const auto redpanda_start_time{
+  std::chrono::duration_cast<std::chrono::milliseconds>(
+    std::chrono::system_clock::now().time_since_epoch())};
 
 class application {
 public:

@@ -1,4 +1,4 @@
-// Copyright 2020 Vectorized, Inc.
+// Copyright 2020 Redpanda Data, Inc.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.md
@@ -85,6 +85,12 @@ void server_probe::setup_metrics(
           [this] { return _requests_received - _requests_completed; },
           sm::description(ssx::sformat(
             "{}: Number of requests being processed by server", proto))),
+        sm::make_derive(
+          "connections_wait_rate",
+          [this] { return _connections_wait_rate; },
+          sm::description(ssx::sformat(
+            "{}: Number of connections are blocked by connection rate",
+            proto))),
       });
 }
 

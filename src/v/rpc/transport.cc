@@ -1,4 +1,4 @@
-// Copyright 2020 Vectorized, Inc.
+// Copyright 2020 Redpanda Data, Inc.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.md
@@ -79,12 +79,15 @@ ss::future<> transport::connect(clock_type::duration connection_timeout) {
     return connect(connection_timeout + rpc::clock_type::now());
 }
 
+void transport::reset_state() {
+    _correlation_idx = 0;
+    _last_seq = sequence_t{0};
+    _seq = sequence_t{0};
+}
+
 ss::future<>
 transport::connect(rpc::clock_type::time_point connection_timeout) {
     return base_transport::connect(connection_timeout).then([this] {
-        _correlation_idx = 0;
-        _last_seq = sequence_t{0};
-        _seq = sequence_t{0};
         // background
         ssx::spawn_with_gate(_dispatch_gate, [this] {
             return do_reads().then_wrapped([this](ss::future<> f) {

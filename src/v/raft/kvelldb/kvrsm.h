@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Vectorized, Inc.
+ * Copyright 2020 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -133,7 +133,9 @@ private:
     sequence_id _last_applied_seq;
     sequence_id _last_generated_seq;
     consensus* _c;
-    absl::flat_hash_map<sequence_id, expiring_promise<cmd_result>> _promises;
+    absl::
+      flat_hash_map<sequence_id, std::unique_ptr<expiring_promise<cmd_result>>>
+        _promises;
     absl::flat_hash_map<ss::sstring, kvrsm::record> kv_map;
 };
 
