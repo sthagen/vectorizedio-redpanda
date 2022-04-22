@@ -22,6 +22,7 @@ type Broker struct {
 	NodeID           int    `json:"node_id"`
 	NumCores         int    `json:"num_cores"`
 	MembershipStatus string `json:"membership_status"`
+	IsAlive          *bool  `json:"is_alive"`
 }
 
 // Brokers queries one of the client's hosts and returns the list of brokers.
@@ -48,6 +49,26 @@ func (a *AdminAPI) RecommissionBroker(node int) error {
 	return a.sendToLeader(
 		http.MethodPut,
 		fmt.Sprintf("%s/%d/recommission", brokersEndpoint, node),
+		nil,
+		nil,
+	)
+}
+
+// EnableMaintenanceMode enables maintenance mode for a node.
+func (a *AdminAPI) EnableMaintenanceMode(nodeId int) error {
+	return a.sendAny(
+		http.MethodPut,
+		fmt.Sprintf("%s/%d/maintenance", brokersEndpoint, nodeId),
+		nil,
+		nil,
+	)
+}
+
+// DisableMaintenanceMode disables maintenance mode for a node.
+func (a *AdminAPI) DisableMaintenanceMode(nodeId int) error {
+	return a.sendAny(
+		http.MethodDelete,
+		fmt.Sprintf("%s/%d/maintenance", brokersEndpoint, nodeId),
 		nil,
 		nil,
 	)

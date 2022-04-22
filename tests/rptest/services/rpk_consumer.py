@@ -28,7 +28,6 @@ class RpkConsumer(BackgroundThreadService):
                  ignore_errors=True,
                  retries=3,
                  group='',
-                 commit=False,
                  save_msgs=True,
                  fetch_max_bytes=None,
                  num_msgs=None):
@@ -40,7 +39,6 @@ class RpkConsumer(BackgroundThreadService):
         self._ignore_errors = ignore_errors
         self._retries = retries
         self._group = group
-        self._commit = commit
         self._stopping = threading.Event()
         self.done = False
         self.message_count = 0
@@ -92,7 +90,9 @@ class RpkConsumer(BackgroundThreadService):
                 raise
 
     def _consume(self, node):
-        cmd = '%s topic consume --offset %s --pretty-print=false --brokers %s %s' % (
+        # Important to use --read-committed, because otherwise the output parsing would have
+        # to somehow handle when rpk errors out on a rewind of the consumed offset
+        cmd = '%s topic consume --read-committed --offset %s --pretty-print=false --brokers %s %s' % (
             self._redpanda.find_binary('rpk'),
             self._offset,
             self._redpanda.brokers(),
@@ -109,9 +109,6 @@ class RpkConsumer(BackgroundThreadService):
 
         if self._partitions:
             cmd += ' -p %s' % ','.join([str(p) for p in self._partitions])
-
-        if self._commit:
-            cmd += ' --commit'
 
         if self._fetch_max_bytes is not None:
             cmd += f' --fetch-max-bytes={self._fetch_max_bytes}'

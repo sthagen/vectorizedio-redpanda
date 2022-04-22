@@ -788,7 +788,6 @@ void application::wire_up_redpanda_services() {
         construct_service(
           archival_scheduler,
           std::ref(cloud_storage_api),
-          std::ref(storage),
           std::ref(partition_manager),
           std::ref(controller->get_topics_state()),
           std::ref(arch_configs))
@@ -974,6 +973,8 @@ void application::wire_up_redpanda_services() {
             = config::shard_local_cfg().kafka_connections_max.bind(),
             .max_connections_per_ip
             = config::shard_local_cfg().kafka_connections_max_per_ip.bind(),
+            .max_connections_overrides
+            = config::shard_local_cfg().kafka_connections_max_overrides.bind(),
           };
       })
       .get();

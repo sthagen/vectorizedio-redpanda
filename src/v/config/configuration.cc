@@ -415,7 +415,7 @@ configuration::configuration()
       "enable_idempotence",
       "Enable idempotent producer",
       {.visibility = visibility::user},
-      false)
+      true)
   , enable_transactions(
       *this,
       "enable_transactions",
@@ -812,10 +812,20 @@ configuration::configuration()
   , kafka_connections_max_per_ip(
       *this,
       "kafka_connections_max_per_ip",
-      "Maximum number of Kafka client connections from each IP addreess, per "
+      "Maximum number of Kafka client connections from each IP address, per "
       "broker",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt)
+  , kafka_connections_max_overrides(
+      *this,
+      "kafka_connections_max_overrides",
+      "Per-IP overrides of kafka connection count limit, list of "
+      "<ip>:<count> strings",
+      {.needs_restart = needs_restart::no,
+       .example = R"(['127.0.0.1:90', '50.20.1.1:40'])",
+       .visibility = visibility::user},
+      {},
+      validate_connection_rate)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",
@@ -868,6 +878,20 @@ configuration::configuration()
       *this,
       "cloud_storage_reconciliation_interval_ms",
       "Interval at which the archival service runs reconciliation (ms)",
+      {.visibility = visibility::tunable},
+      1s)
+  , cloud_storage_upload_loop_initial_backoff_ms(
+      *this,
+      "cloud_storage_upload_loop_initial_backoff_ms",
+      "Initial backoff interval when there is nothing to upload for a "
+      "partition (ms)",
+      {.visibility = visibility::tunable},
+      100ms)
+  , cloud_storage_upload_loop_max_backoff_ms(
+      *this,
+      "cloud_storage_upload_loop_max_backoff_ms",
+      "Max backoff interval when there is nothing to upload for a "
+      "partition (ms)",
       {.visibility = visibility::tunable},
       10s)
   , cloud_storage_max_connections(

@@ -43,6 +43,7 @@
 #include "redpanda/admin/api-doc/broker.json.h"
 #include "redpanda/admin/api-doc/cluster_config.json.h"
 #include "redpanda/admin/api-doc/config.json.h"
+#include "redpanda/admin/api-doc/debug.json.h"
 #include "redpanda/admin/api-doc/features.json.h"
 #include "redpanda/admin/api-doc/hbadger.json.h"
 #include "redpanda/admin/api-doc/partition.json.h"
@@ -141,6 +142,8 @@ void admin_server::configure_admin_routes() {
     rb->register_api_file(_server._routes, "broker");
     rb->register_function(_server._routes, insert_comma);
     rb->register_api_file(_server._routes, "transaction");
+    rb->register_function(_server._routes, insert_comma);
+    rb->register_api_file(_server._routes, "debug");
 
     register_config_routes();
     register_cluster_config_routes();
@@ -153,6 +156,7 @@ void admin_server::configure_admin_routes() {
     register_partition_routes();
     register_hbadger_routes();
     register_transaction_routes();
+    register_debug_routes();
 }
 
 struct json_validator {
@@ -270,6 +274,11 @@ void admin_server::configure_metrics_route() {
 }
 
 ss::future<> admin_server::configure_listeners() {
+    // We will remember any endpoint that is listening
+    // on an external address and does not have mTLS,
+    // for emitting a warning later if user/pass auth is disabled.
+    std::optional<model::broker_endpoint> insecure_ep;
+
     for (auto& ep : _cfg.endpoints) {
         // look for credentials matching current endpoint
         auto tls_it = std::find_if(
@@ -278,6 +287,11 @@ ss::future<> admin_server::configure_listeners() {
           [&ep](const config::endpoint_tls_config& c) {
               return c.name == ep.name;
           });
+
+        const bool localhost = ep.address.host() == "127.0.0.1"
+                               || ep.address.host() == "localhost"
+                               || ep.address.host() == "localhost.localdomain"
+                               || ep.address.host() == "::1";
 
         ss::shared_ptr<ss::tls::server_credentials> cred;
         if (tls_it != _cfg.endpoints_tls.end()) {
@@ -291,11 +305,32 @@ ss::future<> admin_server::configure_listeners() {
                         logger, "API TLS", updated, eptr);
                   });
             }
+
+            if (!localhost && !tls_it->config.get_require_client_auth()) {
+                insecure_ep = ep;
+            }
+        } else {
+            if (!localhost) {
+                insecure_ep = ep;
+            }
         }
+
         auto resolved = co_await net::resolve_dns(ep.address);
         co_await ss::with_scheduling_group(_cfg.sg, [this, cred, resolved] {
             return _server.listen(resolved, cred);
         });
+    }
+
+    if (
+      insecure_ep.has_value()
+      && !config::shard_local_cfg().admin_api_require_auth()) {
+        auto& ep = insecure_ep.value();
+        vlog(
+          logger.warn,
+          "Insecure Admin API listener on {}:{}, consider enabling "
+          "`admin_api_require_auth`",
+          ep.address.host(),
+          ep.address.port());
     }
 }
 
@@ -303,9 +338,10 @@ void admin_server::log_request(
   const ss::httpd::request& req, const request_auth_result& auth_state) const {
     vlog(
       logger.debug,
-      "[{}] {}",
+      "[{}] {} {}",
       auth_state.get_username().size() > 0 ? auth_state.get_username()
                                            : "_anonymous",
+      req._method,
       req.get_url());
 }
 
@@ -1539,6 +1575,31 @@ model::node_id parse_broker_id(const ss::httpd::request& req) {
     }
 }
 
+static ss::httpd::broker_json::maintenance_status fill_maintenance_status(
+  const std::optional<cluster::drain_manager::drain_status>& status) {
+    ss::httpd::broker_json::maintenance_status ret;
+    if (status) {
+        const auto& s = status.value();
+        ret.draining = true;
+        ret.finished = s.finished;
+        ret.errors = s.errors;
+        ret.partitions = s.partitions.value_or(0);
+        ret.transferring = s.transferring.value_or(0);
+        ret.eligible = s.eligible.value_or(0);
+        ret.failed = s.failed.value_or(0);
+    } else {
+        ret.draining = false;
+        // ensure that the output json has all fields
+        ret.finished = false;
+        ret.errors = false;
+        ret.partitions = 0;
+        ret.transferring = 0;
+        ret.eligible = 0;
+        ret.failed = 0;
+    }
+    return ret;
+}
+
 void admin_server::register_broker_routes() {
     register_route<user>(
       ss::httpd::broker_json::get_cluster_view,
@@ -1647,6 +1708,12 @@ void admin_server::register_broker_routes() {
                       "{}", ns.membership_state);
                     b.is_alive = (bool)ns.is_alive;
 
+                    // ensure maintenance status is filled in even if it isn't
+                    // found in the report below. if it is found then this
+                    // filler/default value will be replaced.
+                    b.maintenance_status = fill_maintenance_status(
+                      std::nullopt);
+
                     auto r_it = std::find_if(
                       h_report.value().node_reports.begin(),
                       h_report.value().node_reports.end(),
@@ -1662,6 +1729,8 @@ void admin_server::register_broker_routes() {
                             dsi.total = ds.total;
                             b.disk_space.push(dsi);
                         }
+                        b.maintenance_status = fill_maintenance_status(
+                          r_it->drain_status);
                     }
                 }
 
@@ -1672,19 +1741,33 @@ void admin_server::register_broker_routes() {
 
     register_route<user>(
       ss::httpd::broker_json::get_broker,
-      [this](std::unique_ptr<ss::httpd::request> req) {
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
           model::node_id id = parse_broker_id(*req);
           auto broker = _metadata_cache.local().get_broker(id);
           if (!broker) {
               throw ss::httpd::not_found_exception(
                 fmt::format("broker with id: {} not found", id));
           }
+
+          auto maybe_drain_status = co_await _controller->get_health_monitor()
+                                      .local()
+                                      .get_node_drain_status(
+                                        id, model::time_from_now(5s));
+          if (maybe_drain_status.has_error()) {
+              co_await throw_on_error(
+                *req, maybe_drain_status.error(), model::controller_ntp, id);
+          }
+
           ss::httpd::broker_json::broker ret;
           ret.node_id = (*broker)->id();
           ret.num_cores = (*broker)->properties().cores;
           ret.membership_status = fmt::format(
             "{}", (*broker)->get_membership_state());
-          return ss::make_ready_future<ss::json::json_return_type>(ret);
+          ret.maintenance_status = fill_maintenance_status(
+            maybe_drain_status.value());
+
+          co_return ret;
       });
 
     register_route<superuser>(
@@ -2491,5 +2574,49 @@ void admin_server::register_transaction_routes() {
             tid, partition_for_delete);
           co_await throw_on_error(*req, res, ntp);
           co_return ss::json::json_return_type(ss::json::json_void());
+      });
+}
+
+void admin_server::register_debug_routes() {
+    register_route<user>(
+      ss::httpd::debug_json::reset_leaders_info,
+      [this](std::unique_ptr<ss::httpd::request>)
+        -> ss::future<ss::json::json_return_type> {
+          vlog(logger.info, "Request to reset leaders info");
+          co_await _metadata_cache.invoke_on_all(
+            [](auto& mc) { mc.reset_leaders(); });
+
+          co_return ss::json::json_void();
+      });
+
+    register_route<user>(
+      ss::httpd::debug_json::get_leaders_info,
+      [this](std::unique_ptr<ss::httpd::request>)
+        -> ss::future<ss::json::json_return_type> {
+          vlog(logger.info, "Request to get leaders info");
+          using result_t = ss::httpd::debug_json::leader_info;
+          std::vector<result_t> ans;
+
+          auto leaders_info = _metadata_cache.local().get_leaders();
+          ans.reserve(leaders_info.size());
+          for (const auto& leader_info : leaders_info) {
+              result_t info;
+              info.ns = leader_info.tp_ns.ns;
+              info.topic = leader_info.tp_ns.tp;
+              info.partition_id = leader_info.pid;
+              info.leader = leader_info.current_leader.has_value()
+                              ? leader_info.current_leader.value()
+                              : -1;
+              info.previous_leader = leader_info.previous_leader.has_value()
+                                       ? leader_info.previous_leader.value()
+                                       : -1;
+              info.last_stable_leader_term
+                = leader_info.last_stable_leader_term;
+              info.update_term = leader_info.update_term;
+              info.partition_revision = leader_info.partition_revision;
+              ans.push_back(std::move(info));
+          }
+
+          co_return ss::json::json_return_type(ans);
       });
 }

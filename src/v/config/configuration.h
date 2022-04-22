@@ -110,7 +110,7 @@ struct configuration final : public config_store {
     property<bool> enable_transactions;
     property<uint32_t> abort_index_segment_size;
     // same as log.retention.ms in kafka
-    property<std::chrono::milliseconds> delete_retention_ms;
+    retention_duration_property delete_retention_ms;
     property<std::chrono::milliseconds> log_compaction_interval_ms;
     // same as retention.size in kafka - TODO: size not implemented
     property<std::optional<size_t>> retention_bytes;
@@ -179,6 +179,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> members_backend_retry_ms;
     property<std::optional<uint32_t>> kafka_connections_max;
     property<std::optional<uint32_t>> kafka_connections_max_per_ip;
+    property<std::vector<ss::sstring>> kafka_connections_max_overrides;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
@@ -190,6 +191,10 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_bucket;
     property<std::optional<ss::sstring>> cloud_storage_api_endpoint;
     property<std::chrono::milliseconds> cloud_storage_reconciliation_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_upload_loop_initial_backoff_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_upload_loop_max_backoff_ms;
     property<int16_t> cloud_storage_max_connections;
     property<bool> cloud_storage_disable_tls;
     property<int16_t> cloud_storage_api_endpoint_port;

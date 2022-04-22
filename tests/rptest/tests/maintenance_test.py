@@ -14,7 +14,9 @@ from rptest.tests.redpanda_test import RedpandaTest
 from rptest.services.cluster import cluster
 from rptest.clients.types import TopicSpec
 from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST
+from rptest.clients.rpk import RpkTool, RpkException
 from ducktape.utils.util import wait_until
+from ducktape.mark import matrix
 import requests
 
 
@@ -25,6 +27,8 @@ class MaintenanceTest(RedpandaTest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.admin = Admin(self.redpanda)
+        self.rpk = RpkTool(self.redpanda)
+        self._use_rpk = True
 
     def _has_leadership_role(self, node):
         """
@@ -32,7 +36,12 @@ class MaintenanceTest(RedpandaTest):
         """
         id = self.redpanda.idx(node)
         partitions = self.admin.get_partitions(node=node)
-        return len(list(filter(lambda p: p["leader"] == id, partitions))) > 0
+        has_leadership = False
+        for p in partitions:
+            if p["leader"] == id:
+                self.logger.debug(f"{node.name} has leadership for {p}")
+                has_leadership = True
+        return has_leadership
 
     def _in_maintenance_mode(self, node):
         status = self.admin.maintenance_status(node)
@@ -42,6 +51,31 @@ class MaintenanceTest(RedpandaTest):
         status = self.admin.maintenance_status(node)
         return status["finished"] and not status["errors"] and \
                 status["partitions"] > 0
+
+    def _verify_broker_metadata(self, maintenance_enabled, node):
+        """
+        check if both brokers interfaces in the admin server return
+        the same status for maintenance mode. further, check if the
+        mode is returning that draining has been enabled/disabled
+        """
+        node_id = self.redpanda.idx(node)
+        broker_target = self.admin.get_broker(node_id)
+        broker_filtered = None
+        for broker in self.admin.get_brokers():
+            if broker['node_id'] == node_id:
+                broker_filtered = broker
+                break
+        # both apis should return the same info
+        if broker_filtered is None:
+            return False
+        status = broker_target['maintenance_status']
+        if status != broker_filtered['maintenance_status']:
+            return False
+        # check status wanted
+        if maintenance_enabled:
+            return status['draining'] and status['finished']
+        else:
+            return not status['draining']
 
     def _enable_maintenance(self, node):
         """
@@ -58,33 +92,50 @@ class MaintenanceTest(RedpandaTest):
         mode and all of the work associated with that has completed.
         """
         self.logger.debug(
-            "Checking that node {node.name} has a leadership role")
+            f"Checking that node {node.name} has a leadership role")
         wait_until(lambda: self._has_leadership_role(node),
                    timeout_sec=60,
                    backoff_sec=10)
 
         self.logger.debug(
-            "Checking that node {node.name} is not in maintenance mode")
+            f"Checking that node {node.name} is not in maintenance mode")
         status = self.admin.maintenance_status(node)
         assert status[
             "draining"] == False, f"Node {node.name} in maintenance mode"
 
-        self.admin.maintenance_start(node)
+        if self._use_rpk:
+            self.rpk.cluster_maintenance_enable(node)
+        else:
+            self.admin.maintenance_start(node)
 
         self.logger.debug(
-            "Waiting for node {node.name} to enter maintenance mode")
+            f"Waiting for node {node.name} to enter maintenance mode")
         wait_until(lambda: self._in_maintenance_mode(node),
                    timeout_sec=30,
                    backoff_sec=5)
 
-        self.logger.debug("Waiting for node {node.name} leadership to drain")
-        wait_until(lambda: not self._has_leadership_role(node),
+        def has_drained():
+            """
+            as we wait for leadership to drain, also print out maintenance mode
+            status. this is useful for debugging to detect if maintenance mode
+            has been lost or disabled for some unexpected reason.
+            """
+            status = self.admin.maintenance_status(node)
+            self.logger.debug(f"Maintenance status for {node.name}: {status}")
+            return not self._has_leadership_role(node),
+
+        self.logger.debug(f"Waiting for node {node.name} leadership to drain")
+        wait_until(has_drained, timeout_sec=60, backoff_sec=10)
+
+        self.logger.debug(
+            f"Waiting for node {node.name} maintenance mode to complete")
+        wait_until(lambda: self._in_maintenance_mode_fully(node),
                    timeout_sec=60,
                    backoff_sec=10)
 
-        self.logger.debug(
-            "Waiting for node {node.name} maintenance mode to complete")
-        wait_until(lambda: self._in_maintenance_mode_fully(node),
+        self.logger.debug("Verifying expected broker metadata reported "
+                          f"for enabled maintenance mode on node {node.name}")
+        wait_until(lambda: self._verify_broker_metadata(True, node),
                    timeout_sec=60,
                    backoff_sec=10)
 
@@ -97,6 +148,12 @@ class MaintenanceTest(RedpandaTest):
                    timeout_sec=120,
                    backoff_sec=10)
 
+        self.logger.debug("Verifying expected broker metadata reported "
+                          f"for disabled maintenance mode on node {node.name}")
+        wait_until(lambda: self._verify_broker_metadata(False, node),
+                   timeout_sec=60,
+                   backoff_sec=10)
+
     def _verify_cluster(self, target, target_expect):
         for node in self.redpanda.nodes:
             expect = False if node != target else target_expect
@@ -106,15 +163,25 @@ class MaintenanceTest(RedpandaTest):
                 backoff_sec=5,
                 err_msg=f"expected {node.name} maintenance mode: {expect}")
 
+    def _maintenance_disable(self, node):
+        if self._use_rpk:
+            self.rpk.cluster_maintenance_disable(node)
+        else:
+            self.admin.maintenance_stop(node)
+
     @cluster(num_nodes=3)
-    def test_maintenance(self):
+    @matrix(use_rpk=[True, False])
+    def test_maintenance(self, use_rpk):
+        self._use_rpk = use_rpk
         target = random.choice(self.redpanda.nodes)
         self._enable_maintenance(target)
-        self.admin.maintenance_stop(target)
+        self._maintenance_disable(target)
         self._disable_maintenance(target)
 
     @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    def test_maintenance_sticky(self):
+    @matrix(use_rpk=[True, False])
+    def test_maintenance_sticky(self, use_rpk):
+        self._use_rpk = use_rpk
         nodes = random.sample(self.redpanda.nodes, len(self.redpanda.nodes))
         for node in nodes:
             self._enable_maintenance(node)
@@ -123,7 +190,7 @@ class MaintenanceTest(RedpandaTest):
             self.redpanda.restart_nodes(node)
             self._verify_cluster(node, True)
 
-            self.admin.maintenance_stop(node)
+            self._maintenance_disable(node)
             self._disable_maintenance(node)
             self._verify_cluster(node, False)
 
@@ -131,13 +198,20 @@ class MaintenanceTest(RedpandaTest):
         self._verify_cluster(None, False)
 
     @cluster(num_nodes=3)
-    def test_exclusive_maintenance(self):
+    @matrix(use_rpk=[True, False])
+    def test_exclusive_maintenance(self, use_rpk):
+        self._use_rpk = use_rpk
         target, other = random.sample(self.redpanda.nodes, k=2)
         assert target is not other
         self._enable_maintenance(target)
         try:
             self._enable_maintenance(other)
+        except RpkException as e:
+            assert self._use_rpk
+            if "invalid state transition" in e.msg and "400" in e.msg:
+                return
         except requests.exceptions.HTTPError as e:
+            assert not self._use_rpk
             if "invalid state transition" in e.response.text and e.response.status_code == 400:
                 return
             raise

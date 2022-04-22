@@ -14,7 +14,7 @@ metadata:
 spec:
   containers:
   - name: redpanda
-    image: "vectorized/redpanda:v21.11.2"
+    image: "vectorized/redpanda:v21.11.12"
     volumeMounts:
     - mountPath: /etc/redpanda
       name: config-dir
@@ -36,7 +36,7 @@ metadata:
 spec:
   containers:
   - name: redpanda
-    image: "vectorized/redpanda:v21.11.2"
+    image: "vectorized/redpanda:v21.11.12"
     volumeMounts:
     - mountPath: /etc/redpanda
       name: config-dir
@@ -78,3 +78,12 @@ collectors:
 - type: pod
   selector: app.kubernetes.io/name=redpanda
   tail: -1
+
+---
+
+apiVersion: redpanda.vectorized.io/v1alpha1
+kind: Cluster
+metadata:
+  name: update-image-cluster-and-node-port
+status:
+  version: "v21.11.12"

@@ -186,7 +186,9 @@ class ResourceSettings:
             num_cpus = 3
 
         if memory_mb is None:
-            memory_mb = 6000
+            # Redpanda's default limit on memory per shard
+            # is 1GB
+            memory_mb = 3096
 
         self._num_cpus = num_cpus
         self._memory_mb = memory_mb
@@ -265,6 +267,7 @@ class RedpandaService(Service):
     NODE_CONFIG_FILE = "/etc/redpanda/redpanda.yaml"
     CLUSTER_BOOTSTRAP_CONFIG_FILE = "/etc/redpanda/.bootstrap.yaml"
     STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda.log")
+    BACKTRACE_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda_backtrace.log")
     WASM_STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT,
                                               "wasm_engine.log")
     COVERAGE_PROFRAW_CAPTURE = os.path.join(PERSISTENT_ROOT,
@@ -318,6 +321,10 @@ class RedpandaService(Service):
         "executable": {
             "path": EXECUTABLE_SAVE_PATH,
             "collect_default": False
+        },
+        "backtraces": {
+            "path": BACKTRACE_CAPTURE,
+            "collect_default": True
         }
     }
 
@@ -574,14 +581,33 @@ class RedpandaService(Service):
         if self.coproc_enabled():
             self.start_wasm_engine(node)
 
+        def is_status_ready():
+            status = None
+            try:
+                status = Admin.ready(node).get("status")
+            except requests.exceptions.ConnectionError:
+                self.logger.debug(
+                    f"node {node.name} not yet accepting connections")
+                return False
+            except:
+                self.logger.exception(
+                    f"error on getting status from {node.account.hostname}")
+                raise
+            if status != "ready":
+                self.logger.debug(
+                    f"status of {node.account.hostname} isn't ready: {status}")
+                return False
+            return True
+
         def start_rp():
             self.start_redpanda(node)
 
             wait_until(
-                lambda: Admin.ready(node).get("status") == "ready",
+                is_status_ready,
                 timeout_sec=timeout,
+                backoff_sec=1,
                 err_msg=
-                f"Redpanda service {node.account.hostname} failed to start",
+                f"Redpanda service {node.account.hostname} failed to start within {timeout} sec",
                 retry_on_exc=True)
 
         self.logger.debug(f"Node status prior to redpanda startup:")
@@ -778,9 +804,11 @@ class RedpandaService(Service):
                 f"Scanning node {node.account.hostname} log for errors...")
 
             for line in node.account.ssh_capture(
-                    f"grep -e ERROR -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE}"
+                    f"grep -e ERROR -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
             ):
                 line = line.strip()
+
+                assert "No such file or directory" not in line
 
                 allowed = False
                 for a in allow_list:
@@ -823,6 +851,33 @@ class RedpandaService(Service):
 
         if bad_lines:
             raise BadLogLines(bad_lines)
+
+    def decode_backtraces(self):
+        """
+        Decodes redpanda backtraces if any of them are present
+        :return: None
+        """
+
+        for node in self.nodes:
+            if not node.account.exists(RedpandaService.STDOUT_STDERR_CAPTURE):
+                # Log many not exist if node never started
+                continue
+
+            self.logger.info(
+                f"Decoding backtraces on {node.account.hostname}.")
+            cmd = '/opt/scripts/seastar-addr2line'
+            cmd += f" -e {self.find_raw_binary('redpanda')}"
+            cmd += f" -f {RedpandaService.STDOUT_STDERR_CAPTURE}"
+            cmd += f" > {RedpandaService.BACKTRACE_CAPTURE} 2>&1"
+            cmd += f" && find {RedpandaService.BACKTRACE_CAPTURE} -type f -size 0 -delete"
+
+            try:
+                node.account.ssh(cmd)
+            except:
+                # We run during teardown on failures, so if something
+                # goes wrong we must not raise, or we would usurp
+                # the original exception that caused the failure.
+                self.logger.exception("Failed to run seastar-addr2line")
 
     def find_wasm_root(self):
         rp_install_path_root = self._context.globals.get(

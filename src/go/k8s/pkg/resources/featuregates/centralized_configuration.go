@@ -19,7 +19,7 @@ const (
 // CentralizedConfiguration feature gate should be removed when the operator
 // will no longer support 21.x or older versions
 func CentralizedConfiguration(version string) bool {
-	if version == "dev" {
+	if version == devVersion {
 		// development version contains this feature
 		return true
 	}

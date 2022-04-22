@@ -7,7 +7,7 @@
 # https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
 
 from rptest.services.cluster import cluster
-from ducktape.mark import ignore
+from ducktape.utils.util import wait_until
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.archival.s3_client import S3Client
 from rptest.services.redpanda import RedpandaService
@@ -260,6 +260,11 @@ class BaseCase:
         """Return True if the nodes needs to be cleaned up before the test"""
         return False
 
+    @property
+    def verify_s3_content_after_produce(self):
+        """Return True if the test will produce any data that needs to be verified"""
+        return True
+
     def after_restart_validation(self):
         """Called after topic recovery and subsequent restart of the cluster.
         Is only invoked if 'second_restart_needed' is True.
@@ -289,10 +294,18 @@ class BaseCase:
                 data = self._s3.get_object_data(self._bucket, partition_uri)
                 obj = json.loads(data)
                 last_offset = obj['last_offset']
+                num_segments = len(obj['segments'])
                 self.logger.info(
-                    f"validating partition: {ntp}, rev: {rev}, last offset: {last_offset}, hw: {hw}"
-                )
-                assert abs(last_offset - hw) < 10, \
+                    f"validating partition: {ntp}, rev: {rev}, last offset: {last_offset}"
+                    f", num segments: {num_segments}, hw: {hw}")
+                # Explanation: high watermark is a kafka offset equal to the last offset in the log + 1.
+                # last_offset in the manifest is the last uploaded redpanda offset. Difference between
+                # kafka and redpanda offsets is equal to the number of non-data records. There will be
+                # min 1 non-data records (a configuration record) and max (1 + num_segments) records
+                # (archival metadata records for each segment). Unfortunately the number of archival metadata
+                # records is non-deterministic as they can end up in the last open segment which is not
+                # uploaded. After bringing everything together we have the following bounds:
+                assert hw <= last_offset and hw >= last_offset - num_segments, \
                     f"High watermark has unexpected value {hw}, last offset: {last_offset}"
 
     def _produce_and_verify(self, topic_spec):
@@ -402,6 +415,10 @@ class NoDataCase(BaseCase):
             # Verify that we don't have any data
             assert partition.high_watermark == 0
 
+    @property
+    def verify_s3_content_after_produce(self):
+        return False
+
 
 class MissingTopicManifest(BaseCase):
     """Check the case where the topic manifest doesn't exist.
@@ -463,6 +480,7 @@ class MissingPartition(BaseCase):
 
     def __init__(self, s3_client, kafka_tools, rpk_client, s3_bucket, logger):
         self._part1_offset = 0
+        self._part1_num_segments = 0
         super(MissingPartition, self).__init__(s3_client, kafka_tools,
                                                rpk_client, s3_bucket, logger)
 
@@ -480,23 +498,21 @@ class MissingPartition(BaseCase):
         bucket to make sure that the data is deleted from Minio (deletes are eventually
         consistent in Minio S3 implementation)."""
         manifest = None
-        last_offset = None
         for key in self._list_objects():
             if key.endswith("/manifest.json"):
                 attr = _parse_s3_manifest_path(key)
                 if attr.ntp.partition == 0:
                     manifest = key
                 else:
+                    assert attr.ntp.partition == 1
                     data = self._s3.get_object_data(self._bucket, key)
                     obj = json.loads(data)
-                    last_offset = obj['last_offset']
+                    self._part1_offset = obj['last_offset']
+                    self._part1_num_segments = len(obj['segments'])
         assert manifest is not None
-        assert last_offset is not None
-        assert last_offset != 0
-        self._part1_offset = last_offset
         self._delete(manifest)
         self.logger.info(
-            f"manifest {manifest} is removed, partition-1 expected offset is {last_offset}"
+            f"manifest {manifest} is removed, partition-1 last offset is {self._part1_offset}"
         )
 
     def restore_redpanda(self, baseline, controller_checksums):
@@ -519,9 +535,19 @@ class MissingPartition(BaseCase):
                 # the manifest
                 assert partition.high_watermark == 0
             elif partition.id == 1:
-                expected = self._part1_offset
-                assert partition.high_watermark == expected, \
-                    f"High watermark {partition.high_watermark} is not equal to last_offset {expected}"
+                # Explanation: high watermark is a kafka offset equal to the last offset in the log + 1.
+                # last_offset in the manifest is the last uploaded redpanda offset. Difference between
+                # kafka and redpanda offsets is equal to the number of non-data records. There will be
+                # min 1 non-data records (a configuration record) and max (1 + num_segments) records
+                # (archival metadata records for each segment). Unfortunately the number of archival metadata
+                # records is non-deterministic as they can end up in the last open segment which is not
+                # uploaded. After bringing everything together we have the following bounds:
+                min_expected_hwm = self._part1_offset - self._part1_num_segments
+                max_expected_hwm = self._part1_offset
+                assert partition.high_watermark >= min_expected_hwm \
+                    and partition.high_watermark <= max_expected_hwm, \
+                    f"Unexpected high watermark {partition.high_watermark} "\
+                    f"(min expected: {min_expected_hwm}, max expected: {max_expected_hwm})"
             else:
                 assert False, "Unexpected partition id"
 
@@ -1064,6 +1090,54 @@ class TopicRecoveryTest(RedpandaTest):
                 f"All data will be removed from node {node.account.hostname}")
             self.redpanda.remove_local_data(node)
 
+    def _wait_for_data_in_s3(self,
+                             expected_topics,
+                             timeout=datetime.timedelta(minutes=1)):
+        """Wait until all topics are uploaded to S3"""
+        def verify():
+            total_partitions = sum(
+                [t.partition_count for t in expected_topics])
+            manifests = []
+            topic_manifests = []
+            segments = []
+            lst = self.s3_client.list_objects(self.s3_bucket)
+            for obj in lst:
+                if obj.Key.endswith("/manifest.json"):
+                    manifests.append(obj)
+                elif obj.Key.endswith("/topic_manifest.json"):
+                    topic_manifests.append(obj)
+                else:
+                    segments.append(obj)
+            if len(expected_topics) != len(topic_manifests):
+                self.logger.info(
+                    f"can't find enough topic_manifest.json objects, expected: {len(expected_topicsi)}, actual: {len(topic_manifest)}"
+                )
+                return False
+            if total_partitions != len(manifests):
+                self.logger.info(
+                    f"can't find enough manifest.json objects, expected: {len(manifests)}, actual: {total_partitions}"
+                )
+                return False
+            size_on_disk = 0
+            for node, files in self._collect_file_checksums().items():
+                tmp_size = 0
+                for path, (_, size) in files.items():
+                    tmp_size += size
+                size_on_disk = max([tmp_size, size_on_disk])
+            size_in_cloud = 0
+            for obj in segments:
+                size_in_cloud += obj.ContentLength
+            max_delta = default_log_segment_size * 1.5 * total_partitions
+            if (size_on_disk - size_in_cloud) > max_delta:
+                self.logger.info(
+                    f"not enough data uploaded to S3, uploaded {size_in_cloud} bytes, with {size_on_disk} bytes on disk"
+                )
+                return False
+
+            return True
+
+        wait_until(verify, timeout_sec=timeout.total_seconds(), backoff_sec=1)
+
     def _wait_for_topic(self,
                         recovered_topics,
                         timeout=datetime.timedelta(minutes=1)):
@@ -1073,10 +1147,10 @@ class TopicRecoveryTest(RedpandaTest):
         elected.
         The method is time bound.
         """
-        deadline = datetime.datetime.now() + timeout
         expected_num_leaders = sum(
             [t.partition_count for t in recovered_topics])
-        while True:
+
+        def verify():
             num_leaders = 0
             try:
                 for topic in recovered_topics:
@@ -1088,12 +1162,10 @@ class TopicRecoveryTest(RedpandaTest):
                         if partition.leader in partition.replicas:
                             num_leaders += 1
             except:
-                pass
-            if num_leaders == expected_num_leaders:
-                break
-            ts = datetime.datetime.now()
-            assert ts < deadline
-            time.sleep(1)
+                return False
+            return num_leaders == expected_num_leaders
+
+        wait_until(verify, timeout_sec=timeout.total_seconds(), backoff_sec=1)
 
     def do_run(self, test_case: BaseCase):
         """Template method invoked by all tests."""
@@ -1117,6 +1189,9 @@ class TopicRecoveryTest(RedpandaTest):
 
         # Give time to finish all uploads
         time.sleep(10)
+        if test_case.verify_s3_content_after_produce:
+            self.logger.info("Wait for data in S3")
+            self._wait_for_data_in_s3(test_case.topics)
 
         self._stop_redpanda_nodes()
 

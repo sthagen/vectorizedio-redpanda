@@ -33,11 +33,12 @@ RUN git -C /opt clone --branch ducktape2 https://github.com/redpanda-data/kafka-
     cd /opt/kafka-streams-examples && mvn -DskipTests=true clean package
 
 # Install our in-tree Java test clientst
-COPY --chown=0:0 tests/java /tmp/java
-RUN mvn clean package --batch-mode --file /tmp/java/kafka-verifier --define buildDir=/opt/kafka-verifier/
-RUN mvn clean package --batch-mode --file /tmp/java/compacted-log-verifier --define buildDir=/opt/compacted-log-verifier
-RUN mvn clean package --batch-mode --file /tmp/java/tx-verifier --define buildDir=/opt/tx-verifier
-RUN mvn clean package --batch-mode --file /tmp/java/e2e-verifiers --define buildDir=/opt/e2e-verifiers
+RUN mkdir -p /opt/redpanda-tests
+COPY --chown=0:0 tests/java /opt/redpanda-tests/java
+RUN mvn clean package --batch-mode --file /opt/redpanda-tests/java/kafka-verifier --define buildDir=/opt/kafka-verifier/
+RUN mvn clean package --batch-mode --file /opt/redpanda-tests/java/compacted-log-verifier --define buildDir=/opt/compacted-log-verifier
+RUN mvn clean package --batch-mode --file /opt/redpanda-tests/java/tx-verifier --define buildDir=/opt/tx-verifier
+RUN mvn clean package --batch-mode --file /opt/redpanda-tests/java/e2e-verifiers --define buildDir=/opt/e2e-verifiers
 
 # - install distro-packaged depedencies
 # - allow user env variables in ssh sessions
@@ -62,6 +63,8 @@ RUN apt update && \
       nodejs \
       npm \
       openssh-server \
+      netcat \
+      sudo \
       python3-pip && \
     rm -rf /var/lib/apt/lists/* && \
     echo 'PermitUserEnvironment yes' >> /etc/ssh/sshd_config && \
@@ -81,6 +84,8 @@ RUN mkdir -p "/opt/kafka-2.3.1" && chmod a+rw /opt/kafka-2.3.1 && curl -s "$KAFK
     mkdir -p "/opt/kafka-2.4.1" && chmod a+rw /opt/kafka-2.4.1 && curl -s "$KAFKA_MIRROR/kafka_2.12-2.4.1.tgz" | tar xz --strip-components=1 -C "/opt/kafka-2.4.1" && \
     mkdir -p "/opt/kafka-2.5.0" && chmod a+rw /opt/kafka-2.5.0 && curl -s "$KAFKA_MIRROR/kafka_2.12-2.5.0.tgz" | tar xz --strip-components=1 -C "/opt/kafka-2.5.0" && \
     mkdir -p "/opt/kafka-2.7.0" && chmod a+rw /opt/kafka-2.7.0 && curl -s "$KAFKA_MIRROR/kafka_2.12-2.7.0.tgz" | tar xz --strip-components=1 -C "/opt/kafka-2.7.0" && \
+    mkdir -p "/opt/kafka-3.0.0" && chmod a+rw /opt/kafka-3.0.0 && curl -s "$KAFKA_MIRROR/kafka_2.12-3.0.0.tgz" | tar xz --strip-components=1 -C "/opt/kafka-3.0.0" && \
+    ln -s /opt/kafka-3.0.0 /opt/kafka-dev && \
     mkdir /opt/librdkafka && \
     curl -SL "https://github.com/edenhill/librdkafka/archive/v1.8.0.tar.gz" | tar -xz --strip-components=1 -C /opt/librdkafka && \
     cd /opt/librdkafka && \
@@ -107,8 +112,8 @@ RUN git -C /opt clone https://github.com/Shopify/sarama.git && \
     cd /opt/sarama/examples/sasl_scram_client && go mod tidy && go build
 
 # Install our in-tree go tests
-COPY --chown=0:0 tests/go /tmp/go
-RUN cd /tmp/go/sarama/produce_test && go mod tidy && go build
+COPY --chown=0:0 tests/go /opt/redpanda-tests/go
+RUN cd /opt/redpanda-tests/go/sarama/produce_test && go mod tidy && go build
 
 # Install franz-go
 RUN git -C /opt clone https://github.com/twmb/franz-go.git && cd /opt/franz-go && \
@@ -149,5 +154,16 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     cargo build --release && \
     cp target/release/client-swarm /usr/local/bin && \
     cd .. && rm -rf client-swarm && rm -rf /root/.cargo
+
+# Seastar addrress to line utility
+RUN apt update && \
+    apt install -y \
+      file && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/scripts && \
+    curl https://raw.githubusercontent.com/redpanda-data/seastar/2a9504b3238cba4150be59353bf8d0b3a01fe39c/scripts/addr2line.py -o /opt/scripts/addr2line.py && \
+    curl https://raw.githubusercontent.com/redpanda-data/seastar/2a9504b3238cba4150be59353bf8d0b3a01fe39c/scripts/seastar-addr2line -o /opt/scripts/seastar-addr2line && \
+    chmod +x /opt/scripts/seastar-addr2line
 
 CMD service ssh start && tail -f /dev/null
