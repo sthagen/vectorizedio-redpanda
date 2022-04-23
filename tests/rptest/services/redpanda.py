@@ -20,7 +20,7 @@ import threading
 import collections
 import re
 import uuid
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Union, Any
 
 import yaml
 from ducktape.services.service import Service
@@ -175,20 +175,24 @@ class ResourceSettings:
     Control CPU+memory footprint of Redpanda instances.  Pass one
     of these into your RedpandaTest constructor if you want to e.g.
     create low-memory situations.
+
+    This class also contains defaults for redpanda CPU and memory
+    sizing in tests.  If `dedicated_node` is true, even these limits
+    are ignored, and Redpanda is allowed to behave in its default
+    way of taking all the CPU and memory on the machine.  The
+    `dedicated_node` mode is appropriate when using e.g. whole EC2 instances
+    as test nodes.
     """
+
+    DEFAULT_NUM_CPUS = 3
+    DEFAULT_MEMORY_MB = 3096
+
     def __init__(self,
                  *,
                  num_cpus: Optional[int] = None,
                  memory_mb: Optional[int] = None,
                  bypass_fsync: Optional[bool] = None,
                  nfiles: Optional[int] = None):
-        if num_cpus is None:
-            num_cpus = 3
-
-        if memory_mb is None:
-            # Redpanda's default limit on memory per shard
-            # is 1GB
-            memory_mb = 3096
 
         self._num_cpus = num_cpus
         self._memory_mb = memory_mb
@@ -204,59 +208,118 @@ class ResourceSettings:
     def memory_mb(self):
         return self._memory_mb
 
-    @property
-    def num_cpus(self):
-        return self._num_cpus
-
-    def to_cli(self):
+    def to_cli(self, *, dedicated_node):
         """
+
+        Generate Redpanda CLI flags based on the settings passed in at construction
+        time.
+
         :return: 2 tuple of strings, first goes before the binary, second goes after it
         """
         preamble = f"ulimit -Sn {self._nfiles}; " if self._nfiles else ""
-        args = ("--kernel-page-cache=true "
-                "--overprovisioned "
-                "--reserve-memory 0M "
-                f"--memory {self._memory_mb}M "
-                f"--smp {self._num_cpus} "
-                f"--unsafe-bypass-fsync={'1' if self._bypass_fsync else '0'}")
-        return preamble, args
+
+        if self._num_cpus is None and not dedicated_node:
+            num_cpus = self.DEFAULT_NUM_CPUS
+        else:
+            num_cpus = self._num_cpus
+
+        if self._memory_mb is None and not dedicated_node:
+            # Redpanda's default limit on memory per shard
+            # is 1GB
+            memory_mb = self.DEFAULT_MEMORY_MB
+        else:
+            memory_mb = self._memory_mb
+
+        if self._bypass_fsync is None and not dedicated_node:
+            bypass_fsync = False
+        else:
+            bypass_fsync = self._bypass_fsync
+
+        args = []
+        if not dedicated_node:
+            args.extend([
+                "--kernel-page-cache=true", "--overprovisioned ",
+                "--reserve-memory=0M"
+            ])
+
+        if num_cpus is not None:
+            args.append(f"--smp={num_cpus}")
+        if memory_mb is not None:
+            args.append(f"--memory={memory_mb}M")
+        if bypass_fsync is not None:
+            args.append(
+                f"--unsafe-bypass-fsync={'1' if bypass_fsync else '0'}")
+
+        return preamble, " ".join(args)
 
 
 class SISettings:
     """
-    Settings for shadow indexing stuff
+    Settings for shadow indexing stuff.
+    The defaults are for use with the default minio docker container, these
+    settings are altered in RedpandaTest if running on AWS.
     """
-    def __init__(self,
-                 *,
-                 log_segment_size=16 * 1000000,
-                 cloud_storage_access_key="panda-user",
-                 cloud_storage_secret_key="panda-secret",
-                 cloud_storage_region="panda-region",
-                 cloud_storage_bucket=f"panda-bucket-{uuid.uuid1()}",
-                 cloud_storage_api_endpoint="minio-s3",
-                 cloud_storage_api_endpoint_port=9000,
-                 cloud_storage_cache_size=160 * 1000000):
+    def __init__(
+            self,
+            *,
+            log_segment_size: int = 16 * 1000000,
+            cloud_storage_access_key: str = 'panda-user',
+            cloud_storage_secret_key: str = 'panda-secret',
+            cloud_storage_region: str = 'panda-region',
+            cloud_storage_bucket: Optional[str] = None,
+            cloud_storage_api_endpoint: str = 'minio-s3',
+            cloud_storage_api_endpoint_port: int = 9000,
+            cloud_storage_cache_size: int = 160 * 1000000,
+            cloud_storage_enable_remote_read: bool = True,
+            cloud_storage_enable_remote_write: bool = True,
+            cloud_storage_reconciliation_interval_ms: Optional[int] = None,
+            cloud_storage_max_connections: Optional[int] = None,
+            cloud_storage_disable_tls: bool = True):
         self.log_segment_size = log_segment_size
         self.cloud_storage_access_key = cloud_storage_access_key
         self.cloud_storage_secret_key = cloud_storage_secret_key
         self.cloud_storage_region = cloud_storage_region
-        self.cloud_storage_bucket = cloud_storage_bucket
+        self.cloud_storage_bucket = f'panda-bucket-{uuid.uuid1()}' if cloud_storage_bucket is None else cloud_storage_bucket
         self.cloud_storage_api_endpoint = cloud_storage_api_endpoint
         self.cloud_storage_api_endpoint_port = cloud_storage_api_endpoint_port
         self.cloud_storage_cache_size = cloud_storage_cache_size
+        self.cloud_storage_enable_remote_read = cloud_storage_enable_remote_read
+        self.cloud_storage_enable_remote_write = cloud_storage_enable_remote_write
+        self.cloud_storage_reconciliation_interval_ms = cloud_storage_reconciliation_interval_ms
+        self.cloud_storage_max_connections = cloud_storage_max_connections
+        self.cloud_storage_disable_tls = cloud_storage_disable_tls
 
-    def update_rp_conf(self, conf):
+        self.endpoint_url = f'http://{self.cloud_storage_api_endpoint}:{self.cloud_storage_api_endpoint_port}'
+
+    # Call this to update the extra_rp_conf
+    def update_rp_conf(self, conf) -> dict[str, Any]:
         conf["log_segment_size"] = self.log_segment_size
         conf["cloud_storage_access_key"] = self.cloud_storage_access_key
         conf["cloud_storage_secret_key"] = self.cloud_storage_secret_key
         conf["cloud_storage_region"] = self.cloud_storage_region
         conf["cloud_storage_bucket"] = self.cloud_storage_bucket
-        conf["cloud_storage_api_endpoint"] = self.cloud_storage_api_endpoint
-        conf[
-            "cloud_storage_api_endpoint_port"] = self.cloud_storage_api_endpoint_port
-        conf["cloud_storage_cache_size"] = self.cloud_storage_cache_size
         conf["cloud_storage_enabled"] = True
-        conf['cloud_storage_disable_tls'] = True
+        conf["cloud_storage_cache_size"] = self.cloud_storage_cache_size
+        conf[
+            'cloud_storage_enable_remote_read'] = self.cloud_storage_enable_remote_read
+        conf[
+            'cloud_storage_enable_remote_write'] = self.cloud_storage_enable_remote_write
+
+        if self.endpoint_url is not None:
+            conf[
+                "cloud_storage_api_endpoint"] = self.cloud_storage_api_endpoint
+            conf[
+                "cloud_storage_api_endpoint_port"] = self.cloud_storage_api_endpoint_port
+
+        if self.cloud_storage_disable_tls:
+            conf['cloud_storage_disable_tls'] = self.cloud_storage_disable_tls
+
+        if self.cloud_storage_reconciliation_interval_ms:
+            conf[
+                'cloud_storage_reconciliation_interval_ms'] = self.cloud_storage_reconciliation_interval_ms
+        if self.cloud_storage_max_connections:
+            conf[
+                'cloud_storage_max_connections'] = self.cloud_storage_max_connections
 
         return conf
 
@@ -275,6 +338,10 @@ class RedpandaService(Service):
 
     CLUSTER_NAME = "my_cluster"
     READY_TIMEOUT_SEC = 10
+
+    DEDICATED_NODE_KEY = "dedicated_nodes"
+
+    RAISE_ON_ERRORS_KEY = "raise_on_errors"
 
     LOG_LEVEL_KEY = "redpanda_log_level"
     DEFAULT_LOG_LEVEL = "info"
@@ -362,9 +429,17 @@ class RedpandaService(Service):
         self._started = []
         self._security_config = dict()
 
+        self._raise_on_errors = self._context.globals.get(
+            self.RAISE_ON_ERRORS_KEY, True)
+
+        self._dedicated_nodes = self._context.globals.get(
+            self.DEDICATED_NODE_KEY, False)
+
         if resource_settings is None:
             resource_settings = ResourceSettings()
         self._resource_settings = resource_settings
+        self.logger.info(
+            f"ResourceSettings: dedicated_nodes={self._dedicated_nodes}")
 
         if si_settings is not None:
             self._extra_rp_conf = si_settings.update_rp_conf(
@@ -392,6 +467,35 @@ class RedpandaService(Service):
     def sasl_enabled(self):
         return self._extra_rp_conf and self._extra_rp_conf.get(
             "enable_sasl", False)
+
+    @property
+    def dedicated_nodes(self):
+        """
+        If true, the nodes are dedicated linux servers, e.g. EC2 instances.
+
+        If false, the nodes are containers that share CPUs and memory with
+        one another.
+        :return:
+        """
+        return self._dedicated_nodes
+
+    def get_node_memory_mb(self):
+        if self._resource_settings.memory_mb is not None:
+            self.logger.info(f"get_node_memory_mb: got from ResourceSettings")
+            return self._resource_settings.memory_mb
+        elif self._dedicated_nodes is False:
+            self.logger.info(
+                f"get_node_memory_mb: using ResourceSettings default")
+            return self._resource_settings.DEFAULT_MEMORY_MB
+        else:
+            self.logger.info(f"get_node_memory_mb: fetching from node")
+            # Assume nodes are symmetric, so we can just ask one
+            # how much memory it has.
+            node = self.nodes[0]
+            line = node.account.ssh_output("cat /proc/meminfo | grep MemTotal")
+            # Output line is like "MemTotal:       32552236 kB"
+            memory_kb = int(line.strip().split()[1])
+            return memory_kb / 1024
 
     def start(self, nodes=None, clean_nodes=True):
         """Start the service on all nodes."""
@@ -470,7 +574,8 @@ class RedpandaService(Service):
         return self._security_config
 
     def start_redpanda(self, node):
-        preamble, res_args = self._resource_settings.to_cli()
+        preamble, res_args = self._resource_settings.to_cli(
+            dedicated_node=self._dedicated_nodes)
 
         # Pass environment variables via FOO=BAR shell expressions
         env_preamble = " ".join(
@@ -684,12 +789,15 @@ class RedpandaService(Service):
             region=self._si_settings.cloud_storage_region,
             access_key=self._si_settings.cloud_storage_access_key,
             secret_key=self._si_settings.cloud_storage_secret_key,
-            endpoint=
-            f"http://{self._si_settings.cloud_storage_api_endpoint}:{self._si_settings.cloud_storage_api_endpoint_port}",
+            endpoint=self._si_settings.endpoint_url,
             logger=self.logger,
         )
 
         self._s3client.create_bucket(self._si_settings.cloud_storage_bucket)
+
+    def list_buckets(self) -> dict[str, Union[list, dict]]:
+        assert self._s3client is not None
+        return self._s3client.list_buckets()
 
     def delete_bucket_from_si(self):
         if self._s3client:
@@ -803,8 +911,9 @@ class RedpandaService(Service):
             self.logger.info(
                 f"Scanning node {node.account.hostname} log for errors...")
 
+            match_errors = "-e ERROR" if self._raise_on_errors else ""
             for line in node.account.ssh_capture(
-                    f"grep -e ERROR -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
+                    f"grep {match_errors} -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
             ):
                 line = line.strip()
 
