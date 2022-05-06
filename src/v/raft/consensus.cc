@@ -343,7 +343,7 @@ consensus::success_reply consensus::update_follower_index(
           reply.last_flushed_log_index);
         idx.last_dirty_log_index = reply.last_dirty_log_index;
         idx.last_flushed_log_index = reply.last_flushed_log_index;
-        idx.next_index = details::next_offset(idx.last_dirty_log_index);
+        idx.next_index = model::next_offset(idx.last_dirty_log_index);
     }
 
     if (reply.result == append_entries_reply::status::success) {
@@ -361,7 +361,7 @@ consensus::success_reply consensus::update_follower_index(
             // missing entries
             idx.last_dirty_log_index = reply.last_dirty_log_index;
             idx.last_flushed_log_index = reply.last_flushed_log_index;
-            idx.next_index = details::next_offset(idx.last_dirty_log_index);
+            idx.next_index = model::next_offset(idx.last_dirty_log_index);
             idx.last_sent_offset = model::offset{};
         }
         return success_reply::no;
@@ -453,7 +453,8 @@ void consensus::successfull_append_entries_reply(
     idx.last_dirty_log_index = reply.last_dirty_log_index;
     idx.last_flushed_log_index = reply.last_flushed_log_index;
     idx.match_index = idx.last_dirty_log_index;
-    idx.next_index = details::next_offset(idx.last_dirty_log_index);
+    idx.next_index = model::next_offset(idx.last_dirty_log_index);
+    idx.last_successful_received_seq = idx.last_received_seq;
     vlog(
       _ctxlog.trace,
       "Updated node {} match {} and next {} indices",
@@ -504,12 +505,8 @@ void consensus::dispatch_recovery(follower_index_metadata& idx) {
 
 ss::future<result<model::offset>> consensus::linearizable_barrier() {
     using ret_t = result<model::offset>;
-    struct state_snapshot {
-        model::offset linearizable_offset;
-        model::term_id term;
-    };
 
-    std::optional<ss::semaphore_units<>> u = co_await _op_lock.get_units();
+    ss::semaphore_units<> u = co_await _op_lock.get_units();
 
     if (_vstate != vote_state::leader) {
         co_return result<model::offset>(make_error_code(errc::not_leader));
@@ -558,10 +555,10 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
         send_futures.push_back(std::move(f));
     });
     // release semaphore
-    // snapshot taken under the semaphore
-    state_snapshot snapshot{
-      .linearizable_offset = _commit_index, .term = _term};
-    u.reset();
+    // term snapshot taken under the semaphore
+    auto term = _term;
+
+    u.return_all();
 
     // wait for responsens in background
     ssx::spawn_with_gate(_bg, [futures = std::move(send_futures)]() mutable {
@@ -574,7 +571,7 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
                 return true;
             }
             if (auto it = _fstats.find(id); it != _fstats.end()) {
-                return it->second.last_received_seq >= sequences[id];
+                return it->second.last_successful_received_seq >= sequences[id];
             }
             return false;
         });
@@ -583,18 +580,19 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     try {
         // we do not hold the lock while waiting
         co_await _follower_reply.wait(
-          [this, snapshot, &majority_sequences_updated] {
-              return majority_sequences_updated() || _term != snapshot.term;
+          [this, term, &majority_sequences_updated] {
+              return majority_sequences_updated() || _term != term;
           });
     } catch (const ss::broken_condition_variable& e) {
         co_return ret_t(make_error_code(errc::shutting_down));
     }
 
     // term have changed, not longer a leader
-    if (snapshot.term != _term) {
+    if (term != _term) {
         co_return ret_t(make_error_code(errc::not_leader));
     }
-    co_return ret_t(snapshot.linearizable_offset);
+    vlog(_ctxlog.trace, "Linearizable offset: {}", _commit_index);
+    co_return ret_t(_commit_index);
 }
 
 ss::future<result<replicate_result>> chain_stages(replicate_stages stages) {
@@ -710,7 +708,7 @@ ss::future<model::record_batch_reader> consensus::make_reader(
 
         return _consumable_offset_monitor
           .wait(
-            details::next_offset(_majority_replicated_index),
+            model::next_offset(_majority_replicated_index),
             *debounce_timeout,
             _as)
           .then([this, config]() mutable { return do_make_reader(config); });
@@ -1074,7 +1072,7 @@ ss::future<> consensus::do_start() {
                 _configuration_manager.get_highest_known_offset());
               return details::read_bootstrap_state(
                 _log,
-                details::next_offset(
+                model::next_offset(
                   _configuration_manager.get_highest_known_offset()),
                 _as);
           })
@@ -1109,7 +1107,7 @@ ss::future<> consensus::do_start() {
                 lstats.dirty_offset);
 
               auto f = _configuration_manager.truncate(
-                details::next_offset(lstats.dirty_offset));
+                model::next_offset(lstats.dirty_offset));
 
               /**
                * We read some batches from the log and have to update the
@@ -1625,7 +1623,7 @@ consensus::do_append_entries(append_entries_request&& r) {
             return ss::make_ready_future<append_entries_reply>(
               std::move(reply));
         }
-        auto truncate_at = details::next_offset(
+        auto truncate_at = model::next_offset(
           model::offset(r.meta.prev_log_index));
         vlog(
           _ctxlog.info,
@@ -1649,12 +1647,11 @@ consensus::do_append_entries(append_entries_request&& r) {
           })
           .then([this, truncate_at] {
               _last_quorum_replicated_index = std::min(
-                details::prev_offset(truncate_at),
-                _last_quorum_replicated_index);
+                model::prev_offset(truncate_at), _last_quorum_replicated_index);
               // update flushed offset since truncation may happen to already
               // flushed entries
               _flushed_offset = std::min(
-                details::prev_offset(truncate_at), _flushed_offset);
+                model::prev_offset(truncate_at), _flushed_offset);
 
               return _configuration_manager.truncate(truncate_at).then([this] {
                   _probe.configuration_update();
@@ -1744,7 +1741,7 @@ ss::future<> consensus::truncate_to_latest_snapshot() {
     // _last_snapshot_index and thus can still need offset translation info.
     return _log
       .truncate_prefix(storage::truncate_prefix_config(
-        details::next_offset(_last_snapshot_index), _scheduling.default_iopc))
+        model::next_offset(_last_snapshot_index), _scheduling.default_iopc))
       .then([this] {
           return _configuration_manager.prefix_truncate(_last_snapshot_index);
       })
@@ -1933,7 +1930,7 @@ ss::future<> consensus::write_snapshot(write_snapshot_cfg cfg) {
     // Release the lock when truncating the log because it can take some
     // time while we wait for readers to be evicted.
     co_await _log.truncate_prefix(storage::truncate_prefix_config(
-      details::next_offset(last_included_index), _scheduling.default_iopc));
+      model::next_offset(last_included_index), _scheduling.default_iopc));
 
     co_await _op_lock.with([this, last_included_index] {
         return _configuration_manager.prefix_truncate(last_included_index)
@@ -1979,7 +1976,7 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
       .cluster_time = clock_type::time_point::min(),
       .log_start_delta = offset_translator_delta(
         _offset_translator.state()->delta(
-          details::next_offset(last_included_index))),
+          model::next_offset(last_included_index))),
     };
 
     return details::persist_snapshot(
@@ -2075,7 +2072,11 @@ append_entries_reply consensus::make_append_entries_reply(
 }
 
 ss::future<> consensus::flush_log() {
+    if (!_has_pending_flushes) {
+        return ss::now();
+    }
     _probe.log_flushed();
+    _has_pending_flushes = false;
     auto flushed_up_to = _log.offsets().dirty_offset;
     return _log.flush().then([this, flushed_up_to] {
         auto lstats = _log.offsets();
@@ -2099,7 +2100,6 @@ ss::future<> consensus::flush_log() {
           _flushed_offset,
           lstats,
           _log);
-        _has_pending_flushes = false;
     });
 }
 

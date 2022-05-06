@@ -41,6 +41,7 @@
 #include "net/dns.h"
 #include "raft/types.h"
 #include "redpanda/admin/api-doc/broker.json.h"
+#include "redpanda/admin/api-doc/cluster.json.h"
 #include "redpanda/admin/api-doc/cluster_config.json.h"
 #include "redpanda/admin/api-doc/config.json.h"
 #include "redpanda/admin/api-doc/debug.json.h"
@@ -99,7 +100,6 @@ admin_server::admin_server(
 
 ss::future<> admin_server::start() {
     configure_metrics_route();
-    configure_dashboard();
     configure_admin_routes();
 
     co_await configure_listeners();
@@ -144,7 +144,8 @@ void admin_server::configure_admin_routes() {
     rb->register_api_file(_server._routes, "transaction");
     rb->register_function(_server._routes, insert_comma);
     rb->register_api_file(_server._routes, "debug");
-
+    rb->register_function(_server._routes, insert_comma);
+    rb->register_api_file(_server._routes, "cluster");
     register_config_routes();
     register_cluster_config_routes();
     register_raft_routes();
@@ -157,6 +158,7 @@ void admin_server::configure_admin_routes() {
     register_hbadger_routes();
     register_transaction_routes();
     register_debug_routes();
+    register_cluster_routes();
 }
 
 struct json_validator {
@@ -254,16 +256,6 @@ get_boolean_query_param(const ss::httpd::request& req, std::string_view name) {
     const ss::sstring& str_param = req.query_parameters.at(key);
     return ss::httpd::request::case_insensitive_cmp()(str_param, "true")
            || str_param == "1";
-}
-
-void admin_server::configure_dashboard() {
-    if (_cfg.dashboard_dir) {
-        auto handler = std::make_unique<dashboard_handler>(*_cfg.dashboard_dir);
-        _server._routes.add(
-          ss::httpd::operation_type::GET,
-          ss::httpd::url("/dashboard").remainder("path"),
-          handler.release());
-    }
 }
 
 void admin_server::configure_metrics_route() {
@@ -2618,5 +2610,39 @@ void admin_server::register_debug_routes() {
           }
 
           co_return ss::json::json_return_type(ans);
+      });
+}
+
+void admin_server::register_cluster_routes() {
+    register_route<publik>(
+      ss::httpd::cluster_json::get_cluster_health_overview,
+      [this](std::unique_ptr<ss::httpd::request>)
+        -> ss::future<ss::json::json_return_type> {
+          vlog(logger.debug, "Requested cluster status");
+          auto health_overview = co_await _controller->get_health_monitor()
+                                   .local()
+                                   .get_cluster_health_overview(
+                                     model::time_from_now(
+                                       std::chrono::seconds(5)));
+          ss::httpd::cluster_json::cluster_health_overview ret;
+          ret.is_healthy = health_overview.is_healthy;
+          ret.all_nodes._set = true;
+          ret.nodes_down._set = true;
+          ret.leaderless_partitions._set = true;
+
+          ret.all_nodes = health_overview.all_nodes;
+          ret.nodes_down = health_overview.nodes_down;
+
+          for (auto& ntp : health_overview.leaderless_partitions) {
+              ret.leaderless_partitions.push(fmt::format(
+                "{}/{}/{}", ntp.ns(), ntp.tp.topic(), ntp.tp.partition));
+          }
+          if (health_overview.controller_id) {
+              ret.controller_id = health_overview.controller_id.value();
+          } else {
+              ret.controller_id = -1;
+          }
+
+          co_return ss::json::json_return_type(ret);
       });
 }
