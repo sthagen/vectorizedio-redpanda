@@ -55,13 +55,13 @@ func newPrintCommand(fs afero.Fs) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&host, "host", "", "either an index into admin_api hosts to issue the request to, or a hostname")
+	cmd.Flags().StringVar(&host, "host", "", "either a hostname or an index into rpk.admin_api.addresses config section to select the hosts to issue the request to")
 	cobra.MarkFlagRequired(cmd.Flags(), "host")
 
 	return cmd
 }
 
-// rpk redpanda admin config log-level set
+// 'rpk redpanda admin config log-level set'.
 func newLogLevelCommand(fs afero.Fs) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "log-level",
@@ -170,7 +170,7 @@ failure of enabling each logger is individually printed.
 }
 
 // List of possible loggers to set; more can be added in the future.
-// To generate this list, run redpanda --help-loggers
+// To generate this list, run 'redpanda --help-loggers'.
 var possibleLoggers = []string{
 	"admin_api_server",
 	"archival",
