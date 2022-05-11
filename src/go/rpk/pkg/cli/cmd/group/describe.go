@@ -180,7 +180,10 @@ func printDescribedGroup(
 		headers = append(headers, "INSTANCE-ID")
 		orig := args
 		args = func(r *describeRow) []interface{} {
-			return append(orig(r), r.instanceID)
+			if r.instanceID != nil {
+				return append(orig(r), *r.instanceID)
+			}
+			return append(orig(r), "")
 		}
 	}
 
@@ -190,7 +193,6 @@ func printDescribedGroup(
 		args = func(r *describeRow) []interface{} {
 			return append(orig(r), r.clientID, r.host)
 		}
-
 	}
 
 	if useErr {

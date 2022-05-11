@@ -11,6 +11,7 @@ package resources_test
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"os"
 	"path/filepath"
@@ -83,15 +84,8 @@ func TestEnsure_StatefulSet(t *testing.T) {
 		"cluster.local",
 		"servicename",
 		types.NamespacedName{Name: "test", Namespace: "test"},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
-		types.NamespacedName{},
+		TestStatefulsetTLSVolumeProvider{},
+		TestAdminTLSConfigProvider{},
 		"",
 		res.ConfiguratorSettings{
 			ConfiguratorBaseImage: "vectorized/configurator",
@@ -156,12 +150,6 @@ func TestEnsure_ConfigMap(t *testing.T) {
 	data := actual.Data["redpanda.yaml"]
 	if !strings.Contains(data, "auto_create_topics_enabled: false") {
 		t.Fatalf("expecting configmap containing 'auto_create_topics_enabled: false' but got %v", data)
-	}
-	if !strings.Contains(data, "enable_idempotence: false") {
-		t.Fatalf("expecting configmap containing 'enable_idempotence: false' but got %v", data)
-	}
-	if !strings.Contains(data, "enable_transactions: false") {
-		t.Fatalf("expecting configmap containing 'enable_transactions: false' but got %v", data)
 	}
 
 	// calling ensure for second time to see the resource does not get updated
@@ -434,4 +422,21 @@ func TestEnsure_LoadbalancerService(t *testing.T) {
 		assert.Equal(t, corev1.ProtocolTCP, actual.Spec.Ports[0].Protocol)
 		assert.Equal(t, "kafka-external-bootstrap", actual.Spec.Ports[0].Name)
 	})
+}
+
+type TestStatefulsetTLSVolumeProvider struct{}
+
+func (TestStatefulsetTLSVolumeProvider) Volumes() (
+	[]corev1.Volume,
+	[]corev1.VolumeMount,
+) {
+	return []corev1.Volume{}, []corev1.VolumeMount{}
+}
+
+type TestAdminTLSConfigProvider struct{}
+
+func (TestAdminTLSConfigProvider) GetTLSConfig(
+	ctx context.Context, k8sClient client.Reader,
+) (*tls.Config, error) {
+	return nil, nil
 }

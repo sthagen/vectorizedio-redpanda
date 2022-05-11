@@ -69,7 +69,7 @@ func TestEnsure(t *testing.T) {
 	// Remove shadow-indexing-cache from the volume claim templates
 	stsWithoutSecondPersistentVolume.Spec.VolumeClaimTemplates = stsWithoutSecondPersistentVolume.Spec.VolumeClaimTemplates[:1]
 
-	var tests = []struct {
+	tests := []struct {
 		name           string
 		existingObject client.Object
 		pandaCluster   *redpandav1alpha1.Cluster
@@ -107,15 +107,8 @@ func TestEnsure(t *testing.T) {
 				"cluster.local",
 				"servicename",
 				types.NamespacedName{Name: "test", Namespace: "test"},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
-				types.NamespacedName{},
+				TestStatefulsetTLSVolumeProvider{},
+				TestAdminTLSConfigProvider{},
 				"",
 				res.ConfiguratorSettings{
 					ConfiguratorBaseImage: "vectorized/configurator",
@@ -303,9 +296,7 @@ func pandaCluster() *redpandav1alpha1.Cluster {
 }
 
 func TestVersion(t *testing.T) {
-	var (
-		redpandaContainerName = "redpanda"
-	)
+	redpandaContainerName := "redpanda"
 
 	tests := []struct {
 		Containers      []corev1.Container

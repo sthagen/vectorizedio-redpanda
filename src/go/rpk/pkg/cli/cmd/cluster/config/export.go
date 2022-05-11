@@ -35,6 +35,11 @@ func exportConfig(
 	sort.Strings(keys)
 
 	for _, name := range keys {
+		// We exclude cluster_id from exported config to avoid accidental
+		// duplication of the ID from one cluster to another
+		if name == "cluster_id" {
+			continue
+		}
 		meta := schema[name]
 		curValue := config[name]
 
@@ -92,7 +97,6 @@ func exportConfig(
 			default:
 				out.Die("Unexpected property value type: %s: %T", name, curValue)
 			}
-
 		} else {
 			scalarVal := ""
 			switch x := curValue.(type) {
@@ -115,7 +119,6 @@ func exportConfig(
 			} else {
 				fmt.Fprintf(&sb, "%s:\n", name)
 			}
-
 		}
 
 		_, err := file.Write([]byte(sb.String()))
@@ -181,7 +184,7 @@ to include all properties including these low level tunables.
 		"filename",
 		"f",
 		"",
-		"full path to file to export to, e.g. '/tmp/config.yml'",
+		"path to file to export to, e.g. './config.yml'",
 	)
 
 	return cmd
