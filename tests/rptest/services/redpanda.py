@@ -71,6 +71,9 @@ RESTART_LOG_ALLOW_LIST = [
     # cluster - rm_stm.cc:550 - Error "raft::errc:19" on replicating pid:{producer_identity: id=1, epoch=0} commit batch
     # raft::errc:19 is the shutdown error code, the transaction subsystem encounters this and logs at error level
     re.compile("Error \"raft::errc:19\" on replicating"),
+
+    # cluster - persisted_stm.cc:199 - sync error: wait_offset_committed failed with seastar::broken_condition_variable (Condition variable is broken); offsets: dirty=692, committed=689; ntp={kafka/topic7/0
+    re.compile("cluster - .*broken_condition_variable"),
 ]
 
 # Log errors that are expected in chaos-style tests that e.g.
@@ -80,6 +83,9 @@ CHAOS_LOG_ALLOW_LIST = [
     re.compile(
         "(raft|rpc) - .*(client_request_timeout|disconnected_endpoint|Broken pipe|Connection reset by peer)"
     ),
+
+    # cluster - persisted_stm.cc:199 - sync error: wait_offset_committed failed with seastar::broken_condition_variable (Condition variable is broken); offsets: dirty=692, committed=689; ntp={kafka/topic7/0
+    re.compile("cluster - .*broken_condition_variable"),
 
     # Torn disk writes
     re.compile("storage - Could not parse header"),
@@ -379,7 +385,7 @@ class RedpandaService(Service):
 
     DEDICATED_NODE_KEY = "dedicated_nodes"
 
-    RAISE_ON_ERRORS_KEY = "raise_on_errors"
+    RAISE_ON_ERRORS_KEY = "raise_on_error"
 
     LOG_LEVEL_KEY = "redpanda_log_level"
     DEFAULT_LOG_LEVEL = "info"
@@ -400,9 +406,6 @@ class RedpandaService(Service):
 
     CLUSTER_CONFIG_DEFAULTS = {
         'join_retry_timeout_ms': 200,
-
-        # For librdkafka
-        'auto_create_topics_enabled': True,
         'default_topic_partitions': 4,
         'enable_metrics_reporter': False,
         'superusers': [SUPERUSER_CREDENTIALS[0]],
@@ -1128,7 +1131,9 @@ class RedpandaService(Service):
         wait_until(
             lambda: len(self.pids(node)) == 0,
             timeout_sec=timeout,
-            err_msg=f"Redpanda node failed to stop in {timeout} seconds")
+            err_msg=
+            f"Redpanda node {node.account.hostname} failed to stop in {timeout} seconds"
+        )
         self.remove_from_started_nodes(node)
 
     def remove_from_started_nodes(self, node):
