@@ -380,8 +380,8 @@ class RedpandaService(Service):
     COVERAGE_PROFRAW_CAPTURE = os.path.join(PERSISTENT_ROOT,
                                             "redpanda.profraw")
 
-    CLUSTER_NAME = "my_cluster"
-    READY_TIMEOUT_SEC = 10
+    DEFAULT_NODE_READY_TIMEOUT_SEC = 20
+    WASM_READY_TIMEOUT_SEC = 10
 
     DEDICATED_NODE_KEY = "dedicated_nodes"
 
@@ -409,8 +409,7 @@ class RedpandaService(Service):
         'default_topic_partitions': 4,
         'enable_metrics_reporter': False,
         'superusers': [SUPERUSER_CREDENTIALS[0]],
-        'enable_auto_rebalance_on_node_add': True,
-        'cluster_id': CLUSTER_NAME
+        'enable_auto_rebalance_on_node_add': True
     }
 
     logs = {
@@ -449,7 +448,8 @@ class RedpandaService(Service):
                  si_settings=None,
                  log_level: Optional[str] = None,
                  environment: Optional[dict[str, str]] = None,
-                 security: SecurityConfig = SecurityConfig()):
+                 security: SecurityConfig = SecurityConfig(),
+                 node_ready_timeout_s=None):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._enable_rp = enable_rp
@@ -457,6 +457,10 @@ class RedpandaService(Service):
         self._enable_pp = enable_pp
         self._enable_sr = enable_sr
         self._security = security
+
+        if node_ready_timeout_s is None:
+            node_ready_timeout_s = RedpandaService.DEFAULT_NODE_READY_TIMEOUT_SEC
+        self.node_ready_timeout_s = node_ready_timeout_s
 
         self._extra_node_conf = {}
         for node in self.nodes:
@@ -779,7 +783,7 @@ class RedpandaService(Service):
             self.write_node_conf_file(node, override_cfg_params)
 
         if timeout is None:
-            timeout = self.READY_TIMEOUT_SEC
+            timeout = self.node_ready_timeout_s
 
         if self.coproc_enabled():
             self.start_wasm_engine(node)
@@ -874,9 +878,9 @@ class RedpandaService(Service):
             self.logger.warn(f"Waiting for {wasm_port} to be available")
             wait_until(
                 lambda: not wasm_service_up(),
-                timeout_sec=RedpandaService.READY_TIMEOUT_SEC,
+                timeout_sec=RedpandaService.WASM_READY_TIMEOUT_SEC,
                 err_msg=
-                f"Wasm engine server shutdown within {RedpandaService.READY_TIMEOUT_SEC}s timeout",
+                f"Wasm engine server shutdown within {RedpandaService.WASM_READY_TIMEOUT_SEC}s timeout",
                 retry_on_exc=True)
 
         def start_wasm_service():
@@ -884,9 +888,9 @@ class RedpandaService(Service):
 
             wait_until(
                 wasm_service_up,
-                timeout_sec=RedpandaService.READY_TIMEOUT_SEC,
+                timeout_sec=RedpandaService.WASM_READY_TIMEOUT_SEC,
                 err_msg=
-                f"Wasm engine server startup within {RedpandaService.READY_TIMEOUT_SEC}s timeout",
+                f"Wasm engine server startup within {RedpandaService.WASM_READY_TIMEOUT_SEC}s timeout",
                 retry_on_exc=True)
 
         self.logger.debug(f"Node status prior to wasm_engine startup:")
@@ -935,11 +939,15 @@ class RedpandaService(Service):
         """
         patch_result = self._admin.patch_cluster_config(upsert=values)
         new_version = patch_result['config_version']
+
+        # The version check is >= to permit other config writes to happen in
+        # the background, including the write to cluster_id that happens
+        # early in the cluster's lifetime
         wait_until(
-            lambda: set([
-                n['config_version']
+            lambda: all([
+                n['config_version'] >= new_version
                 for n in self._admin.get_cluster_config_status()
-            ]) == {new_version},
+            ]),
             timeout_sec=10,
             backoff_sec=0.5,
             err_msg=f"Config status versions did not converge on {new_version}"
@@ -1028,8 +1036,6 @@ class RedpandaService(Service):
                     f"grep {match_errors} -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
             ):
                 line = line.strip()
-
-                assert "No such file or directory" not in line
 
                 allowed = False
                 for a in allow_list:
