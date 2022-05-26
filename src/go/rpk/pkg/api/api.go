@@ -70,20 +70,19 @@ type metricsBody struct {
 }
 
 type environmentBody struct {
-	Payload      EnvironmentPayload     `json:"payload"`
-	Config       map[string]interface{} `json:"config"`
-	SentAt       time.Time              `json:"sentAt"`
-	NodeUUID     string                 `json:"nodeUuid"`
-	Organization string                 `json:"organization"`
-	ClusterID    string                 `json:"clusterId"`
-	NodeID       int                    `json:"nodeId"`
-	CloudVendor  string                 `json:"cloudVendor"`
-	VMType       string                 `json:"vmType"`
-	OSInfo       string                 `json:"osInfo"`
-	CPUModel     string                 `json:"cpuModel"`
-	CPUCores     int                    `json:"cpuCores"`
-	RPVersion    string                 `json:"rpVersion"`
-	Environment  string                 `json:"environment"`
+	Payload      EnvironmentPayload `json:"payload"`
+	SentAt       time.Time          `json:"sentAt"`
+	NodeUUID     string             `json:"nodeUuid"`
+	Organization string             `json:"organization"`
+	ClusterID    string             `json:"clusterId"`
+	NodeID       int                `json:"nodeId"`
+	CloudVendor  string             `json:"cloudVendor"`
+	VMType       string             `json:"vmType"`
+	OSInfo       string             `json:"osInfo"`
+	CPUModel     string             `json:"cpuModel"`
+	CPUCores     int                `json:"cpuCores"`
+	RPVersion    string             `json:"rpVersion"`
+	Environment  string             `json:"environment"`
 }
 
 func SendMetrics(p MetricsPayload, conf config.Config) error {
@@ -102,14 +101,8 @@ func SendEnvironment(
 	fs afero.Fs,
 	env EnvironmentPayload,
 	conf config.Config,
-	confJSON string,
 	skipCloudCheck bool,
 ) error {
-	confMap := map[string]interface{}{}
-	err := json.Unmarshal([]byte(confJSON), &confMap)
-	if err != nil {
-		return err
-	}
 	cloudVendor := na
 	vmType := na
 	if !skipCloudCheck {
@@ -146,7 +139,6 @@ func SendEnvironment(
 
 	b := environmentBody{
 		Payload:      env,
-		Config:       confMap,
 		SentAt:       time.Now(),
 		NodeUUID:     conf.NodeUUID,
 		Organization: conf.Organization,
@@ -180,7 +172,7 @@ func sendMetricsToURL(b metricsBody, url string, conf config.Config) error {
 	if err != nil {
 		return err
 	}
-	return sendRequest(bs, http.MethodPost, url, conf)
+	return sendRequest(bs, url, conf)
 }
 
 func sendEnvironmentToURL(
@@ -191,10 +183,10 @@ func sendEnvironmentToURL(
 	if err != nil {
 		return err
 	}
-	return sendRequest(bs, http.MethodPost, url, conf)
+	return sendRequest(bs, url, conf)
 }
 
-func sendRequest(body []byte, method, url string, conf config.Config) error {
+func sendRequest(body []byte, url string, conf config.Config) error {
 	if !conf.Rpk.EnableUsageStats {
 		log.Debug("Sending usage stats is disabled.")
 		return nil
@@ -208,7 +200,6 @@ func sendRequest(body []byte, method, url string, conf config.Config) error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("%s '%s' body='%s'", method, url, body)
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
