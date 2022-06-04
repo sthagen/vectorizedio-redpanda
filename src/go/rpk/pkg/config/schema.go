@@ -18,7 +18,8 @@ import (
 )
 
 type Config struct {
-	file *Config
+	file       *Config
+	loadedPath string
 
 	NodeUUID             string          `yaml:"node_uuid,omitempty" mapstructure:"node_uuid,omitempty" json:"nodeUuid"`
 	Organization         string          `yaml:"organization,omitempty" mapstructure:"organization,omitempty" json:"organization"`
@@ -95,8 +96,9 @@ type SocketAddress struct {
 }
 
 type NamedSocketAddress struct {
-	SocketAddress `yaml:",inline" mapstructure:",squash"`
-	Name          string `yaml:"name,omitempty" mapstructure:"name,omitempty" json:"name,omitempty"`
+	Address string `yaml:"address" mapstructure:"address" json:"address"`
+	Port    int    `yaml:"port" mapstructure:"port" json:"port"`
+	Name    string `yaml:"name,omitempty" mapstructure:"name,omitempty" json:"name,omitempty"`
 }
 
 type TLS struct {
