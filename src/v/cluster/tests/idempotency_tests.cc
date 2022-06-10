@@ -42,7 +42,7 @@ FIXTURE_TEST(
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -53,7 +53,7 @@ FIXTURE_TEST(
       .producer_id = -1,
       .base_sequence = 0});
     auto bid1 = model::batch_identity{
-      .pid = model::producer_identity{.id = -1, .epoch = 0},
+      .pid = model::producer_identity{-1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
     auto r1 = stm
@@ -71,7 +71,7 @@ FIXTURE_TEST(
       .producer_id = -1,
       .base_sequence = 0});
     auto bid2 = model::batch_identity{
-      .pid = model::producer_identity{.id = -1, .epoch = 0},
+      .pid = model::producer_identity{-1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
     auto r2 = stm
@@ -94,7 +94,7 @@ FIXTURE_TEST(
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -105,7 +105,7 @@ FIXTURE_TEST(
       .producer_id = 1,
       .base_sequence = 0});
     auto bid1 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
     auto r1 = stm
@@ -123,7 +123,7 @@ FIXTURE_TEST(
       .producer_id = 1,
       .base_sequence = count});
     auto bid2 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = count,
       .last_seq = count + (count - 1)};
     auto r2 = stm
@@ -147,7 +147,7 @@ FIXTURE_TEST(test_rm_stm_caches_last_5_offsets, mux_state_machine_fixture) {
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     std::vector<model::offset> offsets;
@@ -162,7 +162,7 @@ FIXTURE_TEST(test_rm_stm_caches_last_5_offsets, mux_state_machine_fixture) {
           .producer_id = 1,
           .base_sequence = i * count});
         auto bid = model::batch_identity{
-          .pid = model::producer_identity{.id = 1, .epoch = 0},
+          .pid = model::producer_identity{1, 0},
           .first_seq = i * count,
           .last_seq = i * count + (count - 1)};
         auto r1 = stm
@@ -187,7 +187,7 @@ FIXTURE_TEST(test_rm_stm_caches_last_5_offsets, mux_state_machine_fixture) {
           .producer_id = 1,
           .base_sequence = i * count});
         auto bid = model::batch_identity{
-          .pid = model::producer_identity{.id = 1, .epoch = 0},
+          .pid = model::producer_identity{1, 0},
           .first_seq = i * count,
           .last_seq = i * count + (count - 1)};
         auto r1 = stm
@@ -212,7 +212,7 @@ FIXTURE_TEST(test_rm_stm_doesnt_cache_6th_offset, mux_state_machine_fixture) {
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -225,7 +225,7 @@ FIXTURE_TEST(test_rm_stm_doesnt_cache_6th_offset, mux_state_machine_fixture) {
           .producer_id = 1,
           .base_sequence = i * count});
         auto bid = model::batch_identity{
-          .pid = model::producer_identity{.id = 1, .epoch = 0},
+          .pid = model::producer_identity{1, 0},
           .first_seq = i * count,
           .last_seq = i * count + (count - 1)};
         auto r1 = stm
@@ -246,7 +246,7 @@ FIXTURE_TEST(test_rm_stm_doesnt_cache_6th_offset, mux_state_machine_fixture) {
           .producer_id = 1,
           .base_sequence = 0});
         auto bid = model::batch_identity{
-          .pid = model::producer_identity{.id = 1, .epoch = 0},
+          .pid = model::producer_identity{1, 0},
           .first_seq = 0,
           .last_seq = count - 1};
         auto r1 = stm
@@ -272,7 +272,7 @@ FIXTURE_TEST(test_rm_stm_prevents_gaps, mux_state_machine_fixture) {
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -283,7 +283,7 @@ FIXTURE_TEST(test_rm_stm_prevents_gaps, mux_state_machine_fixture) {
       .producer_id = 1,
       .base_sequence = 0});
     auto bid1 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
     auto r1 = stm
@@ -301,7 +301,7 @@ FIXTURE_TEST(test_rm_stm_prevents_gaps, mux_state_machine_fixture) {
       .producer_id = 1,
       .base_sequence = count + 1});
     auto bid2 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = count + 1,
       .last_seq = count + 1 + (count - 1)};
     auto r2 = stm
@@ -325,7 +325,7 @@ FIXTURE_TEST(
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -337,7 +337,7 @@ FIXTURE_TEST(
       .base_sequence = 1});
 
     auto bid = model::batch_identity{
-      .pid = model::producer_identity{.id = 0, .epoch = 0},
+      .pid = model::producer_identity{0, 0},
       .first_seq = 1,
       .last_seq = 1 + (count - 1)};
 
@@ -361,7 +361,7 @@ FIXTURE_TEST(test_rm_stm_passes_immediate_retry, mux_state_machine_fixture) {
     stm.start().get0();
     auto stop = ss::defer([&stm] { stm.stop().get0(); });
 
-    wait_for_leader();
+    wait_for_confirmed_leader();
     wait_for_meta_initialized();
 
     auto count = 5;
@@ -372,7 +372,7 @@ FIXTURE_TEST(test_rm_stm_passes_immediate_retry, mux_state_machine_fixture) {
       .producer_id = 1,
       .base_sequence = 0});
     auto bid1 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
 
@@ -386,7 +386,7 @@ FIXTURE_TEST(test_rm_stm_passes_immediate_retry, mux_state_machine_fixture) {
       .producer_id = 1,
       .base_sequence = 0});
     auto bid2 = model::batch_identity{
-      .pid = model::producer_identity{.id = 1, .epoch = 0},
+      .pid = model::producer_identity{1, 0},
       .first_seq = 0,
       .last_seq = count - 1};
 
