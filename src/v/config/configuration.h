@@ -58,6 +58,8 @@ struct configuration final : public config_store {
     // Controller
     bounded_property<std::optional<std::size_t>> topic_memory_per_partition;
     bounded_property<std::optional<int32_t>> topic_fds_per_partition;
+    bounded_property<uint32_t> topic_partitions_per_shard;
+    bounded_property<uint32_t> topic_partitions_reserve_shard0;
 
     // Admin API
     property<bool> admin_api_require_auth;
@@ -135,7 +137,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> recovery_append_timeout_ms;
     property<size_t> raft_replicate_batch_window_size;
     property<size_t> raft_learner_recovery_rate;
-    property<uint32_t> raft_smp_max_non_local_requests;
+    property<std::optional<uint32_t>> raft_smp_max_non_local_requests;
     property<uint32_t> raft_max_concurrent_append_requests_per_follower;
 
     property<size_t> reclaim_min_size;
@@ -180,6 +182,8 @@ struct configuration final : public config_store {
     property<std::optional<uint32_t>> kafka_connections_max;
     property<std::optional<uint32_t>> kafka_connections_max_per_ip;
     property<std::vector<ss::sstring>> kafka_connections_max_overrides;
+    bounded_property<std::optional<int>> kafka_rpc_server_tcp_recv_buf;
+    bounded_property<std::optional<int>> kafka_rpc_server_tcp_send_buf;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
