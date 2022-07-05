@@ -57,6 +57,7 @@ v_cc_library(
     partition_leaders_table.cc
     topics_frontend.cc
     controller_backend.cc
+    controller_probe.cc
     controller.cc
     partition.cc
     partition_probe.cc
@@ -93,6 +94,7 @@ v_cc_library(
     feature_table.cc
     drain_manager.cc
     read_replica_manager.cc
+    partition_balancer_planner.cc
   DEPS
     Seastar::seastar
     controller_rpc

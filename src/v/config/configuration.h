@@ -82,6 +82,7 @@ struct configuration final : public config_store {
     bounded_property<uint32_t> target_quota_byte_rate;
     property<std::optional<ss::sstring>> cluster_id;
     property<bool> disable_metrics;
+    property<bool> disable_public_metrics;
     property<bool> aggregate_metrics;
     property<std::chrono::milliseconds> group_min_session_timeout_ms;
     property<std::chrono::milliseconds> group_max_session_timeout_ms;
@@ -185,6 +186,7 @@ struct configuration final : public config_store {
     property<std::vector<ss::sstring>> kafka_connections_max_overrides;
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_recv_buf;
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_send_buf;
+    bounded_property<std::optional<size_t>> kafka_rpc_server_stream_recv_buf;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
