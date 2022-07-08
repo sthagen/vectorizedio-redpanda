@@ -197,6 +197,8 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_region;
     property<std::optional<ss::sstring>> cloud_storage_bucket;
     property<std::optional<ss::sstring>> cloud_storage_api_endpoint;
+    enum_property<model::cloud_credentials_source>
+      cloud_storage_credentials_source;
     property<std::chrono::milliseconds> cloud_storage_reconciliation_ms;
     property<std::chrono::milliseconds>
       cloud_storage_upload_loop_initial_backoff_ms;
@@ -250,6 +252,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> leader_balancer_idle_timeout;
     property<std::chrono::milliseconds> leader_balancer_mute_timeout;
     property<std::chrono::milliseconds> leader_balancer_node_mute_timeout;
+    bounded_property<size_t> leader_balancer_transfer_limit_per_shard;
     property<int> internal_topic_replication_factor;
     property<std::chrono::milliseconds> health_manager_tick_interval;
 

@@ -132,6 +132,10 @@ class RpkTool:
         self._check_stdout_success(output)
         return output
 
+    def add_partitions(self, topic, partitions):
+        cmd = ["add-partitions", topic, "-n", str(partitions)]
+        return self._run_topic(cmd)
+
     def _check_stdout_success(self, output):
         """
         Helper for topic operations where rpk does not surface errors
@@ -506,7 +510,7 @@ class RpkTool:
         ]
         return self._execute(cmd).strip()
 
-    def cluster_config_set(self, key, value):
+    def cluster_config_set(self, key: str, value):
         cmd = [
             self._rpk_binary(), "--api-urls",
             self._admin_host(), "cluster", "config", "set", key, value

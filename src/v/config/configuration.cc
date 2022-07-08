@@ -518,7 +518,7 @@ configuration::configuration()
       "abort_timed_out_transactions_interval_ms",
       "How often look for the inactive transactions and abort them",
       {.visibility = visibility::tunable},
-      1min)
+      10s)
   , create_topic_timeout_ms(
       *this,
       "create_topic_timeout_ms",
@@ -921,6 +921,18 @@ configuration::configuration()
       "Optional API endpoint",
       {.visibility = visibility::user},
       std::nullopt)
+  , cloud_storage_credentials_source(
+      *this,
+      "cloud_storage_credentials_source",
+      "The source of credentials to connect to cloud services",
+      {.needs_restart = needs_restart::yes,
+       .example = "config_file",
+       .visibility = visibility::user},
+      model::cloud_credentials_source::config_file,
+      {model::cloud_credentials_source::config_file,
+       model::cloud_credentials_source::aws_instance_metadata,
+       model::cloud_credentials_source::sts,
+       model::cloud_credentials_source::gcp_instance_metadata})
   , cloud_storage_reconciliation_ms(
       *this,
       "cloud_storage_reconciliation_interval_ms",
@@ -1147,6 +1159,13 @@ configuration::configuration()
       "Leadership rebalancing node mute timeout",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       20s)
+  , leader_balancer_transfer_limit_per_shard(
+      *this,
+      "leader_balancer_transfer_limit_per_shard",
+      "Per shard limit for in progress leadership transfers",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      512,
+      {.min = 1, .max = 2048})
   , internal_topic_replication_factor(
       *this,
       "internal_topic_replication_factor",

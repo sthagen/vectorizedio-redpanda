@@ -13,6 +13,7 @@
 #include "archival/logger.h"
 #include "archival/ntp_archiver_service.h"
 #include "archival/types.h"
+#include "cloud_roles/signature.h"
 #include "cloud_storage/types.h"
 #include "cluster/partition_manager.h"
 #include "cluster/topic_table.h"
@@ -25,7 +26,6 @@
 #include "model/namespace.h"
 #include "s3/client.h"
 #include "s3/error.h"
-#include "s3/signature.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
 #include "storage/log.h"
@@ -286,7 +286,7 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
           auto part = _partition_manager.local().get(ntp);
           if (log.has_value() && part && part->is_elected_leader()
               && (part->get_ntp_config().is_archival_enabled()
-                  || config::shard_local_cfg().cloud_storage_enable_remote_read())) {
+                  || config::shard_local_cfg().cloud_storage_enable_remote_write())) {
               auto archiver = ss::make_lw_shared<ntp_archiver>(
                 log->config(),
                 _partition_manager.local(),

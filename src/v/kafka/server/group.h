@@ -23,6 +23,7 @@
 #include "kafka/server/member.h"
 #include "kafka/types.h"
 #include "model/fundamental.h"
+#include "model/namespace.h"
 #include "model/record.h"
 #include "seastarx.h"
 #include "utils/mutex.h"
@@ -167,6 +168,7 @@ public:
           , probe(metadata.offset) {
             if (enable_metrics) {
                 probe.setup_metrics(group_id, tp);
+                probe.setup_public_metrics(group_id, tp);
             }
         }
     };
@@ -710,8 +712,40 @@ private:
         return std::move(builder).build();
     }
 
+    error_code
+    validate_expected_group(const txn_offset_commit_request& r) const;
+
     cluster::abort_origin
     get_abort_origin(const model::producer_identity&, model::tx_seq) const;
+
+    bool has_pending_transaction(const model::topic_partition& tp) {
+        if (std::any_of(
+              _pending_offset_commits.begin(),
+              _pending_offset_commits.end(),
+              [&tp](const auto& tp_info) { return tp_info.first == tp; })) {
+            return true;
+        }
+
+        if (std::any_of(
+              _volatile_txs.begin(),
+              _volatile_txs.end(),
+              [&tp](const auto& tp_info) {
+                  return tp_info.second.offsets.contains(tp);
+              })) {
+            return true;
+        }
+
+        if (std::any_of(
+              _prepared_txs.begin(),
+              _prepared_txs.end(),
+              [&tp](const auto& tp_info) {
+                  return tp_info.second.offsets.contains(tp);
+              })) {
+            return true;
+        }
+
+        return false;
+    }
 
     kafka::group_id _id;
     group_state _state;
@@ -734,6 +768,10 @@ private:
       model::topic_partition,
       std::unique_ptr<offset_metadata_with_probe>>
       _offsets;
+    group_probe<
+      model::topic_partition,
+      std::unique_ptr<offset_metadata_with_probe>>
+      _probe;
     model::violation_recovery_policy _recovery_policy;
     ctx_log _ctxlog;
     ctx_log _ctx_txlog;

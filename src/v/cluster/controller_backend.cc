@@ -530,7 +530,7 @@ ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
 
         if (has_non_replicable_op_type(*it)) {
             /// This if statement has nothing to do with correctness and is only
-            /// here to reduce the amount of unecessary logging emitted by the
+            /// here to reduce the amount of unnecessary logging emitted by the
             /// controller_backend for events that it eventually will not handle
             /// anyway.
             ++it;
@@ -559,7 +559,7 @@ ss::future<> controller_backend::reconcile_ntp(deltas_t& deltas) {
                      * do not skip cross core partition updates waiting for
                      * partition to be shut down on the other core
                      */
-                    if (ec == errc::wating_for_partition_shutdown) {
+                    if (ec == errc::waiting_for_partition_shutdown) {
                         stop = true;
                         continue;
                     }
@@ -865,9 +865,8 @@ controller_backend::process_partition_reconfiguration(
              * NOTE: deletion is safe as we are already running with new
              * configuration so old replicas are not longer needed.
              */
-            if (
-              !has_local_replicas(_self, previous_replicas)
-              || type == topic_table_delta::op_type::force_abort_update) {
+            if (can_finish_update(
+                  type, target_assignment.replicas, previous_replicas)) {
                 co_return co_await dispatch_update_finished(
                   std::move(ntp), target_assignment);
             }
@@ -916,6 +915,30 @@ controller_backend::process_partition_reconfiguration(
     co_return ec;
 }
 
+bool controller_backend::can_finish_update(
+  topic_table_delta::op_type update_type,
+  const std::vector<model::broker_shard>& current_replicas,
+  const std::vector<model::broker_shard>& previous_replicas) {
+    // force abort update may be finished by any node
+    if (update_type == topic_table_delta::op_type::force_abort_update) {
+        return true;
+    }
+    // update may be finished by a node that was added to replica set
+    if (!has_local_replicas(_self, previous_replicas)) {
+        return true;
+    }
+    // finally if no nodes were added to replica set one of the current replicas
+    // may finish an update
+
+    auto added_nodes = subtract_replica_sets(
+      current_replicas, previous_replicas);
+    if (added_nodes.empty()) {
+        return has_local_replicas(_self, current_replicas);
+    }
+
+    return false;
+}
+
 ss::future<std::error_code>
 controller_backend::create_partition_from_remote_shard(
   model::ntp ntp,
@@ -958,7 +981,7 @@ controller_backend::create_partition_from_remote_shard(
         }
 
         if (!x_shard_req) {
-            co_return errc::wating_for_partition_shutdown;
+            co_return errc::waiting_for_partition_shutdown;
         }
         initial_revision = x_shard_req->revision;
         std::copy(
@@ -968,7 +991,7 @@ controller_backend::create_partition_from_remote_shard(
     }
 
     if (!initial_revision) {
-        co_return errc::wating_for_partition_shutdown;
+        co_return errc::waiting_for_partition_shutdown;
     }
 
     std::error_code result = errc::waiting_for_recovery;

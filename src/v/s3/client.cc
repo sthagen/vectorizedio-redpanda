@@ -19,7 +19,6 @@
 #include "net/types.h"
 #include "s3/error.h"
 #include "s3/logger.h"
-#include "s3/signature.h"
 #include "ssx/sformat.h"
 #include "vlog.h"
 
@@ -46,6 +45,7 @@
 #include <gnutls/crypto.h>
 
 #include <exception>
+#include <utility>
 
 namespace s3 {
 
@@ -59,8 +59,6 @@ struct aws_header_names {
     static constexpr boost::beast::string_view prefix = "prefix";
     static constexpr boost::beast::string_view start_after = "start-after";
     static constexpr boost::beast::string_view max_keys = "max-keys";
-    static constexpr boost::beast::string_view x_amz_content_sha256
-      = "x-amz-content-sha256";
     static constexpr boost::beast::string_view x_amz_tagging = "x-amz-tagging";
     static constexpr boost::beast::string_view x_amz_request_id
       = "x-amz-request-id";
@@ -70,29 +68,12 @@ struct aws_header_values {
     static constexpr boost::beast::string_view user_agent
       = "redpanda.vectorized.io";
     static constexpr boost::beast::string_view text_plain = "text/plain";
-
-    /// SHA256 of an empty string (used in situation when the signed payload is
-    /// has zero length)
-    static constexpr boost::beast::string_view emptysig
-      = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-    static constexpr boost::beast::string_view unsigned_payload
-      = "UNSIGNED-PAYLOAD";
-};
-
-struct aws_signatures {
-    /// SHA256 of an empty string (used in situation when the signed payload is
-    /// has zero length)
-    static constexpr std::string_view emptysig
-      = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-    static constexpr std::string_view unsigned_payload = "UNSIGNED-PAYLOAD";
 };
 
 // configuration //
 
 static ss::sstring make_endpoint_url(
-  const aws_region_name& region,
+  const cloud_roles::aws_region_name& region,
   const std::optional<endpoint_url>& url_override) {
     if (url_override) {
         return url_override.value();
@@ -101,11 +82,12 @@ static ss::sstring make_endpoint_url(
 }
 
 ss::future<configuration> configuration::make_configuration(
-  const public_key_str& pkey,
-  const private_key_str& skey,
-  const aws_region_name& region,
+  const std::optional<cloud_roles::public_key_str>& pkey,
+  const std::optional<cloud_roles::private_key_str>& skey,
+  const cloud_roles::aws_region_name& region,
   const default_overrides& overrides,
-  net::metrics_disabled disable_metrics) {
+  net::metrics_disabled disable_metrics,
+  net::public_metrics_disabled disable_public_metrics) {
     configuration client_cfg;
     const auto endpoint_uri = make_endpoint_url(region, overrides.endpoint);
     client_cfg.tls_sni_hostname = endpoint_uri;
@@ -155,6 +137,7 @@ ss::future<configuration> configuration::make_configuration(
       overrides.port ? *overrides.port : default_port,
       ss::net::inet_address::family::INET);
     client_cfg.disable_metrics = disable_metrics;
+    client_cfg.disable_public_metrics = disable_public_metrics;
     client_cfg._probe = ss::make_shared<client_probe>(
       disable_metrics, region(), endpoint_uri);
     client_cfg.max_idle_time = overrides.max_idle_time
@@ -164,8 +147,9 @@ ss::future<configuration> configuration::make_configuration(
 }
 
 std::ostream& operator<<(std::ostream& o, const configuration& c) {
-    o << "{access_key:" << c.access_key << ",region:" << c.region()
-      << ",secret_key:****"
+    o << "{access_key:"
+      << c.access_key.value_or(cloud_roles::public_key_str{""})
+      << ",region:" << c.region() << ",secret_key:****"
       << ",access_point_uri:" << c.uri() << ",server_addr:" << c.server_addr
       << ",max_idle_time:"
       << std::chrono::duration_cast<std::chrono::milliseconds>(c.max_idle_time)
@@ -176,9 +160,11 @@ std::ostream& operator<<(std::ostream& o, const configuration& c) {
 
 // request_creator //
 
-request_creator::request_creator(const configuration& conf)
+request_creator::request_creator(
+  const configuration& conf,
+  ss::lw_shared_ptr<const cloud_roles::apply_credentials> apply_credentials)
   : _ap(conf.uri)
-  , _sign(conf.region, conf.access_key, conf.secret_key) {}
+  , _apply_credentials{std::move(apply_credentials)} {}
 
 result<http::client::request_header> request_creator::make_get_object_request(
   bucket_name const& name, object_key const& key) {
@@ -196,9 +182,7 @@ result<http::client::request_header> request_creator::make_get_object_request(
       boost::beast::http::field::user_agent, aws_header_values::user_agent);
     header.insert(boost::beast::http::field::host, host);
     header.insert(boost::beast::http::field::content_length, "0");
-    header.insert(
-      aws_header_names::x_amz_content_sha256, aws_header_values::emptysig);
-    auto ec = _sign.sign_header(header, aws_signatures::emptysig);
+    auto ec = _apply_credentials->add_auth(header);
     if (ec) {
         return ec;
     }
@@ -221,9 +205,7 @@ result<http::client::request_header> request_creator::make_head_object_request(
       boost::beast::http::field::user_agent, aws_header_values::user_agent);
     header.insert(boost::beast::http::field::host, host);
     header.insert(boost::beast::http::field::content_length, "0");
-    header.insert(
-      aws_header_names::x_amz_content_sha256, aws_header_values::emptysig);
-    auto ec = _sign.sign_header(header, aws_signatures::emptysig);
+    auto ec = _apply_credentials->add_auth(header);
     if (ec) {
         return ec;
     }
@@ -258,9 +240,7 @@ request_creator::make_unsigned_put_object_request(
     header.insert(
       boost::beast::http::field::content_length,
       std::to_string(payload_size_bytes));
-    header.insert(
-      aws_header_names::x_amz_content_sha256,
-      aws_header_values::unsigned_payload);
+
     if (!tags.empty()) {
         std::stringstream tstr;
         for (const auto& [key, val] : tags) {
@@ -268,7 +248,8 @@ request_creator::make_unsigned_put_object_request(
         }
         header.insert(aws_header_names::x_amz_tagging, tstr.str().substr(1));
     }
-    auto ec = _sign.sign_header(header, aws_signatures::unsigned_payload);
+
+    auto ec = _apply_credentials->add_auth(header);
     if (ec) {
         return ec;
     }
@@ -294,8 +275,7 @@ request_creator::make_list_objects_v2_request(
       boost::beast::http::field::user_agent, aws_header_values::user_agent);
     header.insert(boost::beast::http::field::host, host);
     header.insert(boost::beast::http::field::content_length, "0");
-    header.insert(
-      aws_header_names::x_amz_content_sha256, aws_header_values::emptysig);
+
     if (prefix) {
         header.insert(aws_header_names::prefix, (*prefix)().string());
     }
@@ -305,7 +285,8 @@ request_creator::make_list_objects_v2_request(
     if (max_keys) {
         header.insert(aws_header_names::start_after, std::to_string(*max_keys));
     }
-    auto ec = _sign.sign_header(header, aws_signatures::emptysig);
+
+    auto ec = _apply_credentials->add_auth(header);
     vlog(s3_log.trace, "ListObjectsV2:\n {}", http::redacted_header(header));
     if (ec) {
         return ec;
@@ -332,9 +313,7 @@ request_creator::make_delete_object_request(
       boost::beast::http::field::user_agent, aws_header_values::user_agent);
     header.insert(boost::beast::http::field::host, host);
     header.insert(boost::beast::http::field::content_length, "0");
-    header.insert(
-      aws_header_names::x_amz_content_sha256, aws_header_values::emptysig);
-    auto ec = _sign.sign_header(header, aws_signatures::emptysig);
+    auto ec = _apply_credentials->add_auth(header);
     if (ec) {
         return ec;
     }
@@ -482,13 +461,18 @@ drain_response_stream(http::client::response_stream_ref resp) {
       });
 }
 
-client::client(const configuration& conf)
-  : _requestor(conf)
+client::client(
+  const configuration& conf,
+  ss::lw_shared_ptr<const cloud_roles::apply_credentials> apply_credentials)
+  : _requestor(conf, std::move(apply_credentials))
   , _client(conf)
   , _probe(conf._probe) {}
 
-client::client(const configuration& conf, const ss::abort_source& as)
-  : _requestor(conf)
+client::client(
+  const configuration& conf,
+  const ss::abort_source& as,
+  ss::lw_shared_ptr<const cloud_roles::apply_credentials> apply_credentials)
+  : _requestor(conf, std::move(apply_credentials))
   , _client(conf, &as, conf._probe, conf.max_idle_time)
   , _probe(conf._probe) {}
 
@@ -715,9 +699,7 @@ client_pool::client_pool(
   size_t size, configuration conf, client_pool_overdraft_policy policy)
   : _max_size(size)
   , _config(std::move(conf))
-  , _policy(policy) {
-    init();
-}
+  , _policy(policy) {}
 
 ss::future<> client_pool::stop() {
     _as.request_abort();
@@ -736,11 +718,21 @@ ss::future<> client_pool::stop() {
 ss::future<client_pool::client_lease> client_pool::acquire() {
     gate_guard guard(_gate);
     try {
+        // If credentials have not yet been acquired, wait for them. It is
+        // possible that credentials are not initialized right after remote
+        // starts, and we have not had a response from the credentials API yet,
+        // but we have scheduled an upload. This wait ensures that when we call
+        // the storage API we have a set of valid credentials.
+        if (unlikely(!_apply_credentials)) {
+            co_await wait_for_credentials();
+        }
+
         while (_pool.empty() && !_gate.is_closed()) {
             if (_policy == client_pool_overdraft_policy::wait_if_empty) {
                 co_await _cvar.wait();
             } else {
-                auto cl = ss::make_shared<client>(_config, _as);
+                auto cl = ss::make_shared<client>(
+                  _config, _as, _apply_credentials);
                 _pool.emplace_back(std::move(cl));
             }
         }
@@ -761,20 +753,49 @@ ss::future<client_pool::client_lease> client_pool::acquire() {
             }
         })};
 }
+
 size_t client_pool::size() const noexcept { return _pool.size(); }
+
 size_t client_pool::max_size() const noexcept { return _max_size; }
-void client_pool::init() {
+
+void client_pool::populate_client_pool() {
     for (size_t i = 0; i < _max_size; i++) {
-        auto cl = ss::make_shared<client>(_config, _as);
+        auto cl = ss::make_shared<client>(_config, _as, _apply_credentials);
         _pool.emplace_back(std::move(cl));
     }
 }
+
 void client_pool::release(ss::shared_ptr<client> leased) {
     if (_pool.size() == _max_size) {
         return;
     }
     _pool.emplace_back(std::move(leased));
     _cvar.signal();
+}
+
+void client_pool::load_credentials(cloud_roles::credentials credentials) {
+    if (unlikely(!_apply_credentials)) {
+        _apply_credentials = ss::make_lw_shared(
+          cloud_roles::make_credentials_applier(std::move(credentials)));
+        populate_client_pool();
+        // We signal the waiter only after the client pool is initialized, so
+        // that any upload operations waiting are ready to proceed.
+        _credentials_var.signal();
+    } else {
+        _apply_credentials->reset_creds(std::move(credentials));
+    }
+}
+
+ss::future<> client_pool::wait_for_credentials() {
+    co_await _credentials_var.wait([this]() {
+        return _gate.is_closed() || _as.abort_requested()
+               || (bool{_apply_credentials} && !_pool.empty());
+    });
+
+    if (_gate.is_closed() || _as.abort_requested()) {
+        throw ss::gate_closed_exception();
+    }
+    co_return;
 }
 
 } // namespace s3
