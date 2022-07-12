@@ -28,6 +28,7 @@
 #include "cluster/members_table.h"
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/metrics_reporter.h"
+#include "cluster/partition_balancer_backend.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
 #include "cluster/raft0_utils.h"
@@ -233,6 +234,7 @@ ss::future<> controller::start() {
               return stm.wait(stm.bootstrap_last_applied(), model::no_timeout);
           });
       })
+      .then([this] { return cluster_creation_hook(); })
       .then(
         [this] { return _backend.invoke_on_all(&controller_backend::start); })
       .then([this] {
@@ -334,6 +336,29 @@ ss::future<> controller::start() {
       })
       .then([this] {
           return _metrics_reporter.invoke_on(0, &metrics_reporter::start);
+      })
+      .then([this] {
+          return _partition_balancer.start_single(
+            _raft0,
+            std::ref(_stm),
+            std::ref(_tp_state),
+            std::ref(_hm_frontend),
+            std::ref(_partition_allocator),
+            std::ref(_tp_frontend),
+            config::shard_local_cfg().partition_autobalancing_mode.bind(),
+            config::shard_local_cfg()
+              .partition_autobalancing_node_availability_timeout_sec.bind(),
+            config::shard_local_cfg()
+              .partition_autobalancing_max_disk_usage_percent.bind(),
+            config::shard_local_cfg()
+              .partition_autobalancing_tick_interval_ms.bind(),
+            config::shard_local_cfg()
+              .partition_autobalancing_movement_batch_size_bytes.bind());
+      })
+      .then([this] {
+          return _partition_balancer.invoke_on(
+            partition_balancer_backend::shard,
+            &partition_balancer_backend::start);
       });
 }
 
@@ -356,6 +381,7 @@ ss::future<> controller::stop() {
         auto stop_leader_balancer = _leader_balancer ? _leader_balancer->stop()
                                                      : ss::now();
         return stop_leader_balancer
+          .then([this] { return _partition_balancer.stop(); })
           .then([this] { return _metrics_reporter.stop(); })
           .then([this] { return _feature_manager.stop(); })
           .then([this] { return _hm_frontend.stop(); })
@@ -382,6 +408,41 @@ ss::future<> controller::stop() {
           .then([this] { return _members_table.stop(); })
           .then([this] { return _as.stop(); });
     });
+}
+
+/**
+ * This function provides for writing the controller log immediately
+ * after it has been created, before anything else has been written
+ * to it, and before we have started communicating with peers.
+ */
+ss::future<> controller::cluster_creation_hook() {
+    if (!config::node().seed_servers().empty()) {
+        // We are not on the root node
+        co_return;
+    } else if (
+      _raft0->last_visible_index() > model::offset{}
+      || _raft0->config().brokers().size() > 1) {
+        // The controller log has already been written to
+        co_return;
+    }
+
+    // Internal RPC does not start until after controller startup
+    // is complete (we are called during controller startup), so
+    // it is guaranteed that if we were single node/empty controller
+    // log at start of this function, we will still be in that state
+    // here.  The wait for leadership is really just a wait for the
+    // consensus object to finish writing its last_voted_for from
+    // its self-vote.
+    while (!_raft0->is_leader()) {
+        co_await ss::sleep(100ms);
+    }
+
+    auto err
+      = co_await _security_frontend.local().maybe_create_bootstrap_user();
+    vassert(
+      err == errc::success,
+      "Controller write should always succeed in single replica state during "
+      "creation");
 }
 
 } // namespace cluster
