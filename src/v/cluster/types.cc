@@ -32,6 +32,16 @@
 
 namespace cluster {
 
+kafka_stages::kafka_stages(
+  ss::future<> enq, ss::future<result<kafka_result>> offset_future)
+  : request_enqueued(std::move(enq))
+  , replicate_finished(std::move(offset_future)) {}
+
+kafka_stages::kafka_stages(raft::errc ec)
+  : request_enqueued(ss::now())
+  , replicate_finished(
+      ss::make_ready_future<result<kafka_result>>(make_error_code(ec))){};
+
 bool topic_properties::is_compacted() const {
     if (!cleanup_policy_bitflags) {
         return false;
@@ -45,7 +55,8 @@ bool topic_properties::has_overrides() const {
     return cleanup_policy_bitflags || compaction_strategy || segment_size
            || retention_bytes.has_value() || retention_bytes.is_disabled()
            || retention_duration.has_value() || retention_duration.is_disabled()
-           || recovery.has_value() || shadow_indexing.has_value();
+           || recovery.has_value() || shadow_indexing.has_value()
+           || read_replica.has_value();
 }
 
 storage::ntp_config::default_overrides
@@ -59,6 +70,7 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.shadow_indexing_mode = shadow_indexing
                                  ? *shadow_indexing
                                  : model::shadow_indexing_mode::disabled;
+    ret.read_replica = read_replica;
     return ret;
 }
 
@@ -91,7 +103,8 @@ storage::ntp_config topic_configuration::make_ntp_config(
               properties.recovery ? *properties.recovery : false),
             .shadow_indexing_mode = properties.shadow_indexing
                                       ? *properties.shadow_indexing
-                                      : model::shadow_indexing_mode::disabled});
+                                      : model::shadow_indexing_mode::disabled,
+            .read_replica = properties.read_replica});
     }
     return {
       model::ntp(tp_ns.ns, tp_ns.tp, p_id),

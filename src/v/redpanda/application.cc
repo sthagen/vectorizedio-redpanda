@@ -58,6 +58,7 @@
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/io_priority.h"
 #include "rpc/simple_protocol.h"
+#include "ssx/metrics.h"
 #include "storage/backlog_controller.h"
 #include "storage/chunk_cache.h"
 #include "storage/compaction_controller.h"
@@ -313,6 +314,16 @@ void application::initialize(
 }
 
 void application::setup_metrics() {
+    if (!config::shard_local_cfg().disable_public_metrics()) {
+        seastar::metrics::replicate_metric_families(
+          seastar::metrics::default_handle(),
+          {{"io_queue_total_read_ops", ssx::metrics::public_metrics_handle},
+           {"io_queue_total_write_ops", ssx::metrics::public_metrics_handle},
+           {"memory_allocated_memory", ssx::metrics::public_metrics_handle},
+           {"memory_free_memory", ssx::metrics::public_metrics_handle}})
+          .get();
+    }
+
     if (config::shard_local_cfg().disable_metrics()) {
         return;
     }
@@ -726,7 +737,8 @@ void application::wire_up_redpanda_services() {
       std::ref(tx_gateway_frontend),
       std::ref(partition_recovery_manager),
       std::ref(cloud_storage_api),
-      std::ref(shadow_index_cache))
+      std::ref(shadow_index_cache),
+      std::ref(_feature_table))
       .get();
     vlog(_log.info, "Partition manager started");
 
@@ -930,6 +942,8 @@ void application::wire_up_redpanda_services() {
               c.max_service_memory_per_core = memory_groups::rpc_total_memory();
               c.disable_metrics = net::metrics_disabled(
                 config::shard_local_cfg().disable_metrics());
+              c.disable_public_metrics = net::public_metrics_disabled(
+                config::shard_local_cfg().disable_public_metrics());
               c.listen_backlog
                 = config::shard_local_cfg().rpc_server_listen_backlog;
               c.tcp_recv_buf
@@ -1119,6 +1133,8 @@ void application::wire_up_redpanda_services() {
 
               c.disable_metrics = net::metrics_disabled(
                 config::shard_local_cfg().disable_metrics());
+              c.disable_public_metrics = net::public_metrics_disabled(
+                config::shard_local_cfg().disable_public_metrics());
 
               net::config_connection_rate_bindings bindings{
                 .config_general_rate
@@ -1326,6 +1342,7 @@ void application::start_redpanda(::stop_signal& app_signal) {
           if (!config::shard_local_cfg().disable_metrics()) {
               proto->setup_metrics();
           }
+
           s.set_protocol(std::move(proto));
       })
       .get();
