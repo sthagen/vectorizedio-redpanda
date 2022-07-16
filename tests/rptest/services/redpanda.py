@@ -353,14 +353,25 @@ class SecurityConfig:
     # the rules, so instead we use a fixed mapping and arrange for certs to use
     # a similar format. this will change when we get closer to GA and the
     # configuration becomes more general.
-    PRINCIPAL_MAPPING_RULES = "RULE:^O=Redpanda,CN=(.*?)$/$1/L, DEFAULT"
+    __DEFAULT_PRINCIPAL_MAPPING_RULES = "RULE:^O=Redpanda,CN=(.*?)$/$1/L, DEFAULT"
 
     def __init__(self):
         self.enable_sasl = False
+        self.kafka_enable_authorization: Optional[bool] = None
+        self.endpoint_authn_method: Optional[str] = None
         self.tls_provider: Optional[TLSProvider] = None
 
-        # extract principal from mtls distinguished name
-        self.enable_mtls_identity = False
+        # The rules to extract principal from mtls
+        self.principal_mapping_rules = self.__DEFAULT_PRINCIPAL_MAPPING_RULES
+
+    # sasl is required
+    def sasl_enabled(self):
+        return (self.kafka_enable_authorization is None
+                and self.enable_sasl) or self.endpoint_authn_method == "sasl"
+
+    # principal is extracted from mtls distinguished name
+    def mtls_identity_enabled(self):
+        return self.endpoint_authn_method == "mtls_identity"
 
 
 class RedpandaService(Service):
@@ -447,7 +458,6 @@ class RedpandaService(Service):
                  environment: Optional[dict[str, str]] = None,
                  security: SecurityConfig = SecurityConfig(),
                  node_ready_timeout_s=None,
-                 enable_installer=False,
                  superuser: Optional[SaslCredentials] = None):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
@@ -456,9 +466,7 @@ class RedpandaService(Service):
         self._enable_pp = enable_pp
         self._enable_sr = enable_sr
         self._security = security
-        self._installer: Optional[RedpandaInstaller] = None
-        if enable_installer:
-            self._installer = RedpandaInstaller(self)
+        self._installer: RedpandaInstaller = RedpandaInstaller(self)
 
         if superuser is None:
             superuser = self.SUPERUSER_CREDENTIALS
@@ -528,6 +536,9 @@ class RedpandaService(Service):
     def set_extra_rp_conf(self, conf):
         self._extra_rp_conf = conf
 
+    def add_extra_rp_conf(self, conf):
+        self._extra_rp_conf = {**self._extra_rp_conf, **conf}
+
     def set_extra_node_conf(self, node, conf):
         assert node in self.nodes
         self._extra_node_conf[node] = conf
@@ -546,7 +557,13 @@ class RedpandaService(Service):
                 self, "redpanda.service.admin")
 
     def sasl_enabled(self):
-        return self._security.enable_sasl
+        return self._security.sasl_enabled()
+
+    def mtls_identity_enabled(self):
+        return self._security.mtls_identity_enabled()
+
+    def endpoint_authn_method(self):
+        return self._security.endpoint_authn_method
 
     @property
     def dedicated_nodes(self):
@@ -601,7 +618,7 @@ class RedpandaService(Service):
                     # Expected usage is that we may install new binaries before
                     # starting the cluster, and installation-cleaning happened
                     # when we started the installer.
-                    self.clean_node(node, clean_installs=False)
+                    self.clean_node(node, preserve_current_install=True)
                 else:
                     self.logger.debug("%s: skip cleaning node" %
                                       self.who_am_i(node))
@@ -1134,7 +1151,7 @@ class RedpandaService(Service):
                 self.logger.exception("Failed to run seastar-addr2line")
 
     def rp_install_path(self):
-        if self._installer and self._installer._started:
+        if self._installer._started:
             # The installer sets up binaries to always use /opt/redpanda.
             return "/opt/redpanda"
         return self._context.globals.get("rp_install_path_root", None)
@@ -1207,7 +1224,10 @@ class RedpandaService(Service):
         if self._s3client:
             self.delete_bucket_from_si()
 
-    def clean_node(self, node, preserve_logs=False, clean_installs=True):
+    def clean_node(self,
+                   node,
+                   preserve_logs=False,
+                   preserve_current_install=False):
         # These are allow_fail=True to allow for a race where kill_process finds
         # the PID, but then the process has died before it sends the SIGKILL.  This
         # should be safe against actual failures to of the process to stop, because
@@ -1235,9 +1255,11 @@ class RedpandaService(Service):
                 self.EXECUTABLE_SAVE_PATH):
             node.account.remove(self.EXECUTABLE_SAVE_PATH)
 
-        if clean_installs and self._installer is not None:
-            # Get rid of any installed packages.
-            self._installer.clean(node)
+        if not preserve_current_install or not self._installer._started:
+            # Reset the binaries to use the original binaries.
+            # NOTE: if the installer hasn't been started, there is no
+            # installation to preserve!
+            self._installer.reset_current_install([node])
 
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
@@ -1294,7 +1316,8 @@ class RedpandaService(Service):
                            enable_pp=self._enable_pp,
                            enable_sr=self._enable_sr,
                            superuser=self._superuser,
-                           sasl_enabled=self.sasl_enabled())
+                           sasl_enabled=self.sasl_enabled(),
+                           endpoint_authn_method=self.endpoint_authn_method())
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1317,10 +1340,6 @@ class RedpandaService(Service):
                 cert_file=RedpandaService.TLS_SERVER_CRT_FILE,
                 truststore_file=RedpandaService.TLS_CA_CRT_FILE,
             )
-            if self._security.enable_mtls_identity:
-                tls_config.update(
-                    dict(principal_mapping_rules=SecurityConfig.
-                         PRINCIPAL_MAPPING_RULES, ))
             doc = yaml.full_load(conf)
             doc["redpanda"].update(dict(kafka_api_tls=tls_config))
             conf = yaml.dump(doc)
@@ -1341,6 +1360,13 @@ class RedpandaService(Service):
         if self._security.enable_sasl:
             self.logger.debug("Enabling SASL in cluster configuration")
             conf.update(dict(enable_sasl=True))
+        if self._security.kafka_enable_authorization is not None:
+            self.logger.debug(
+                f"Setting kafka_enable_authorization: {self._security.kafka_enable_authorization} in cluster configuration"
+            )
+            conf.update(
+                dict(kafka_enable_authorization=self._security.
+                     kafka_enable_authorization))
 
         conf_yaml = yaml.dump(conf)
         for node in self.nodes:
@@ -1728,7 +1754,7 @@ class RedpandaService(Service):
         # Any node will do. Even in a mixed-version upgrade test, we should
         # still have the original binaries available.
         node = self.nodes[0]
-        if self._installer and self._installer._started:
+        if self._installer._started:
             head_root_path = self._installer.path_for_version(
                 RedpandaInstaller.HEAD)
             binary = f"{head_root_path}/libexec/redpanda"
