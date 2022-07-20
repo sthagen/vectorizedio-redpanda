@@ -322,6 +322,8 @@ func (rpc *RedpandaConfig) UnmarshalYAML(n *yaml.Node) error {
 		AdvertisedRPCAPI           *SocketAddress         `yaml:"advertised_rpc_api"`
 		AdvertisedKafkaAPI         namedSocketAddresses   `yaml:"advertised_kafka_api"`
 		DeveloperMode              weakBool               `yaml:"developer_mode"`
+		AggregateMetrics           weakBool               `yaml:"aggregate_metrics"`
+		DisablePublicMetrics       weakBool               `yaml:"disable_public_metrics"`
 		Other                      map[string]interface{} `yaml:",inline"`
 	}
 
@@ -345,6 +347,8 @@ func (rpc *RedpandaConfig) UnmarshalYAML(n *yaml.Node) error {
 	rpc.AdvertisedRPCAPI = internal.AdvertisedRPCAPI
 	rpc.AdvertisedKafkaAPI = internal.AdvertisedKafkaAPI
 	rpc.DeveloperMode = bool(internal.DeveloperMode)
+	rpc.AggregateMetrics = bool(internal.AggregateMetrics)
+	rpc.DisablePublicMetrics = bool(internal.DisablePublicMetrics)
 	rpc.Other = internal.Other
 	return nil
 }
@@ -466,7 +470,7 @@ func (k *KafkaClient) UnmarshalYAML(n *yaml.Node) error {
 		SASLMechanism *weakString            `yaml:"sasl_mechanism"`
 		SCRAMUsername *weakString            `yaml:"scram_username"`
 		SCRAMPassword *weakString            `yaml:"scram_password"`
-		Other         map[string]interface{} `yaml:",inline" mapstructure:",remain"`
+		Other         map[string]interface{} `yaml:",inline"`
 	}
 	if err := n.Decode(&internal); err != nil {
 		return err
@@ -504,7 +508,7 @@ func (s *ServerTLS) UnmarshalYAML(n *yaml.Node) error {
 		TruststoreFile    weakString             `yaml:"truststore_file"`
 		Enabled           weakBool               `yaml:"enabled"`
 		RequireClientAuth weakBool               `yaml:"require_client_auth"`
-		Other             map[string]interface{} `yaml:",inline" mapstructure:",remain"`
+		Other             map[string]interface{} `yaml:",inline"`
 	}
 	if err := n.Decode(&internal); err != nil {
 		return err
@@ -574,8 +578,8 @@ func (sa *SocketAddress) UnmarshalYAML(n *yaml.Node) error {
 func (nsa *NamedSocketAddress) UnmarshalYAML(n *yaml.Node) error {
 	var internal struct {
 		Name    weakString `yaml:"name"`
-		Address weakString `yaml:"address" mapstructure:"address"`
-		Port    weakInt    `yaml:"port" mapstructure:"port"`
+		Address weakString `yaml:"address"`
+		Port    weakInt    `yaml:"port"`
 	}
 
 	if err := n.Decode(&internal); err != nil {
