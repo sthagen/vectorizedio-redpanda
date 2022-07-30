@@ -231,6 +231,8 @@ ss::future<> scheduler_service_impl::add_ntp_archiver(
     if (_gate.is_closed()) {
         return ss::now();
     }
+
+    _archivers.emplace(archiver->get_ntp(), archiver);
     return archiver->download_manifest().then([this, archiver](
                                                 cloud_storage::download_result
                                                   result) {
@@ -243,10 +245,16 @@ ss::future<> scheduler_service_impl::add_ntp_archiver(
             if (part->get_ntp_config().is_read_replica_mode_enabled()) {
                 archiver->run_sync_manifest_loop();
             } else {
+                if (ntp.tp.partition == 0) {
+                    // Upload manifest once per topic. GCS has strict
+                    // limits for single object updates.
+                    ssx::background = upload_topic_manifest(
+                      model::topic_namespace(ntp.ns, ntp.tp.topic),
+                      archiver->get_revision_id());
+                }
                 _probe.start_archiving_ntp();
                 archiver->run_upload_loop();
             }
-            _archivers.emplace(ntp, archiver);
 
             return ss::now();
         case cloud_storage::download_result::notfound:
@@ -263,7 +271,7 @@ ss::future<> scheduler_service_impl::add_ntp_archiver(
                 if (ntp.tp.partition == 0) {
                     // Upload manifest once per topic. GCS has strict
                     // limits for single object updates.
-                    (void)upload_topic_manifest(
+                    ssx::background = upload_topic_manifest(
                       model::topic_namespace(ntp.ns, ntp.tp.topic),
                       archiver->get_revision_id());
                 }
@@ -271,13 +279,15 @@ ss::future<> scheduler_service_impl::add_ntp_archiver(
 
                 archiver->run_upload_loop();
             }
-            _archivers.emplace(ntp, archiver);
 
             return ss::now();
         case cloud_storage::download_result::failed:
         case cloud_storage::download_result::timedout:
             vlog(_rtclog.warn, "Manifest download failed");
-            return ss::make_exception_future<>(ss::timed_out_error());
+            _archivers.erase(archiver->get_ntp());
+            return archiver->stop().finally([archiver]() {
+                return ss::make_exception_future<>(ss::timed_out_error());
+            });
         }
         return ss::now();
     });
