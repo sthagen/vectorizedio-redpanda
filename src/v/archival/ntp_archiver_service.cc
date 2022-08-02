@@ -17,6 +17,7 @@
 #include "cloud_storage/tx_range_manifest.h"
 #include "cloud_storage/types.h"
 #include "cluster/partition_manager.h"
+#include "config/configuration.h"
 #include "model/metadata.h"
 #include "s3/client.h"
 #include "s3/error.h"
@@ -136,6 +137,16 @@ ss::future<> ntp_archiver::upload_loop() {
     ss::lowres_clock::duration backoff = _upload_loop_initial_backoff;
 
     while (upload_loop_can_continue()) {
+        // Bump up archival STM's state to make sure that it's not lagging
+        // behind too far. If the STM is lagging behind we will have to read a
+        // lot of data next time we upload something.
+        if (_partition->archival_meta_stm()) {
+            auto sync_timeout
+              = config::shard_local_cfg()
+                  .cloud_storage_metadata_sync_timeout_ms.value();
+            co_await _partition->archival_meta_stm()->sync(sync_timeout);
+        }
+
         auto result = co_await upload_next_candidates();
         if (result.num_failed != 0) {
             // The logic in class `remote` already does retries: if we get here,
@@ -157,7 +168,7 @@ ss::future<> ntp_archiver::upload_loop() {
             vlog(
               _rtclog.debug,
               "Cancelled upload of {} segments",
-              result.num_succeded);
+              result.num_cancelled);
         }
 
         if (!upload_loop_can_continue()) {
@@ -215,7 +226,10 @@ ss::future<cloud_storage::download_result> ntp_archiver::sync_manifest() {
             vlog(
               _rtclog.debug,
               "Updating the archival_meta_stm in read-replica mode");
-            auto deadline = ss::lowres_clock::now() + _manifest_upload_timeout;
+            auto sync_timeout
+              = config::shard_local_cfg()
+                  .cloud_storage_metadata_sync_timeout_ms.value();
+            auto deadline = ss::lowres_clock::now() + sync_timeout;
             auto error = co_await _partition->archival_meta_stm()->add_segments(
               _manifest, deadline, _as);
             if (
@@ -339,13 +353,13 @@ ntp_archiver::upload_segment(upload_candidate candidate) {
       "current term: {}, "
       "original term: {}",
       [this, original_term](cloud_storage::lazy_abort_source& las) {
-          auto lost_leadership = !_partition->is_leader()
+          auto lost_leadership = !_partition->is_elected_leader()
                                  || _partition->term() != original_term;
           if (unlikely(lost_leadership)) {
               std::string reason{las.abort_reason()};
               las.abort_reason(fmt::format(
                 fmt::runtime(reason),
-                _partition->is_leader(),
+                _partition->is_elected_leader(),
                 _partition->term(),
                 original_term));
           }
