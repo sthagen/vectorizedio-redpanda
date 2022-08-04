@@ -63,9 +63,37 @@ auto random_tristate(Func f) {
     return tristate<T>(random_optional(f));
 }
 
+template<typename Fn, typename T = std::invoke_result_t<Fn>>
+inline auto random_vector(Fn&& gen, size_t size = 20) -> std::vector<T> {
+    std::vector<T> v;
+    v.resize(size);
+    std::generate_n(v.begin(), size, gen);
+    return v;
+}
+
+inline std::vector<std::string> random_strings(size_t size = 20) {
+    return random_vector(
+      [] { return random_named_string<std::string>(); }, size);
+}
+
+inline std::vector<ss::sstring> random_sstrings(size_t size = 20) {
+    return random_vector(
+      [] { return random_named_string<ss::sstring>(); }, size);
+}
+
 inline std::chrono::milliseconds random_duration_ms() {
     return std::chrono::milliseconds(random_generators::get_int<uint64_t>(
       0, std::chrono::milliseconds::max().count()));
+}
+
+/*
+ * Generate a random duration. Notice that random value is multiplied by 10^6.
+ * This is so that roundtrip from ns->ms->ns will work as expected.
+ */
+template<typename Dur>
+inline Dur random_duration() {
+    return Dur(
+      random_generators::get_int<typename Dur::rep>(-100000, 100000) * 1000000);
 }
 
 } // namespace tests

@@ -62,6 +62,12 @@ struct allocate_id_request
     operator==(const allocate_id_request&, const allocate_id_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream& o, const allocate_id_request& req) {
+        fmt::print(o, "timeout: {}", req.timeout.count());
+        return o;
+    }
+
     auto serde_read(iobuf_parser& in, const serde::header& h) {
         using serde::read_nested;
         timeout = std::chrono::duration_cast<model::timeout_clock::duration>(
@@ -88,6 +94,12 @@ struct allocate_id_reply
 
     friend bool operator==(const allocate_id_reply&, const allocate_id_reply&)
       = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const allocate_id_reply& rep) {
+        fmt::print(o, "id: {}, ec: {}", rep.id, rep.ec);
+        return o;
+    }
 
     auto serde_fields() { return std::tie(id, ec); }
 };
@@ -211,6 +223,9 @@ struct try_abort_request
     friend bool operator==(const try_abort_request&, const try_abort_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream& o, const try_abort_request& r);
+
     auto serde_read(iobuf_parser& in, const serde::header& h) {
         using serde::read_nested;
         tm = read_nested<model::partition_id>(in, h._bytes_left_limit);
@@ -251,6 +266,8 @@ struct try_abort_reply : serde::envelope<try_abort_reply, serde::version<0>> {
     friend bool operator==(const try_abort_reply&, const try_abort_reply&)
       = default;
 
+    friend std::ostream& operator<<(std::ostream& o, const try_abort_reply& r);
+
     static try_abort_reply make_aborted() {
         return {committed_type::no, aborted_type::yes, tx_errc::none};
     }
@@ -280,6 +297,9 @@ struct init_tm_tx_request
 
     friend bool operator==(const init_tm_tx_request&, const init_tm_tx_request&)
       = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const init_tm_tx_request& r);
 
     auto serde_read(iobuf_parser& in, const serde::header& h) {
         using serde::read_nested;
@@ -312,6 +332,8 @@ struct init_tm_tx_reply : serde::envelope<init_tm_tx_reply, serde::version<0>> {
 
     friend bool operator==(const init_tm_tx_reply&, const init_tm_tx_reply&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream& o, const init_tm_tx_reply& r);
 
     explicit init_tm_tx_reply(tx_errc ec)
       : ec(ec) {}
@@ -379,6 +401,8 @@ struct begin_tx_request : serde::envelope<begin_tx_request, serde::version<0>> {
     friend bool operator==(const begin_tx_request&, const begin_tx_request&)
       = default;
 
+    friend std::ostream& operator<<(std::ostream& o, const begin_tx_request& r);
+
     auto serde_fields() {
         return std::tie(ntp, pid, tx_seq, transaction_timeout_ms);
     }
@@ -402,6 +426,8 @@ struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<0>> {
 
     friend bool operator==(const begin_tx_reply&, const begin_tx_reply&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream& o, const begin_tx_reply& r);
 
     auto serde_fields() { return std::tie(ntp, etag, ec); }
 };
@@ -433,6 +459,9 @@ struct prepare_tx_request
 
     friend bool operator==(const prepare_tx_request&, const prepare_tx_request&)
       = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const prepare_tx_request& r);
 
     auto serde_read(iobuf_parser& in, const serde::header& h) {
         using serde::read_nested;
@@ -467,6 +496,8 @@ struct prepare_tx_reply : serde::envelope<prepare_tx_reply, serde::version<0>> {
 
     friend bool operator==(const prepare_tx_reply&, const prepare_tx_reply&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream& o, const prepare_tx_reply& r);
 
     auto serde_fields() { return std::tie(ec); }
 };
@@ -902,6 +933,11 @@ struct join_request : serde::envelope<join_request, serde::version<0>> {
 
     friend bool operator==(const join_request&, const join_request&) = default;
 
+    friend std::ostream& operator<<(std::ostream& o, const join_request& r) {
+        fmt::print(o, "node {}", r.node);
+        return o;
+    }
+
     auto serde_fields() { return std::tie(node); }
 };
 
@@ -914,6 +950,11 @@ struct join_reply : serde::envelope<join_reply, serde::version<0>> {
       : success(success) {}
 
     friend bool operator==(const join_reply&, const join_reply&) = default;
+
+    friend std::ostream& operator<<(std::ostream& o, const join_reply& r) {
+        fmt::print(o, "success {}", r.success);
+        return o;
+    }
 
     auto serde_fields() { return std::tie(success); }
 };
@@ -949,6 +990,17 @@ struct join_node_request
     friend bool operator==(const join_node_request&, const join_node_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream& o, const join_node_request& r) {
+        fmt::print(
+          o,
+          "logical_version {} node_uuid {} node {}",
+          r.logical_version,
+          r.node_uuid,
+          r.node);
+        return o;
+    }
+
     auto serde_fields() { return std::tie(logical_version, node_uuid, node); }
 };
 
@@ -964,6 +1016,11 @@ struct join_node_reply : serde::envelope<join_node_reply, serde::version<0>> {
 
     friend bool operator==(const join_node_reply&, const join_node_reply&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream& o, const join_node_reply& r) {
+        fmt::print(o, "success {} id {}", r.success, r.id);
+        return o;
+    }
 
     auto serde_fields() { return std::tie(success, id); }
 };
@@ -1801,6 +1858,7 @@ struct cluster_property_kv
     friend bool
     operator==(const cluster_property_kv&, const cluster_property_kv&)
       = default;
+    friend std::ostream& operator<<(std::ostream&, const cluster_property_kv&);
 };
 
 struct cluster_config_delta_cmd_data
@@ -1991,6 +2049,12 @@ struct decommission_node_request
       = default;
 
     auto serde_fields() { return std::tie(id); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const decommission_node_request& r) {
+        fmt::print(o, "id {}", r.id);
+        return o;
+    }
 };
 
 struct decommission_node_reply
@@ -2002,6 +2066,12 @@ struct decommission_node_reply
       = default;
 
     auto serde_fields() { return std::tie(error); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const decommission_node_reply& r) {
+        fmt::print(o, "error {}", r.error);
+        return o;
+    }
 };
 
 struct recommission_node_request
@@ -2013,6 +2083,12 @@ struct recommission_node_request
       = default;
 
     auto serde_fields() { return std::tie(id); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const recommission_node_request& r) {
+        fmt::print(o, "id {}", r.id);
+        return o;
+    }
 };
 
 struct recommission_node_reply
@@ -2024,6 +2100,12 @@ struct recommission_node_reply
       = default;
 
     auto serde_fields() { return std::tie(error); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const recommission_node_reply& r) {
+        fmt::print(o, "error {}", r.error);
+        return o;
+    }
 };
 
 struct finish_reallocation_request
@@ -2035,6 +2117,12 @@ struct finish_reallocation_request
       = default;
 
     auto serde_fields() { return std::tie(id); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const finish_reallocation_request& r) {
+        fmt::print(o, "id {}", r.id);
+        return o;
+    }
 };
 
 struct finish_reallocation_reply
@@ -2046,6 +2134,12 @@ struct finish_reallocation_reply
       = default;
 
     auto serde_fields() { return std::tie(error); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const finish_reallocation_reply& r) {
+        fmt::print(o, "error {}", r.error);
+        return o;
+    }
 };
 
 struct set_maintenance_mode_request
@@ -2059,6 +2153,12 @@ struct set_maintenance_mode_request
       = default;
 
     auto serde_fields() { return std::tie(id, enabled); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const set_maintenance_mode_request& r) {
+        fmt::print(o, "id {} enabled {}", r.id, r.enabled);
+        return o;
+    }
 };
 
 struct set_maintenance_mode_reply
@@ -2071,6 +2171,12 @@ struct set_maintenance_mode_reply
       = default;
 
     auto serde_fields() { return std::tie(error); }
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const set_maintenance_mode_reply& r) {
+        fmt::print(o, "error {}", r.error);
+        return o;
+    }
 };
 
 struct config_status_request
@@ -2103,6 +2209,9 @@ struct feature_action_request
     operator==(const feature_action_request&, const feature_action_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream&, const feature_action_request&);
+
     auto serde_fields() { return std::tie(action); }
 };
 
@@ -2113,6 +2222,9 @@ struct feature_action_response
     friend bool
     operator==(const feature_action_response&, const feature_action_response&)
       = default;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const feature_action_response&);
 
     auto serde_fields() { return std::tie(error); }
 };
@@ -2131,6 +2243,9 @@ struct feature_barrier_request
     operator==(const feature_barrier_request&, const feature_barrier_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream&, const feature_barrier_request&);
+
     auto serde_fields() { return std::tie(tag, peer, entered); }
 };
 
@@ -2143,6 +2258,9 @@ struct feature_barrier_response
     friend bool
     operator==(const feature_barrier_response&, const feature_barrier_response&)
       = default;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const feature_barrier_response&);
 
     auto serde_fields() { return std::tie(entered, complete); }
 };
@@ -2196,6 +2314,9 @@ struct config_update_request final
     operator==(const config_update_request&, const config_update_request&)
       = default;
 
+    friend std::ostream&
+    operator<<(std::ostream&, const config_update_request&);
+
     auto serde_fields() { return std::tie(upsert, remove); }
 };
 
@@ -2207,6 +2328,8 @@ struct config_update_reply
     friend bool
     operator==(const config_update_reply&, const config_update_reply&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream&, const config_update_reply&);
 
     auto serde_fields() { return std::tie(error, latest_version); }
 };
@@ -2221,12 +2344,16 @@ struct hello_request final : serde::envelope<hello_request, serde::version<0>> {
       = default;
 
     auto serde_fields() { return std::tie(peer, start_time); }
+
+    friend std::ostream& operator<<(std::ostream&, const hello_request&);
 };
 
 struct hello_reply : serde::envelope<hello_reply, serde::version<0>> {
     errc error;
 
     friend bool operator==(const hello_reply&, const hello_reply&) = default;
+
+    friend std::ostream& operator<<(std::ostream&, const hello_reply&);
 
     auto serde_fields() { return std::tie(error); }
 };

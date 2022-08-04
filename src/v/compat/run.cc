@@ -10,9 +10,17 @@
  */
 #include "compat/run.h"
 
+#include "cluster/metadata_dissemination_types.h"
+#include "cluster/types.h"
+#include "compat/begin_tx_compat.h"
 #include "compat/check.h"
+#include "compat/cluster_compat.h"
+#include "compat/id_allocator_compat.h"
+#include "compat/init_tm_tx_compat.h"
 #include "compat/metadata_dissemination_compat.h"
+#include "compat/prepare_tx_compat.h"
 #include "compat/raft_compat.h"
+#include "compat/try_abort_compat.h"
 #include "json/document.h"
 #include "json/prettywriter.h"
 #include "json/writer.h"
@@ -32,7 +40,52 @@ using compat_checks = type_list<
   raft::timeout_now_reply,
   raft::transfer_leadership_request,
   raft::transfer_leadership_reply,
-  cluster::update_leadership_request>;
+  raft::install_snapshot_request,
+  raft::install_snapshot_reply,
+  raft::vote_request,
+  raft::vote_reply,
+  raft::heartbeat_request,
+  raft::heartbeat_reply,
+  raft::append_entries_request,
+  raft::append_entries_reply,
+  cluster::join_request,
+  cluster::join_reply,
+  cluster::join_node_request,
+  cluster::join_node_reply,
+  cluster::decommission_node_request,
+  cluster::decommission_node_reply,
+  cluster::recommission_node_request,
+  cluster::recommission_node_reply,
+  cluster::finish_reallocation_request,
+  cluster::finish_reallocation_reply,
+  cluster::set_maintenance_mode_request,
+  cluster::set_maintenance_mode_reply,
+  cluster::update_leadership_request,
+  cluster::config_status,
+  cluster::cluster_property_kv,
+  cluster::config_update_request,
+  cluster::config_update_reply,
+  cluster::hello_request,
+  cluster::hello_reply,
+  cluster::feature_update_action,
+  cluster::feature_action_request,
+  cluster::feature_action_response,
+  cluster::feature_barrier_request,
+  cluster::feature_barrier_response,
+  cluster::begin_tx_request,
+  cluster::begin_tx_reply,
+  cluster::init_tm_tx_request,
+  cluster::init_tm_tx_reply,
+  cluster::prepare_tx_request,
+  cluster::prepare_tx_reply,
+  cluster::try_abort_request,
+  cluster::try_abort_reply,
+  cluster::allocate_id_request,
+  cluster::allocate_id_reply,
+  cluster::update_leadership_request_v2,
+  cluster::update_leadership_reply,
+  cluster::get_leadership_request,
+  cluster::get_leadership_reply>;
 
 struct compat_error final : public std::runtime_error {
 public:
@@ -77,7 +130,9 @@ struct corpus_helper {
 
         w.Key("binaries");
         w.StartArray();
-        for (auto& b : checker::to_binary(std::move(tb))) {
+        auto binaries = checker::to_binary(std::move(tb));
+        vassert(!binaries.empty(), "No binaries found for {}", checker::name);
+        for (auto& b : binaries) {
             w.StartObject();
             w.Key("name");
             w.String(b.name);
@@ -95,7 +150,9 @@ struct corpus_helper {
     static ss::future<> write(const std::filesystem::path& dir) {
         size_t instance = 0;
 
-        for (auto& test : checker::create_test_cases()) {
+        auto test_cases = checker::create_test_cases();
+        vassert(!test_cases.empty(), "No test cases for {}", checker::name);
+        for (auto& test : test_cases) {
             // json encoded test case
             auto buf = json::StringBuffer{};
             auto writer = json::Writer<json::StringBuffer>{buf};
@@ -130,6 +187,7 @@ struct corpus_helper {
         vassert(doc["binaries"].IsArray(), "binaries is not an array");
         auto binaries = doc["binaries"].GetArray();
 
+        vassert(!binaries.Empty(), "No binaries found for {}", checker::name);
         for (const auto& encoding : binaries) {
             vassert(encoding.IsObject(), "binaries entry is not an object");
             auto binary = encoding.GetObject();
@@ -174,10 +232,14 @@ check_types(type_list<Types...>, std::string name, json::Document& doc) {
      */
     const auto names_arr = std::to_array(
       {corpus_helper<Types>::checker::name...});
-    const std::set<std::string> names_set{
-      std::string(corpus_helper<Types>::checker::name)...};
-    vassert(
-      names_arr.size() == names_set.size(), "duplicate test name detected");
+    std::set<std::string> names_set;
+    for (const auto& name : names_arr) {
+        auto res = names_set.emplace(name);
+        if (!res.second) {
+            vassert(false, "Duplicate test name {} detected", name);
+        }
+    }
+    vassert(names_arr.size() == names_set.size(), "duplicate detected");
 
     /*
      * check that target test name exists
@@ -204,10 +266,12 @@ ss::future<> write_corpus(const std::filesystem::path& dir) {
 
 ss::future<> check_type(const std::filesystem::path& file) {
     return read_fully_to_string(file).then([file](auto data) {
-        json::Document doc;
-        doc.Parse(data);
-        vassert(!doc.HasParseError(), "JSON {} has parse errors", file);
-        check(std::move(doc));
+        return ss::async([&] {
+            json::Document doc;
+            doc.Parse(data);
+            vassert(!doc.HasParseError(), "JSON {} has parse errors", file);
+            check(std::move(doc));
+        });
     });
 }
 

@@ -281,6 +281,70 @@ std::ostream& operator<<(std::ostream& o, const backend_operation& op) {
     return o;
 }
 
+std::ostream& operator<<(std::ostream& o, const begin_tx_request& r) {
+    fmt::print(o, "{{ ntp: {}, pid: {}, tx_seq: {} }}", r.ntp, r.pid, r.tx_seq);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const begin_tx_reply& r) {
+    fmt::print(o, "{{ ntp: {}, etag: {}, ec: {} }}", r.ntp, r.etag, r.ec);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const prepare_tx_request& r) {
+    fmt::print(
+      o,
+      "{{ ntp: {}, etag: {}, tm: {}, pid: {}, tx_seq: {}, timeout: {} }}",
+      r.ntp,
+      r.etag,
+      r.tm,
+      r.pid,
+      r.tx_seq,
+      r.timeout);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const prepare_tx_reply& r) {
+    fmt::print(o, "{{ ec: {} }}", r.ec);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const init_tm_tx_request& r) {
+    fmt::print(
+      o,
+      "{{ tx_id: {}, transaction_timeout_ms: {}, timeout: {} }}",
+      r.tx_id,
+      r.transaction_timeout_ms,
+      r.timeout);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const init_tm_tx_reply& r) {
+    fmt::print(o, "{{ pid: {}, ec: {} }}", r.pid, r.ec);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const try_abort_request& r) {
+    fmt::print(
+      o,
+      "{{ tm: {}, pid: {}, tx_seq: {}, timeout: {} }}",
+      r.tm,
+      r.pid,
+      r.tx_seq,
+      r.timeout);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const try_abort_reply& r) {
+    fmt::print(
+      o,
+      "{{ commited: {}, aborted: {}, ec: {} }}",
+      bool(r.commited),
+      bool(r.aborted),
+      r.ec);
+    return o;
+}
+
 std::ostream&
 operator<<(std::ostream& o, const cluster_config_delta_cmd_data& data) {
     fmt::print(
@@ -308,6 +372,41 @@ bool config_status::operator==(const config_status& rhs) const {
     return std::tie(node, version, restart, unknown, invalid)
            == std::tie(
              rhs.node, rhs.version, rhs.restart, rhs.unknown, rhs.invalid);
+}
+
+std::ostream& operator<<(std::ostream& o, const cluster_property_kv& kv) {
+    fmt::print(
+      o, "{{cluster_property_kv: key {}, value: {})}}", kv.key, kv.value);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const config_update_request& crq) {
+    fmt::print(
+      o,
+      "{{config_update_request: upsert {}, remove: {})}}",
+      crq.upsert,
+      crq.remove);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const config_update_reply& crr) {
+    fmt::print(
+      o,
+      "{{config_update_reply: error {}, latest_version: {})}}",
+      crr.error,
+      crr.latest_version);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const hello_request& h) {
+    fmt::print(
+      o, "{{hello_request: peer {}, start_time: {})}}", h.peer, h.start_time);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const hello_reply& h) {
+    fmt::print(o, "{{hello_reply: error {}, latest_version: {})}}", h.error);
+    return o;
 }
 
 namespace {
@@ -464,6 +563,27 @@ std::ostream& operator<<(std::ostream& o, const feature_update_action& fua) {
     }
 
     fmt::print(o, "{{action {} {} }}", fua.feature_name, action_name);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const feature_action_request& far) {
+    fmt::print(o, "{{feature_update_action: {}}}", far.action);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const feature_action_response& far) {
+    fmt::print(o, "{{error: {}}}", far.error);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const feature_barrier_request& fbr) {
+    fmt::print(
+      o, "{{tag: {} peer: {} entered: {}}}", fbr.tag, fbr.peer, fbr.entered);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const feature_barrier_response& fbr) {
+    fmt::print(o, "{{entered: {} complete: {}}}", fbr.entered, fbr.complete);
     return o;
 }
 

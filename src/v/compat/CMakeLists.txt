@@ -5,7 +5,9 @@ v_cc_library(
   DEPS
     Seastar::seastar
     v::json
+    v::cluster
     v::utils
-    v::raft)
+    v::raft
+    v::model_test_utils)
 
 add_subdirectory(tests)
