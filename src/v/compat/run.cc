@@ -11,13 +11,20 @@
 #include "compat/run.h"
 
 #include "cluster/metadata_dissemination_types.h"
+#include "cluster/partition_balancer_types.h"
 #include "cluster/types.h"
+#include "compat/abort_tx_compat.h"
+#include "compat/acls_compat.h"
+#include "compat/begin_group_tx_compat.h"
 #include "compat/begin_tx_compat.h"
 #include "compat/check.h"
 #include "compat/cluster_compat.h"
+#include "compat/commit_tx_compat.h"
 #include "compat/id_allocator_compat.h"
 #include "compat/init_tm_tx_compat.h"
 #include "compat/metadata_dissemination_compat.h"
+#include "compat/partition_balancer_compat.h"
+#include "compat/prepare_group_tx_compat.h"
 #include "compat/prepare_tx_compat.h"
 #include "compat/raft_compat.h"
 #include "compat/try_abort_compat.h"
@@ -85,7 +92,25 @@ using compat_checks = type_list<
   cluster::update_leadership_request_v2,
   cluster::update_leadership_reply,
   cluster::get_leadership_request,
-  cluster::get_leadership_reply>;
+  cluster::get_leadership_reply,
+  cluster::create_non_replicable_topics_request,
+  cluster::create_non_replicable_topics_reply,
+  cluster::finish_partition_update_request,
+  cluster::finish_partition_update_reply,
+  cluster::cancel_all_partition_movements_request,
+  cluster::cancel_node_partition_movements_request,
+  cluster::cancel_partition_movements_reply,
+  cluster::abort_tx_request,
+  cluster::abort_tx_reply,
+  cluster::begin_group_tx_request,
+  cluster::begin_group_tx_reply,
+  cluster::prepare_group_tx_request,
+  cluster::prepare_group_tx_reply,
+  cluster::commit_tx_request,
+  cluster::commit_tx_reply,
+  cluster::create_acls_reply,
+  cluster::reconciliation_state_request,
+  cluster::partition_balancer_overview_request>;
 
 struct compat_error final : public std::runtime_error {
 public:

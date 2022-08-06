@@ -12,9 +12,8 @@
 #pragma once
 
 #include "config/property.h"
+#include "ssx/semaphore.h"
 #include "units.h"
-
-#include <seastar/core/semaphore.hh>
 
 #include <cstdint>
 
@@ -41,8 +40,10 @@ namespace storage {
  */
 class adjustable_allowance {
 public:
-    adjustable_allowance(uint64_t capacity)
-      : _sem(capacity)
+    explicit adjustable_allowance(uint64_t capacity)
+      : adjustable_allowance(capacity, "s/allowance") {}
+    adjustable_allowance(uint64_t capacity, const ss::sstring& sem_name)
+      : _sem(capacity, sem_name)
       , _capacity(capacity) {}
 
     void set_capacity(uint64_t capacity) noexcept {
@@ -62,7 +63,7 @@ public:
      * because there are too many dirty bytes.
      */
     struct take_result {
-        ss::semaphore_units<> units;
+        ssx::semaphore_units units;
         bool checkpoint_hint{false};
     };
 
@@ -83,14 +84,14 @@ public:
     /**
      * Blocking get units: will block until units are available.
      */
-    ss::future<ss::semaphore_units<>> get_units(size_t units) {
+    ss::future<ssx::semaphore_units> get_units(size_t units) {
         return ss::get_units(_sem, units);
     }
 
     size_t current() const noexcept { return _sem.current(); }
 
 private:
-    ss::semaphore _sem;
+    ssx::semaphore _sem;
 
     uint64_t _capacity;
 };
@@ -112,6 +113,7 @@ public:
     storage_resources(
       config::binding<size_t>,
       config::binding<uint64_t>,
+      config::binding<uint64_t>,
       config::binding<uint64_t>);
     storage_resources(const storage_resources&) = delete;
 
@@ -123,10 +125,7 @@ public:
     /**
      * Call this when topics_table gets updated
      */
-    void update_partition_count(size_t partition_count) {
-        _partition_count = partition_count;
-        _falloc_step_dirty = true;
-    }
+    void update_partition_count(size_t partition_count);
 
     uint64_t get_space_allowance() { return _space_allowance; }
 
@@ -141,11 +140,16 @@ public:
 
     adjustable_allowance::take_result stm_take_bytes(size_t bytes);
 
-    ss::future<ss::semaphore_units<>> get_recovery_units() {
+    adjustable_allowance::take_result compaction_index_take_bytes(size_t bytes);
+    bool compaction_index_bytes_available() {
+        return _compaction_index_bytes.current() > 0;
+    }
+
+    ss::future<ssx::semaphore_units> get_recovery_units() {
         return _inflight_recovery.get_units(1);
     }
 
-    ss::future<ss::semaphore_units<>> get_close_flush_units() {
+    ss::future<ssx::semaphore_units> get_close_flush_units() {
         return _inflight_close_flush.get_units(1);
     }
 
@@ -157,6 +161,7 @@ private:
     config::binding<size_t> _segment_fallocation_step;
     config::binding<uint64_t> _target_replay_bytes;
     config::binding<uint64_t> _max_concurrent_replay;
+    config::binding<uint64_t> _compaction_index_mem_limit;
     size_t _append_chunk_size;
 
     size_t _falloc_step{0};
@@ -178,6 +183,10 @@ private:
     // How many bytes may all consensus instances write before
     // we ask them to start snapshotting their state machines?
     adjustable_allowance _stm_dirty_bytes{0};
+
+    // How much memory may all compacted partitions on this shard
+    // use for their spill_key_index objects
+    adjustable_allowance _compaction_index_bytes{0};
 
     // How many logs may be recovered (via log_manager::manage)
     // concurrently?

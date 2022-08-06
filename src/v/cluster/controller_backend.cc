@@ -36,7 +36,6 @@
 #include <seastar/core/future-util.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
-#include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/util/later.hh>
@@ -1393,7 +1392,11 @@ ss::future<> controller_backend::add_to_shard_table(
   model::revision_id revision) {
     // update shard_table: broadcast
     vlog(
-      clusterlog.trace, "adding {} to shard table at {}", revision, ntp, shard);
+      clusterlog.trace,
+      "adding {} to shard table at shard {} with revision {}",
+      ntp,
+      shard,
+      revision);
     return _shard_table.invoke_on_all(
       [ntp = std::move(ntp), raft_group, shard, revision](
         shard_table& s) mutable {
