@@ -48,8 +48,8 @@ struct compat_check<cluster::allocate_id_request> {
         return compat_binary::serde_and_adl(obj);
     }
 
-    static bool check(cluster::allocate_id_request obj, compat_binary test) {
-        return verify_adl_or_serde(obj, std::move(test));
+    static void check(cluster::allocate_id_request obj, compat_binary test) {
+        verify_adl_or_serde(obj, std::move(test));
     }
 };
 
@@ -73,7 +73,7 @@ struct compat_check<cluster::allocate_id_reply> {
     static cluster::allocate_id_reply from_json(json::Value& rd) {
         cluster::allocate_id_reply obj;
         json_read(id);
-        obj.ec = cluster::errc(json::read_member_enum(rd, "ec", obj.ec));
+        json_read(ec);
         return obj;
     }
 
@@ -82,8 +82,8 @@ struct compat_check<cluster::allocate_id_reply> {
         return compat_binary::serde_and_adl(obj);
     }
 
-    static bool check(cluster::allocate_id_reply obj, compat_binary test) {
-        return verify_adl_or_serde(obj, std::move(test));
+    static void check(cluster::allocate_id_reply obj, compat_binary test) {
+        verify_adl_or_serde(obj, std::move(test));
     }
 };
 
