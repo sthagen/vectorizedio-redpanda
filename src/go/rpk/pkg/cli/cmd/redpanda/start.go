@@ -37,7 +37,6 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"gopkg.in/yaml.v3"
 )
 
 type prestartConfig struct {
@@ -81,7 +80,7 @@ const (
 	unsafeBypassFsyncFlag = "unsafe-bypass-fsync"
 	nodeIDFlag            = "node-id"
 	setConfigFlag         = "set"
-	sandboxFlag           = "sandbox"
+	modeFlag              = "mode"
 	checkFlag             = "check"
 )
 
@@ -131,7 +130,7 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 		installDirFlag  string
 		timeout         time.Duration
 		wellKnownIo     string
-		sandbox         bool
+		mode            string
 	)
 	sFlags := seastarFlags{}
 
@@ -162,24 +161,23 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 			// Thus, we can ignore any env / flags that would come from rpk
 			// configuration itself.
 			cfg = cfg.FileOrDefaults()
-			clusterProperties := make(map[string]interface{})
-			if sandbox {
-				fmt.Fprintln(os.Stderr, "WARNING: This is a setup for development purposes only; in sandbox mode your clusters may run unrealistically fast and data can be corrupted any time your computer shuts down uncleanly.")
-				cfg.Redpanda.DeveloperMode = true
-				setDevModeFlags(cmd)
-				clusterProperties["topic_partitions_per_shard"] = 1000
-				clusterProperties["group_topic_partitions"] = 1
-				clusterProperties["auto_create_topics_enabled"] = true
+			if cfg.Redpanda.DeveloperMode && len(mode) == 0 {
+				mode = "dev-container"
 			}
-			if cfg.Redpanda.DeveloperMode {
-				clusterProperties["storage_min_free_bytes"] = 0
+			switch mode {
+			case "dev-container":
+				fmt.Fprintln(os.Stderr, "WARNING: This is a setup for development purposes only; in this mode your clusters may run unrealistically fast and data can be corrupted any time your computer shuts down uncleanly.")
+				setContainerModeFlags(cmd)
+				setContainerModeCfgFields(cfg)
+			case "help":
+				fmt.Println(helpMode)
+				return nil
+			case "":
+				// do nothing.
+			default:
+				return fmt.Errorf("unrecognized mode %q; use --mode help for more info", mode)
 			}
-			if len(clusterProperties) > 0 {
-				err := setClusterProperties(fs, cfg.FileLocation(), clusterProperties)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "unable to set cluster properties: %v\n", err)
-				}
-			}
+
 			if len(configKvs) > 0 {
 				if err = setConfig(cfg, configKvs); err != nil {
 					return err
@@ -505,7 +503,13 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 		"Enable overprovisioning",
 	)
 	command.Flags().BoolVar(&sFlags.unsafeBypassFsync, unsafeBypassFsyncFlag, false, "Enable unsafe-bypass-fsync")
-	command.Flags().BoolVar(&sandbox, sandboxFlag, false, "Sandbox mode, sets the following flags: --overprovisioned --smp 1 --node-id 0 --reserveMemory 0M --check=false --unsafe-bypass-fsync=true")
+	command.Flags().StringVar(
+		&mode,
+		modeFlag,
+		"",
+		"Mode sets well-known configuration properties for development or test environments; use --mode help for more info",
+	)
+
 	command.Flags().DurationVar(
 		&timeout,
 		"timeout",
@@ -1067,17 +1071,16 @@ func mergeMaps(a, b map[string]string) map[string]string {
 	return a
 }
 
-// setDevModeFlags sets flags bundled into --dev flag.
-func setDevModeFlags(cmd *cobra.Command) {
+// setContainerModeFlags sets flags bundled into --mode dev-container flag.
+func setContainerModeFlags(cmd *cobra.Command) {
 	devMap := map[string]string{
 		overprovisionedFlag:   "true",
-		smpFlag:               "1",
 		reserveMemoryFlag:     "0M",
 		checkFlag:             "false",
 		unsafeBypassFsyncFlag: "true",
 	}
 	// We don't override the values set during command execution, e.g:
-	//   rpk redpanda start --dev --smp 2
+	//   rpk redpanda start --mode dev-container --smp 2
 	// will apply all dev flags, but smp will be 2.
 	for k, v := range devMap {
 		if !cmd.Flags().Changed(k) {
@@ -1086,55 +1089,33 @@ func setDevModeFlags(cmd *cobra.Command) {
 	}
 }
 
-// setClusterProperties generates a .bootstrap.yaml file in the same path as
-// the redpanda.yaml, this will be picked up by redpanda on first start and
-// set the passed properties.
-func setClusterProperties(fs afero.Fs, cfgFileLocation string, properties map[string]interface{}) (rerr error) {
-	props, err := yaml.Marshal(properties)
-	if err != nil {
-		return err
+func setContainerModeCfgFields(cfg *config.Config) {
+	cfg.Redpanda.DeveloperMode = true
+
+	// cluster properties:
+	if cfg.Redpanda.Other == nil {
+		cfg.Redpanda.Other = make(map[string]interface{})
 	}
-	cfgDir := filepath.Dir(cfgFileLocation)
-
-	tmp, err := afero.TempFile(fs, cfgDir, "bootstrap-*.yaml")
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if rerr != nil {
-			suggestion := "you can run 'rpk cluster config set <key> <value>' to set the following properties: " + string(props)
-			if removeErr := fs.Remove(tmp.Name()); removeErr != nil {
-				rerr = fmt.Errorf("%s, unable to remove temp file: %v; %s", rerr, removeErr, suggestion)
-			} else {
-				rerr = fmt.Errorf("%s, temp file removed from disk; %s", rerr, suggestion)
-			}
-		}
-	}()
-
-	err = afero.WriteFile(fs, tmp.Name(), props, 0o644)
-	tmp.Close()
-	if err != nil {
-		return fmt.Errorf("error writing to temporary file: %v", err)
-	}
-
-	// If we already have a redpanda.yaml we want to have the same file
-	// ownership for .boostrap.yaml
-	if exists, _ := afero.Exists(fs, cfgFileLocation); exists {
-		stat, err := fs.Stat(cfgFileLocation)
-		if err != nil {
-			return fmt.Errorf("unable to stat existing file: %v", err)
-		}
-		err = config.PreserveUnixOwnership(fs, stat, tmp.Name())
-		if err != nil {
-			return err
-		}
-	}
-
-	err = fs.Rename(tmp.Name(), filepath.Join(cfgDir, ".bootstrap.yaml"))
-	if err != nil {
-		return err
-	}
-
-	return nil
+	cfg.Redpanda.Other["auto_create_topics_enabled"] = true
+	cfg.Redpanda.Other["group_topic_partitions"] = 3
+	cfg.Redpanda.Other["storage_min_free_bytes"] = 10485760
+	cfg.Redpanda.Other["topic_partitions_per_shard"] = 1000
 }
+
+const helpMode = `Mode uses well-known configuration properties for development or tests 
+environments:
+
+--mode dev-container
+    Bundled flags:
+        * --overprovisioned
+        * --reserve-memory 0M
+        * --check=false
+        * --unsafe-bypass-fsync
+    Bundled cluster properties:
+        * auto_create_topics_enabled: true
+        * group_topic_partitions: 3
+        * storage_min_free_bytes: 10485760 (10MiB)
+        * topic_partitions_per_shard: 1000
+
+After redpanda starts you can modify the cluster properties using:
+    rpk config set <key> <value>`

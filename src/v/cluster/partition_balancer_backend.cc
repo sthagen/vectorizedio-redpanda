@@ -11,7 +11,9 @@
 #include "cluster/partition_balancer_backend.h"
 
 #include "cluster/health_monitor_frontend.h"
+#include "cluster/health_monitor_types.h"
 #include "cluster/logger.h"
+#include "cluster/members_table.h"
 #include "cluster/partition_balancer_planner.h"
 #include "cluster/topics_frontend.h"
 #include "random/generators.h"
@@ -33,6 +35,7 @@ partition_balancer_backend::partition_balancer_backend(
   ss::sharded<controller_stm>& controller_stm,
   ss::sharded<topic_table>& topic_table,
   ss::sharded<health_monitor_frontend>& health_monitor,
+  ss::sharded<members_table>& members_table,
   ss::sharded<partition_allocator>& partition_allocator,
   ss::sharded<topics_frontend>& topics_frontend,
   config::binding<model::partition_autobalancing_mode>&& mode,
@@ -45,6 +48,7 @@ partition_balancer_backend::partition_balancer_backend(
   , _controller_stm(controller_stm.local())
   , _topic_table(topic_table.local())
   , _health_monitor(health_monitor.local())
+  , _members_table(members_table.local())
   , _partition_allocator(partition_allocator.local())
   , _topics_frontend(topics_frontend.local())
   , _mode(std::move(mode))
@@ -118,9 +122,32 @@ ss::future<> partition_balancer_backend::do_tick() {
         co_return;
     }
 
-    auto health_report
-      = co_await _health_monitor.get_current_cluster_health_snapshot(
-        cluster_report_filter{});
+    auto health_report = co_await _health_monitor.get_cluster_health(
+      cluster_report_filter{},
+      force_refresh::no,
+      model::timeout_clock::now() + controller_stm_sync_timeout);
+    if (!health_report) {
+        vlog(
+          clusterlog.info,
+          "unable to get health report - {}",
+          health_report.error().message());
+        co_return;
+    }
+
+    if (!_raft0->is_leader() || _raft0->term() != current_term) {
+        vlog(clusterlog.debug, "lost leadership, exiting");
+        co_return;
+    }
+
+    auto follower_metrics = _raft0->get_follower_metrics();
+    for (auto& follower : follower_metrics) {
+        // patch last heartbeat time so that we don't get false positives for
+        // unavailable node detection for nodes that didn't respond to a
+        // heartbeat since we became leader (last_heartbeat would be -infinity
+        // for them).
+        follower.last_heartbeat = std::max(
+          follower.last_heartbeat, _raft0->became_leader_at());
+    }
 
     double soft_max_disk_usage_ratio = _max_disk_usage_percent() / 100.0;
     double hard_max_disk_usage_ratio
@@ -134,8 +161,9 @@ ss::future<> partition_balancer_backend::do_tick() {
             .node_availability_timeout_sec = _availability_timeout(),
           },
           _topic_table,
+          _members_table,
           _partition_allocator)
-          .plan_reassignments(health_report, _raft0->get_follower_metrics());
+          .plan_reassignments(health_report.value(), follower_metrics);
 
     _last_leader_term = _raft0->term();
     _last_tick_time = ss::lowres_clock::now();
@@ -147,7 +175,9 @@ ss::future<> partition_balancer_backend::do_tick() {
         _last_status = partition_balancer_status::in_progress;
     } else if (plan_data.status == planner_status::waiting_for_reports) {
         _last_status = partition_balancer_status::starting;
-    } else if (plan_data.failed_reassignments_count > 0) {
+    } else if (
+      plan_data.failed_reassignments_count > 0
+      || plan_data.status == planner_status::waiting_for_maintenance_end) {
         _last_status = partition_balancer_status::stalled;
     } else {
         _last_status = partition_balancer_status::ready;
@@ -158,10 +188,12 @@ ss::future<> partition_balancer_backend::do_tick() {
           clusterlog.info,
           "last status: {}; "
           "violations: unavailable nodes: {}, full nodes: {}; "
+          "updates in progress: {}; "
           "reassignments planned: {}, cancelled: {}, failed: {}",
           _last_status,
           _last_violations.unavailable_nodes.size(),
           _last_violations.full_nodes.size(),
+          _topic_table.updates_in_progress().size(),
           plan_data.reassignments.size(),
           plan_data.cancellations.size(),
           plan_data.failed_reassignments_count);

@@ -1006,7 +1006,8 @@ configuration::configuration()
   , cloud_storage_max_connections(
       *this,
       "cloud_storage_max_connections",
-      "Max number of simultaneous uploads to S3",
+      "Max number of simultaneous connections to S3 per shard (includes "
+      "connections used for both uploads and downloads)",
       {.visibility = visibility::user},
       20)
   , cloud_storage_disable_tls(
@@ -1288,7 +1289,8 @@ configuration::configuration()
       *this,
       "health_monitor_tick_interval",
       "How often health monitor refresh cluster state",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .visibility = visibility::deprecated},
       10s)
   , health_monitor_max_metadata_age(
       *this,

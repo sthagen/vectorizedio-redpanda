@@ -6,6 +6,7 @@
 # As of the Change Date specified in that file, in accordance with
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
+import concurrent.futures
 import copy
 
 import time
@@ -154,7 +155,8 @@ class ResourceSettings:
                  num_cpus: Optional[int] = None,
                  memory_mb: Optional[int] = None,
                  bypass_fsync: Optional[bool] = None,
-                 nfiles: Optional[int] = None):
+                 nfiles: Optional[int] = None,
+                 reactor_stall_threshold: Optional[int] = None):
         self._num_cpus = num_cpus
         self._memory_mb = memory_mb
 
@@ -164,10 +166,15 @@ class ResourceSettings:
             self._bypass_fsync = bypass_fsync
 
         self._nfiles = nfiles
+        self._reactor_stall_threshold = reactor_stall_threshold
 
     @property
     def memory_mb(self):
         return self._memory_mb
+
+    @property
+    def num_cpus(self):
+        return self._num_cpus
 
     def to_cli(self, *, dedicated_node):
         """
@@ -199,6 +206,11 @@ class ResourceSettings:
             args.extend([
                 "--kernel-page-cache=true", "--overprovisioned ",
                 "--reserve-memory=0M"
+            ])
+
+        if self._reactor_stall_threshold is not None:
+            args.extend([
+                f"--blocked-reactor-notify-ms={self._reactor_stall_threshold}"
             ])
 
         if num_cpus is not None:
@@ -361,18 +373,39 @@ class SecurityConfig:
         self.kafka_enable_authorization: Optional[bool] = None
         self.endpoint_authn_method: Optional[str] = None
         self.tls_provider: Optional[TLSProvider] = None
+        self.require_client_auth: bool = True
 
         # The rules to extract principal from mtls
         self.principal_mapping_rules = self.__DEFAULT_PRINCIPAL_MAPPING_RULES
 
     # sasl is required
     def sasl_enabled(self):
-        return (self.kafka_enable_authorization is None
-                and self.enable_sasl) or self.endpoint_authn_method == "sasl"
+        return (self.kafka_enable_authorization is None and self.enable_sasl
+                and self.endpoint_authn_method is None
+                ) or self.endpoint_authn_method == "sasl"
 
     # principal is extracted from mtls distinguished name
     def mtls_identity_enabled(self):
         return self.endpoint_authn_method == "mtls_identity"
+
+
+class LoggingConfig:
+    def __init__(self, default_level: str, logger_levels={}):
+        self.default_level = default_level
+        self.logger_levels = logger_levels
+
+    def to_args(self) -> str:
+        """
+        Generate redpanda CLI arguments for this logging config
+        :return: string
+        """
+        args = f"--default-log-level {self.default_level}"
+        if self.logger_levels:
+            levels_arg = ":".join(
+                [f"{k}={v}" for k, v in self.logger_levels.items()])
+            args += f" --logger-log-level={levels_arg}"
+
+        return args
 
 
 class RedpandaService(Service):
@@ -456,10 +489,12 @@ class RedpandaService(Service):
                  resource_settings=None,
                  si_settings=None,
                  log_level: Optional[str] = None,
+                 log_config: Optional[LoggingConfig] = None,
                  environment: Optional[dict[str, str]] = None,
                  security: SecurityConfig = SecurityConfig(),
                  node_ready_timeout_s=None,
-                 superuser: Optional[SaslCredentials] = None):
+                 superuser: Optional[SaslCredentials] = None,
+                 skip_if_no_redpanda_log: bool = False):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._enable_rp = enable_rp
@@ -487,11 +522,21 @@ class RedpandaService(Service):
         for node in self.nodes:
             self._extra_node_conf[node] = extra_node_conf or dict()
 
-        if log_level is None:
-            self._log_level = self._context.globals.get(
-                self.LOG_LEVEL_KEY, self.DEFAULT_LOG_LEVEL)
+        if log_config is not None:
+            self._log_config = log_config
         else:
-            self._log_level = log_level
+            if log_level is None:
+                self._log_level = self._context.globals.get(
+                    self.LOG_LEVEL_KEY, self.DEFAULT_LOG_LEVEL)
+            else:
+                self._log_level = log_level
+            self._log_config = LoggingConfig(
+                self._log_level, {
+                    'exception': 'debug',
+                    'archival': 'debug',
+                    'io': 'debug',
+                    'cloud_storage': 'debug'
+                })
 
         self._admin = Admin(self,
                             auth=(self._superuser.username,
@@ -527,6 +572,8 @@ class RedpandaService(Service):
 
         self._tls_cert = None
         self._init_tls()
+
+        self._skip_if_no_redpanda_log = skip_if_no_redpanda_log
 
     def set_environment(self, environment: dict[str, str]):
         self._environment = environment
@@ -566,6 +613,9 @@ class RedpandaService(Service):
     def endpoint_authn_method(self):
         return self._security.endpoint_authn_method
 
+    def require_client_auth(self):
+        return self._security.require_client_auth
+
     @property
     def dedicated_nodes(self):
         """
@@ -595,8 +645,78 @@ class RedpandaService(Service):
             memory_kb = int(line.strip().split()[1])
             return memory_kb / 1024
 
-    def start(self, nodes=None, clean_nodes=True, start_si=True):
-        """Start the service on all nodes."""
+    def get_node_cpu_count(self):
+        if self._resource_settings.num_cpus is not None:
+            self.logger.info(f"get_node_cpu_count: got from ResourceSettings")
+            return self._resource_settings.num_cpus
+        elif self._dedicated_nodes is False:
+            self.logger.info(
+                f"get_node_cpu_count: using ResourceSettings default")
+            return self._resource_settings.DEFAULT_NUM_CPUS
+        else:
+            self.logger.info(f"get_node_cpu_count: fetching from node")
+
+            # Assume nodes are symmetric, so we can just ask one
+            node = self.nodes[0]
+            core_count_str = node.account.ssh_output(
+                "cat /proc/cpuinfo | grep ^processor | wc -l")
+            return int(core_count_str.strip())
+
+    def get_node_disk_free(self):
+        # Assume nodes are symmetric, so we can just ask one
+        node = self.nodes[0]
+
+        if node.account.exists(self.PERSISTENT_ROOT):
+            df_path = self.PERSISTENT_ROOT
+        else:
+            # If dir doesn't exist yet, use the parent.
+            df_path = os.path.dirname(self.PERSISTENT_ROOT)
+
+        df_out = node.account.ssh_output(f"df --output=avail {df_path}")
+
+        avail_kb = int(df_out.strip().split(b"\n")[1].strip())
+
+        if not self.dedicated_nodes:
+            # Assume docker images share a filesystem.  This may not
+            # be the truth (e.g. in CI they get indepdendent XFS
+            # filesystems), but it's the safe assumption on e.g.
+            # a workstation.
+            avail_kb = int(avail_kb / len(self.nodes))
+
+        return avail_kb * 1024
+
+    def _for_nodes(self, nodes, cb: callable, *, parallel: bool):
+        if not parallel:
+            # Trivial case: just loop and call
+            for n in nodes:
+                cb(n)
+            return
+
+        node_futures = []
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(nodes)) as executor:
+            for node in nodes:
+                f = executor.submit(cb, node)
+                node_futures.append((node, f))
+
+            for node, f in node_futures:
+                f.result()
+
+    def start(self,
+              nodes=None,
+              clean_nodes=True,
+              start_si=True,
+              parallel: bool = False):
+        """
+        Start the service on all nodes.
+
+        By default, nodes are started in serial: this makes logs easier to
+        read and simplifies debugging.  For tests starting larger numbers of
+        nodes where serialized startup becomes annoying, pass parallel=True.
+
+        :param parallel: if true, run clean and start operations in parallel
+                         for the nodes being started.
+        """
         to_start = nodes if nodes is not None else self.nodes
         assert all((node in self.nodes for node in to_start))
         self.logger.info("%s: starting service" % self.who_am_i())
@@ -608,7 +728,8 @@ class RedpandaService(Service):
         self.logger.debug(
             self.who_am_i() +
             ": killing processes and attempting to clean up before starting")
-        for node in to_start:
+
+        def clean_one(node):
             try:
                 self.stop_node(node)
             except Exception:
@@ -628,13 +749,17 @@ class RedpandaService(Service):
                     f"Error cleaning node {node.account.hostname}:")
                 raise
 
+        self._for_nodes(to_start, clean_one, parallel=parallel)
+
         if first_start:
             self.write_tls_certs()
             self.write_bootstrap_cluster_config()
 
-        for node in to_start:
+        def start_one(node):
             self.logger.debug("%s: starting node" % self.who_am_i(node))
             self.start_node(node)
+
+        self._for_nodes(to_start, start_one, parallel=parallel)
 
         if self._start_duration_seconds < 0:
             self._start_duration_seconds = time.time() - self._start_time
@@ -719,8 +844,7 @@ class RedpandaService(Service):
         cmd = (
             f"{preamble} {env_preamble} nohup {self.find_binary('redpanda')}"
             f" --redpanda-cfg {RedpandaService.NODE_CONFIG_FILE}"
-            f" --default-log-level {self._log_level}"
-            f" --logger-log-level=exception=debug:archival=debug:io=debug:cloud_storage=debug "
+            f" {self._log_config.to_args()} "
             f" {res_args} "
             f" >> {RedpandaService.STDOUT_STDERR_CAPTURE} 2>&1 &")
 
@@ -825,6 +949,17 @@ class RedpandaService(Service):
 
         if self.coproc_enabled():
             self.start_wasm_engine(node)
+
+        if self.dedicated_nodes:
+            # When running on dedicated nodes, we should always be running on XFS.  If we
+            # aren't, it's probably an accident that can easily cause spurious failures
+            # and confusion, so be helpful and fail out early.
+            fs = node.account.ssh_output(
+                f"stat -f -c %T {self.PERSISTENT_ROOT}").strip()
+            if fs != b'xfs':
+                raise RuntimeError(
+                    f"Unexpected filesystem {fs} at {self.PERSISTENT_ROOT} on {node.name}"
+                )
 
         def is_status_ready():
             status = None
@@ -1074,6 +1209,14 @@ class RedpandaService(Service):
 
         bad_lines = collections.defaultdict(list)
         for node in self.nodes:
+
+            if self._skip_if_no_redpanda_log and not node.account.exists(
+                    RedpandaService.STDOUT_STDERR_CAPTURE):
+                self.logger.info(
+                    f"{RedpandaService.STDOUT_STDERR_CAPTURE} not found on {node.account.hostname}. Skipping log scan."
+                )
+                return
+
             self.logger.info(
                 f"Scanning node {node.account.hostname} log for errors...")
 
@@ -1338,14 +1481,16 @@ class RedpandaService(Service):
             conf = yaml.dump(doc)
 
         if self._security.tls_provider:
-            tls_config = dict(
-                enabled=True,
-                require_client_auth=True,
-                name="dnslistener",
-                key_file=RedpandaService.TLS_SERVER_KEY_FILE,
-                cert_file=RedpandaService.TLS_SERVER_CRT_FILE,
-                truststore_file=RedpandaService.TLS_CA_CRT_FILE,
-            )
+            tls_config = [
+                dict(
+                    enabled=True,
+                    require_client_auth=self.require_client_auth(),
+                    name=n,
+                    key_file=RedpandaService.TLS_SERVER_KEY_FILE,
+                    cert_file=RedpandaService.TLS_SERVER_CRT_FILE,
+                    truststore_file=RedpandaService.TLS_CA_CRT_FILE,
+                ) for n in ["dnslistener", "iplistener"]
+            ]
             doc = yaml.full_load(conf)
             doc["redpanda"].update(dict(kafka_api_tls=tls_config))
             conf = yaml.dump(doc)

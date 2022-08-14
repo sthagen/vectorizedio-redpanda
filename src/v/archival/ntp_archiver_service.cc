@@ -87,10 +87,15 @@ ntp_archiver::ntp_archiver(
 
 void ntp_archiver::run_sync_manifest_loop() {
     vassert(
-      !_sync_manifest_loop_started,
+      _upload_loop_state == loop_state::initial,
+      "attempt to start manifest sync loop for {} when upload loop has been "
+      "active",
+      _ntp);
+    vassert(
+      _sync_manifest_loop_state != loop_state::started,
       "sync manifest loop for ntp {} already started",
       _ntp);
-    _sync_manifest_loop_started = true;
+    _sync_manifest_loop_state = loop_state::started;
 
     // NOTE: not using ssx::spawn_with_gate_then here because we want to log
     // inside the gate (so that _rtclog is guaranteed to be alive).
@@ -99,20 +104,34 @@ void ntp_archiver::run_sync_manifest_loop() {
           .handle_exception_type([](const ss::abort_requested_exception&) {})
           .handle_exception_type([](const ss::sleep_aborted&) {})
           .handle_exception_type([](const ss::gate_closed_exception&) {})
+          .handle_exception_type([this](const ss::semaphore_timed_out& e) {
+              vlog(
+                _rtclog.warn,
+                "Semaphore timed out in sync manifest loop: {}. This may be "
+                "due to the system being overloaded. The loop will restart.",
+                e);
+          })
           .handle_exception([this](std::exception_ptr e) {
               vlog(_rtclog.error, "sync manifest loop error: {}", e);
           })
           .finally([this] {
               vlog(_rtclog.debug, "sync manifest loop stopped");
-              _sync_manifest_loop_stopped = true;
+              _sync_manifest_loop_state = loop_state::stopped;
           });
     });
 }
 
 void ntp_archiver::run_upload_loop() {
     vassert(
-      !_upload_loop_started, "upload loop for ntp {} already started", _ntp);
-    _upload_loop_started = true;
+      _sync_manifest_loop_state == loop_state::initial,
+      "attempt to start upload loop for {} when manifest sync loop has been "
+      "active",
+      _ntp);
+    vassert(
+      _upload_loop_state != loop_state::started,
+      "upload loop for ntp {} already started",
+      _ntp);
+    _upload_loop_state = loop_state::started;
 
     // NOTE: not using ssx::spawn_with_gate_then here because we want to log
     // inside the gate (so that _rtclog is guaranteed to be alive).
@@ -122,12 +141,19 @@ void ntp_archiver::run_upload_loop() {
           .handle_exception_type([](const ss::abort_requested_exception&) {})
           .handle_exception_type([](const ss::sleep_aborted&) {})
           .handle_exception_type([](const ss::gate_closed_exception&) {})
+          .handle_exception_type([this](const ss::semaphore_timed_out& e) {
+              vlog(
+                _rtclog.warn,
+                "Semaphore timed out in the upload loop: {}. This may be "
+                "due to the system being overloaded. The loop will restart.",
+                e);
+          })
           .handle_exception([this](std::exception_ptr e) {
               vlog(_rtclog.error, "upload loop error: {}", e);
           })
           .finally([this] {
               vlog(_rtclog.debug, "upload loop stopped");
-              _upload_loop_stopped = true;
+              _upload_loop_state = loop_state::stopped;
           });
     });
 }
