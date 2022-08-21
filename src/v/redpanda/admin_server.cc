@@ -53,6 +53,7 @@
 #include "raft/types.h"
 #include "redpanda/admin/api-doc/broker.json.h"
 #include "redpanda/admin/api-doc/cluster.json.h"
+#include "redpanda/admin/api-doc/cluster_config.json.h"
 #include "redpanda/admin/api-doc/config.json.h"
 #include "redpanda/admin/api-doc/debug.json.h"
 #include "redpanda/admin/api-doc/features.json.h"
@@ -1012,10 +1013,7 @@ void admin_server::register_cluster_config_routes() {
           auto statuses = co_await cfg.invoke_on(
             cluster::controller_stm_shard,
             [](cluster::config_manager& manager) {
-                // Intentional copy, do not want to pass reference to mutable
-                // status map back to originating core.
-                return cluster::config_manager::status_map(
-                  manager.get_status());
+                return manager.get_projected_status();
             });
 
           for (const auto& s : statuses) {
@@ -2851,6 +2849,10 @@ void admin_server::register_cluster_routes() {
                 std::get<cluster::partition_balancer_overview_reply>(result));
           } else if (std::holds_alternative<model::node_id>(result)) {
               auto node_id = std::get<model::node_id>(result);
+              vlog(
+                logger.debug,
+                "proxying the partition_balancer_overview call to node {}",
+                node_id);
               auto rpc_result
                 = co_await _connection_cache.local()
                     .with_node_client<

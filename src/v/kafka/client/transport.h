@@ -12,8 +12,8 @@
 #pragma once
 
 #include "kafka/protocol/api_versions.h"
+#include "kafka/protocol/flex_versions.h"
 #include "kafka/protocol/fwd.h"
-#include "kafka/server/flex_versions.h"
 #include "kafka/server/protocol_utils.h"
 #include "kafka/types.h"
 #include "net/transport.h"
@@ -84,7 +84,7 @@ private:
                   if (!sz) {
                       return ss::make_exception_future<iobuf>(
                         kafka_request_disconnected_exception(
-                          "Request disconnected, no response recieved"));
+                          "Request disconnected, no response received"));
                   }
                   auto size = sz.value();
                   return _in.read_exactly(sizeof(correlation_id))

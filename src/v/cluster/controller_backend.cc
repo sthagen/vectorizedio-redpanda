@@ -1440,9 +1440,10 @@ ss::future<std::error_code> controller_backend::create_partition(
     }
     // no partition exists, create one
     if (likely(!partition)) {
-        std::optional<cluster::remote_topic_properties> remote_properties;
-        if (cfg->is_recovery_enabled()) {
-            remote_properties = cfg->properties.remote_topic_properties;
+        std::optional<s3::bucket_name> read_replica_bucket;
+        if (cfg->is_read_replica()) {
+            read_replica_bucket = s3::bucket_name(
+              cfg->properties.read_replica_bucket.value());
         }
         // we use offset as an rev as it is always increasing and it
         // increases while ntp is being created again
@@ -1452,7 +1453,8 @@ ss::future<std::error_code> controller_backend::create_partition(
                   _data_directory, ntp.tp.partition, rev, initial_rev.value()),
                 group_id,
                 std::move(members),
-                remote_properties)
+                cfg->properties.remote_topic_properties,
+                read_replica_bucket)
               .discard_result();
     } else {
         // old partition still exists, wait for it to be removed

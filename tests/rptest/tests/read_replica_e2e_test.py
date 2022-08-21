@@ -45,6 +45,18 @@ class TestReadReplicaService(EndToEndTest):
         cloud_storage_readreplica_manifest_sync_timeout_ms=500,
         cloud_storage_segment_max_upload_interval_sec=5)
 
+    # Read reaplica shouldn't have it's own bucket.
+    # We're adding 'none' as a bucket name without creating
+    # an actual bucket with such name.
+    rr_settings = SISettings(
+        cloud_storage_bucket='none',
+        bypass_bucket_creation=True,
+        cloud_storage_reconciliation_interval_ms=500,
+        cloud_storage_max_connections=5,
+        log_segment_size=log_segment_size,
+        cloud_storage_readreplica_manifest_sync_timeout_ms=500,
+        cloud_storage_segment_max_upload_interval_sec=5)
+
     def __init__(self, test_context: TestContext):
         super(TestReadReplicaService, self).__init__(test_context=test_context)
         self.second_cluster = None
@@ -52,11 +64,13 @@ class TestReadReplicaService(EndToEndTest):
     def start_second_cluster(self) -> None:
         self.second_cluster = RedpandaService(self.test_context,
                                               num_brokers=3,
-                                              si_settings=self.si_settings)
+                                              si_settings=self.rr_settings)
         self.second_cluster.start(start_si=False)
 
     def create_read_replica_topic(self) -> None:
         rpk_second_cluster = RpkTool(self.second_cluster)
+        # NOTE: we set 'redpanda.remote.readreplica' to ORIGIN
+        # cluster's bucket
         conf = {
             'redpanda.remote.readreplica':
             self.si_settings.cloud_storage_bucket,

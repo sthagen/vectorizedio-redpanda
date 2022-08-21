@@ -321,7 +321,7 @@ struct raft_node {
             cache
               .invoke_on(
                 sh,
-                [&broker, this](rpc::connection_cache& c) {
+                [&broker](rpc::connection_cache& c) {
                     if (c.contains(broker.id())) {
                         return seastar::make_ready_future<>();
                     }
@@ -891,6 +891,9 @@ struct raft_test_fixture {
     raft_test_fixture() {
         ss::smp::invoke_on_all([] {
             config::shard_local_cfg().get("disable_metrics").set_value(true);
+            config::shard_local_cfg()
+              .get("disable_public_metrics")
+              .set_value(true);
             config::shard_local_cfg()
               .get("raft_heartbeat_disconnect_failures")
               .set_value((size_t)0);

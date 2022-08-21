@@ -76,22 +76,17 @@ class ClusterConfigTest(RedpandaTest):
         # Force verbose logging for the secret redaction test
         kwargs['log_level'] = 'trace'
 
+        # An explicit cluster_id prevents metrics_report from auto-setting
+        # it, and thereby prevents it doing a background write of a new
+        # config version that would disrupt our tests.
+        rp_conf['cluster_id'] = "placeholder"
+
         super(ClusterConfigTest, self).__init__(*args,
                                                 extra_rp_conf=rp_conf,
                                                 **kwargs)
 
         self.admin = Admin(self.redpanda)
         self.rpk = RpkTool(self.redpanda)
-
-    def setUp(self):
-        super().setUp()
-
-        # wait for the two config versions:
-        # 1. The initial bootstrap where we "import" any cluster properties
-        #    that were in bootstrap.yaml
-        # 2. The metrics reporter's first tick, where it initializes
-        #    the cluster_id property.
-        self._wait_for_version_sync(2)
 
     @cluster(num_nodes=3)
     @parametrize(legacy=False)
@@ -117,11 +112,13 @@ class ClusterConfigTest(RedpandaTest):
         # Some arbitrary property to check syntax of result
         assert 'kafka_api' in node_config
 
-        # Status reconcilation is async, wait for all nodes to have reported in.
-        wait_until(lambda: len(admin.get_cluster_config_status()) == len(
-            self.redpanda.nodes),
-                   timeout_sec=20,
-                   backoff_sec=1)
+        # Read authoritative version from controller
+        initial_version = max(n['config_version']
+                              for n in admin.get_cluster_config_status(
+                                  node=self.redpanda.controller()))
+
+        # Wait for all nodes to report all other nodes status' up to date
+        self._wait_for_version_status_sync(initial_version)
 
         # Validate expected status for a cluster that we have made no changes to
         # since first start
@@ -185,14 +182,36 @@ class ClusterConfigTest(RedpandaTest):
             assert config[k] == v
 
     def _wait_for_version_sync(self, version):
+        """
+        Waits for the controller to see up to date status at `version` from
+        all nodes.  Does _not_ guarantee that this status result has also
+        propagated to all other node: use _wait_for_version_status_sync
+        if you need to query status from an arbitrary node and get consistent
+        result.
+        """
         wait_until(
             lambda: set([
-                n['config_version']
-                for n in self.admin.get_cluster_config_status()
+                n['config_version'] for n in self.admin.
+                get_cluster_config_status(node=self.redpanda.controller())
             ]) == {version},
             timeout_sec=10,
             backoff_sec=0.5,
             err_msg=f"Config status versions did not converge on {version}")
+
+    def _wait_for_version_status_sync(self, version):
+        """
+        Stricter than _wait_for_version_sync: this requires not only that
+        the config version has propagated to all nodes, but also that the
+        consequent config status (of all the peers) has propagated to all nodes.
+        """
+        for node in self.redpanda.nodes:
+            wait_until(lambda: set([
+                n['config_version']
+                for n in self.admin.get_cluster_config_status(node=node)
+            ]) == {version},
+                       timeout_sec=10,
+                       backoff_sec=0.5,
+                       err_msg=f"Config status did not converge on {version}")
 
     def _check_restart_clears(self):
         """
@@ -232,7 +251,7 @@ class ClusterConfigTest(RedpandaTest):
         patch_result = self.admin.patch_cluster_config(
             upsert=dict([new_setting]))
         new_version = patch_result['config_version']
-        self._wait_for_version_sync(new_version)
+        self._wait_for_version_status_sync(new_version)
 
         assert self.admin.get_cluster_config()[
             new_setting[0]] == new_setting[1]
@@ -243,7 +262,7 @@ class ClusterConfigTest(RedpandaTest):
         # an upsert does
         patch_result = self.admin.patch_cluster_config(remove=[new_setting[0]])
         new_version = patch_result['config_version']
-        self._wait_for_version_sync(new_version)
+        self._wait_for_version_status_sync(new_version)
         assert self.admin.get_cluster_config()[
             new_setting[0]] != new_setting[1]
         self._check_restart_clears()
@@ -316,6 +335,7 @@ class ClusterConfigTest(RedpandaTest):
             norestart_new_setting[0]] == norestart_new_setting[1]
 
         # Status should not indicate restart needed
+        self._wait_for_version_status_sync(new_version)
         status = self.admin.get_cluster_config_status()
         for n in status:
             assert n['restart'] is False
@@ -392,7 +412,7 @@ class ClusterConfigTest(RedpandaTest):
             [invalid_setting]),
                                                        force=True)
         new_version = patch_result['config_version']
-        self._wait_for_version_sync(new_version)
+        self._wait_for_version_status_sync(new_version)
 
         assert self.admin.get_cluster_config()[
             invalid_setting[0]] == default_value
@@ -423,14 +443,11 @@ class ClusterConfigTest(RedpandaTest):
         assert self.admin.get_cluster_config()[
             invalid_setting[0]] == default_value
 
+        self._wait_for_version_status_sync(patch_result['config_version'])
         status = self.admin.get_cluster_config_status()
         for n in status:
             assert n['restart'] is False
             assert n['invalid'] == []
-
-        # TODO as well as specific invalid examples, do a pass across the whole
-        # schema to check that
-        pass
 
     @cluster(num_nodes=3)
     def test_bad_requests(self):
@@ -539,7 +556,7 @@ class ClusterConfigTest(RedpandaTest):
 
         patch_result = self.admin.patch_cluster_config(upsert=updates,
                                                        remove=[])
-        self._wait_for_version_sync(patch_result['config_version'])
+        self._wait_for_version_status_sync(patch_result['config_version'])
 
         def check_status(expect_restart):
             # Use one node's status, they should be symmetric
@@ -584,7 +601,7 @@ class ClusterConfigTest(RedpandaTest):
         # status is the same as the one already reported.
         time.sleep(10)
 
-        # Check after restart that confuration persisted and status shows valid
+        # Check after restart that configuration persisted and status shows valid
         check_status(False)
         check_values()
 
@@ -1089,6 +1106,52 @@ class ClusterConfigTest(RedpandaTest):
         for key in forbidden_to_clear:
             self.admin.patch_cluster_config(upsert={}, remove=[key])
 
+    @cluster(num_nodes=3)
+    def test_status_read_after_write_consistency(self):
+        """
+        In general, status is updated asynchronously, and API clients
+        may send a PUT to any node, and poll any node to see asynchronous
+        updates to status.
+
+        However, there is a special path for API clients that would like to
+        get something a bit stricter: if they send a PUT to the controller
+        leader and then read the status back from the leader, they will
+        always see the status for this node updated with the new version
+        in a subsequent GET cluster_config/status to the same node.
+
+        Clearly doing fast reads isn't a guarantee of strict consistency
+        rules, but it will detect violations on realistic timescales.  This
+        test did fail in practice before the change to have /status return
+        projected values.
+        """
+
+        admin = Admin(self.redpanda)
+
+        # Don't want controller leadership changing while we run
+        r = admin.patch_cluster_config(
+            upsert={'enable_leader_balancer': False})
+        config_version = r['config_version']
+        self._wait_for_version_sync(config_version)
+
+        controller_node = self.redpanda.controller()
+        for i in range(0, 50):
+            # Some config update, different each iteration
+            r = admin.patch_cluster_config(
+                upsert={'kafka_connections_max': 1000 + i},
+                node=controller_node)
+            new_config_version = r['config_version']
+            assert new_config_version != config_version
+            config_version = new_config_version
+
+            # Immediately read back status from controller, it should reflect new version
+            status = self.admin.get_cluster_config_status(node=controller_node)
+            local_status = next(
+                s for s in status
+                if s['node_id'] == self.redpanda.idx(controller_node))
+            assert local_status['config_version'] == config_version
+
+
+class ClusterConfigClusterIdTest(RedpandaTest):
     @cluster(num_nodes=3)
     def test_cluster_id(self):
         """

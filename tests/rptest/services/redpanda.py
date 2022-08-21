@@ -209,9 +209,8 @@ class ResourceSettings:
             ])
 
         if self._reactor_stall_threshold is not None:
-            args.extend([
-                f"--blocked-reactor-notify-ms={self._reactor_stall_threshold}"
-            ])
+            args.append(
+                f"--blocked-reactor-notify-ms={self._reactor_stall_threshold}")
 
         if num_cpus is not None:
             args.append(f"--smp={num_cpus}")
@@ -235,24 +234,26 @@ class SISettings:
     GLOBAL_S3_REGION_KEY = "s3_region"
 
     def __init__(
-        self,
-        *,
-        log_segment_size: int = 16 * 1000000,
-        cloud_storage_access_key: str = 'panda-user',
-        cloud_storage_secret_key: str = 'panda-secret',
-        cloud_storage_region: str = 'panda-region',
-        cloud_storage_bucket: Optional[str] = None,
-        cloud_storage_api_endpoint: str = 'minio-s3',
-        cloud_storage_api_endpoint_port: int = 9000,
-        cloud_storage_cache_size: int = 160 * 1000000,
-        cloud_storage_enable_remote_read: bool = True,
-        cloud_storage_enable_remote_write: bool = True,
-        cloud_storage_reconciliation_interval_ms: Optional[int] = None,
-        cloud_storage_max_connections: Optional[int] = None,
-        cloud_storage_disable_tls: bool = True,
-        cloud_storage_segment_max_upload_interval_sec: Optional[int] = None,
-        cloud_storage_readreplica_manifest_sync_timeout_ms: Optional[
-            int] = None):
+            self,
+            *,
+            log_segment_size: int = 16 * 1000000,
+            cloud_storage_access_key: str = 'panda-user',
+            cloud_storage_secret_key: str = 'panda-secret',
+            cloud_storage_region: str = 'panda-region',
+            cloud_storage_bucket: Optional[str] = None,
+            cloud_storage_api_endpoint: str = 'minio-s3',
+            cloud_storage_api_endpoint_port: int = 9000,
+            cloud_storage_cache_size: int = 160 * 1000000,
+            cloud_storage_enable_remote_read: bool = True,
+            cloud_storage_enable_remote_write: bool = True,
+            cloud_storage_reconciliation_interval_ms: Optional[int] = None,
+            cloud_storage_max_connections: Optional[int] = None,
+            cloud_storage_disable_tls: bool = True,
+            cloud_storage_segment_max_upload_interval_sec: Optional[
+                int] = None,
+            cloud_storage_readreplica_manifest_sync_timeout_ms: Optional[
+                int] = None,
+            bypass_bucket_creation: bool = False):
         self.log_segment_size = log_segment_size
         self.cloud_storage_access_key = cloud_storage_access_key
         self.cloud_storage_secret_key = cloud_storage_secret_key
@@ -269,6 +270,7 @@ class SISettings:
         self.cloud_storage_segment_max_upload_interval_sec = cloud_storage_segment_max_upload_interval_sec
         self.cloud_storage_readreplica_manifest_sync_timeout_ms = cloud_storage_readreplica_manifest_sync_timeout_ms
         self.endpoint_url = f'http://{self.cloud_storage_api_endpoint}:{self.cloud_storage_api_endpoint_port}'
+        self.bypass_bucket_creation = bypass_bucket_creation
 
     def load_context(self, logger, test_context):
         """
@@ -575,6 +577,10 @@ class RedpandaService(Service):
 
         self._skip_if_no_redpanda_log = skip_if_no_redpanda_log
 
+        # Each time we start a node and write out its node_config (redpanda.yaml),
+        # stash a copy here so that we can quickly look up e.g. addresses later.
+        self._node_configs = {}
+
     def set_environment(self, environment: dict[str, str]):
         self._environment = environment
 
@@ -692,21 +698,27 @@ class RedpandaService(Service):
                 cb(n)
             return
 
-        node_futures = []
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(nodes)) as executor:
-            for node in nodes:
-                f = executor.submit(cb, node)
-                node_futures.append((node, f))
+            # The list() wrapper is to cause futures to be evaluated here+now
+            # (including throwing any exceptions) and not just spawned in background.
+            list(executor.map(cb, nodes))
 
-            for node, f in node_futures:
-                f.result()
+    def _startup_poll_interval(self, first_start):
+        """
+        During startup, our eagerness depends on whether it's the first
+        start, where we expect a redpanda node to start up very quickly,
+        or a subsequent start where it may be more sedate as data replay
+        takes place.
+        """
+        return 0.2 if first_start else 1.0
 
     def start(self,
               nodes=None,
               clean_nodes=True,
               start_si=True,
-              parallel: bool = False):
+              parallel: bool = True,
+              expect_fail: bool = False):
         """
         Start the service on all nodes.
 
@@ -716,6 +728,8 @@ class RedpandaService(Service):
 
         :param parallel: if true, run clean and start operations in parallel
                          for the nodes being started.
+        :param expect_fail: if true, expect redpanda nodes to terminate shortly
+                            after starting.  Raise exception if they don't.
         """
         to_start = nodes if nodes is not None else self.nodes
         assert all((node in self.nodes for node in to_start))
@@ -757,9 +771,15 @@ class RedpandaService(Service):
 
         def start_one(node):
             self.logger.debug("%s: starting node" % self.who_am_i(node))
-            self.start_node(node)
+            self.start_node(node,
+                            first_start=first_start,
+                            expect_fail=expect_fail)
 
         self._for_nodes(to_start, start_one, parallel=parallel)
+
+        if expect_fail:
+            # If we got here without an exception, it means we failed as expected
+            return
 
         if self._start_duration_seconds < 0:
             self._start_duration_seconds = time.time() - self._start_time
@@ -769,11 +789,12 @@ class RedpandaService(Service):
 
         self.logger.info("Waiting for all brokers to join cluster")
         expected = set(self._started)
+
         wait_until(lambda: {n
                             for n in self._started
                             if self.registered(n)} == expected,
                    timeout_sec=30,
-                   backoff_sec=1,
+                   backoff_sec=self._startup_poll_interval(first_start),
                    err_msg="Cluster membership did not stabilize")
 
         self.logger.info("Verifying storage is in expected state")
@@ -931,7 +952,9 @@ class RedpandaService(Service):
                    node,
                    override_cfg_params=None,
                    timeout=None,
-                   write_config=True):
+                   write_config=True,
+                   first_start=False,
+                   expect_fail: bool = False):
         """
         Start a single instance of redpanda. This function will not return until
         redpanda appears to have started successfully. If redpanda does not
@@ -958,7 +981,7 @@ class RedpandaService(Service):
                 f"stat -f -c %T {self.PERSISTENT_ROOT}").strip()
             if fs != b'xfs':
                 raise RuntimeError(
-                    f"Unexpected filesystem {fs} at {self.PERSISTENT_ROOT} on {node.name}"
+                    f"Non-XFS filesystem {fs} at {self.PERSISTENT_ROOT} on {node.name}"
                 )
 
         def is_status_ready():
@@ -982,17 +1005,27 @@ class RedpandaService(Service):
         def start_rp():
             self.start_redpanda(node)
 
-            wait_until(
-                is_status_ready,
-                timeout_sec=timeout,
-                backoff_sec=1,
-                err_msg=
-                f"Redpanda service {node.account.hostname} failed to start within {timeout} sec",
-                retry_on_exc=True)
+            if expect_fail:
+                wait_until(
+                    lambda: self.pids(node) == [],
+                    timeout_sec=10,
+                    backoff_sec=0.2,
+                    err_msg=
+                    f"Redpanda processes did not terminate on {node.name} during startup as expected"
+                )
+            else:
+                wait_until(
+                    is_status_ready,
+                    timeout_sec=timeout,
+                    backoff_sec=self._startup_poll_interval(first_start),
+                    err_msg=
+                    f"Redpanda service {node.account.hostname} failed to start within {timeout} sec",
+                    retry_on_exc=True)
 
         self.logger.debug(f"Node status prior to redpanda startup:")
         self.start_service(node, start_rp)
-        self._started.append(node)
+        if not expect_fail:
+            self._started.append(node)
 
     def _log_node_process_state(self, node):
         """
@@ -1085,7 +1118,9 @@ class RedpandaService(Service):
 
         self.logger.debug(
             f"Creating S3 bucket: {self._si_settings.cloud_storage_bucket}")
-        self.s3_client.create_bucket(self._si_settings.cloud_storage_bucket)
+        if not self._si_settings.bypass_bucket_creation:
+            self.s3_client.create_bucket(
+                self._si_settings.cloud_storage_bucket)
 
     def list_buckets(self) -> dict[str, Union[list, dict]]:
         assert self.s3_client is not None
@@ -1121,8 +1156,8 @@ class RedpandaService(Service):
         # early in the cluster's lifetime
         wait_until(
             lambda: all([
-                n['config_version'] >= new_version
-                for n in self._admin.get_cluster_config_status()
+                n['config_version'] >= new_version for n in self._admin.
+                get_cluster_config_status(node=self.controller())
             ]),
             timeout_sec=10,
             backoff_sec=0.5,
@@ -1332,6 +1367,19 @@ class RedpandaService(Service):
         assert len(version_lines) == 1, version_lines
         return VERSION_LINE_RE.findall(version_lines[0])[0]
 
+    def stop(self, **kwargs):
+        """
+        Override default stop() to execude stop_node in parallel
+        """
+        self._stop_time = time.time()  # The last time stop is invoked
+        self.logger.info("%s: stopping service" % self.who_am_i())
+
+        self._for_nodes(self.nodes,
+                        lambda n: self.stop_node(n, **kwargs),
+                        parallel=True)
+
+        self._stop_duration_seconds = time.time() - self._stop_time
+
     def stop_node(self, node, timeout=None):
         pids = self.pids(node)
         for pid in pids:
@@ -1500,6 +1548,8 @@ class RedpandaService(Service):
         self.logger.debug(conf)
         node.account.create_file(RedpandaService.NODE_CONFIG_FILE, conf)
 
+        self._node_configs[node] = yaml.full_load(conf)
+
     def write_bootstrap_cluster_config(self):
         conf = copy.deepcopy(self.CLUSTER_CONFIG_DEFAULTS)
         if self._extra_rp_conf:
@@ -1534,11 +1584,19 @@ class RedpandaService(Service):
                       override_cfg_params=None,
                       start_timeout=None,
                       stop_timeout=None):
+
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
-        for node in nodes:
-            self.stop_node(node, timeout=stop_timeout)
-        for node in nodes:
-            self.start_node(node, override_cfg_params, timeout=start_timeout)
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(nodes)) as executor:
+            # The list() wrapper is to cause futures to be evaluated here+now
+            # (including throwing any exceptions) and not just spawned in background.
+            list(
+                executor.map(lambda n: self.stop_node(n, timeout=stop_timeout),
+                             nodes))
+            list(
+                executor.map(
+                    lambda n: self.start_node(
+                        n, override_cfg_params, timeout=start_timeout), nodes))
 
     def rolling_restart_nodes(self,
                               nodes,
@@ -1737,7 +1795,7 @@ class RedpandaService(Service):
 
     def broker_address(self, node):
         assert node in self._started
-        cfg = self.read_configuration(node)
+        cfg = self._node_configs[node]
         return f"{node.account.hostname}:{one_or_many(cfg['redpanda']['kafka_api'])['port']}"
 
     def admin_endpoint(self, node):
@@ -1826,12 +1884,6 @@ class RedpandaService(Service):
         if not sample_values:
             return None
         return MetricSamples(sample_values)
-
-    def read_configuration(self, node):
-        assert node in self._started
-        with self.config_file_lock:
-            with node.account.open(RedpandaService.NODE_CONFIG_FILE) as f:
-                return yaml.full_load(f.read())
 
     def shards(self):
         """
