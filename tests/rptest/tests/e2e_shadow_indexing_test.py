@@ -12,14 +12,14 @@ import random
 
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
+from ducktape.mark import ok_to_fail
 
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.action_injector import random_process_kills
 from rptest.services.cluster import cluster
-from rptest.services.franz_go_verifiable_services import FranzGoVerifiableProducer, FranzGoVerifiableRandomConsumer
-from rptest.services.franz_go_verifiable_services import ServiceStatus, await_minimum_produced_records
+from rptest.services.kgo_verifier_services import KgoVerifierProducer, KgoVerifierRandomConsumer
 from rptest.services.redpanda import RedpandaService, CHAOS_LOG_ALLOW_LIST
 from rptest.services.redpanda import SISettings
 from rptest.tests.end_to_end import EndToEndTest
@@ -112,6 +112,8 @@ class EndToEndShadowIndexingTestWithDisruptions(EndToEndShadowIndexingBase):
                              'default_topic_replications': self.num_brokers,
                          })
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/4639
+    # https://github.com/redpanda-data/redpanda/issues/5390
     @cluster(num_nodes=5, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     def test_write_with_node_failures(self):
         self.start_producer()
@@ -175,6 +177,9 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
         rpk.alter_topic_config(self.topic, 'retention.bytes',
                                str(self.segment_size))
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/6054
+    # https://github.com/redpanda-data/redpanda/issues/6061
+    # https://github.com/redpanda-data/redpanda/issues/6111
     @cluster(num_nodes=8)
     def test_create_or_delete_topics_while_busy(self):
         self.logger.info(f"Environment: {os.environ}")
@@ -194,18 +199,26 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
         msg_count = 500000 if self.redpanda.dedicated_nodes else 100000
         timeout = 600
 
-        producer = FranzGoVerifiableProducer(self.test_context, self.redpanda,
-                                             self.topic, msg_size, msg_count,
-                                             self.preallocated_nodes)
-        producer.start(clean=False)
-        # Block until a subset of records are produced
-        await_minimum_produced_records(self.redpanda,
-                                       producer,
-                                       min_acked=msg_count // 100)
+        # This must be very low to avoid hitting bad_allocs:
+        # https://github.com/redpanda-data/redpanda/issues/6111
+        random_parallelism = 10 if self.redpanda.dedicated_nodes else 2
 
-        rand_consumer = FranzGoVerifiableRandomConsumer(
-            self.test_context, self.redpanda, self.topic, msg_size, 100, 10,
-            self.preallocated_nodes)
+        producer = KgoVerifierProducer(self.test_context, self.redpanda,
+                                       self.topic, msg_size, msg_count,
+                                       self.preallocated_nodes)
+        producer.start(clean=False)
+        # Block until a subset of records are produced + there is an offset map
+        # for the consumer to use.
+        producer.wait_for_acks(msg_count // 100,
+                               timeout_sec=300,
+                               backoff_sec=5)
+        producer.wait_for_offset_map()
+
+        rand_consumer = KgoVerifierRandomConsumer(self.test_context,
+                                                  self.redpanda, self.topic,
+                                                  msg_size, 100,
+                                                  random_parallelism,
+                                                  self.preallocated_nodes)
 
         rand_consumer.start(clean=False)
 
@@ -229,7 +242,7 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
                     self.logger.debug(f'Delete topic: {some_topic}')
                     self.client().delete_topic(some_topic.name)
 
-            return producer.status == ServiceStatus.FINISH
+            return producer.is_complete()
 
         # The wait condition will also apply some changes
         # such as topic creation and deletion
@@ -239,5 +252,4 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
                    err_msg='Producer did not finish')
 
         producer.wait()
-        rand_consumer.shutdown()
         rand_consumer.wait()

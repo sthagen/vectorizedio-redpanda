@@ -20,6 +20,7 @@ from rptest.services.redpanda_installer import RedpandaInstaller, wait_for_num_v
 
 from ducktape.errors import TimeoutError as DucktapeTimeoutError
 from ducktape.utils.util import wait_until
+from rptest.util import wait_until_result
 
 CURRENT_LOGICAL_VERSION = 5
 
@@ -194,11 +195,12 @@ class FeaturesMultiNodeTest(FeaturesTestBase):
         }
 
         assert self.admin.put_license(license).status_code == 200
-        wait_until(lambda: self.admin.get_license()['loaded'] is True,
-                   timeout_sec=5,
-                   backoff_sec=1)
-        resp = self.admin.get_license()
-        assert resp['loaded'] is True
+
+        def obtain_license():
+            lic = self.admin.get_license()
+            return (lic is not None and lic['loaded'] is True, lic)
+
+        resp = wait_until_result(obtain_license, timeout_sec=5, backoff_sec=1)
         assert resp['license'] is not None
         assert expected_license_contents == resp['license'], resp['license']
 
@@ -326,6 +328,13 @@ class FeaturesSingleNodeUpgradeTest(FeaturesTestBase):
                    backoff_sec=1)
 
 
+OLD_NODE_JOIN_LOG_ALLOW_LIST = [
+    # We expect startup failure when an old node joins, so we allow the corresponding
+    # error message.
+    r'Failure during startup: seastar::abort_requested_exception \(abort requested\)'
+]
+
+
 class FeaturesNodeJoinTest(RedpandaTest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, num_brokers=4, **kwargs)
@@ -337,7 +346,7 @@ class FeaturesNodeJoinTest(RedpandaTest):
         # We will start nodes by hand during test.
         pass
 
-    @cluster(num_nodes=4)
+    @cluster(num_nodes=4, log_allow_list=OLD_NODE_JOIN_LOG_ALLOW_LIST)
     def test_old_node_join(self):
         """
         Verify that when an old-versioned node tries to join a newer-versioned cluster,
@@ -371,6 +380,9 @@ class FeaturesNodeJoinTest(RedpandaTest):
         # Restart it with a sufficiently recent version and join should succeed
         self.installer.install([old_node], RedpandaInstaller.HEAD)
         self.redpanda.restart_nodes([old_node])
+
+        # Timeout long enough for join retries & health monitor tick (registered
+        # requires `is_alive`)
         wait_until(lambda: self.redpanda.registered(old_node),
-                   timeout_sec=10,
+                   timeout_sec=30,
                    backoff_sec=1)

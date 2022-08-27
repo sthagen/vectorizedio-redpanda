@@ -17,15 +17,14 @@ from rptest.clients.default import DefaultClient
 from rptest.services.redpanda import RedpandaService, CHAOS_LOG_ALLOW_LIST
 from rptest.services.failure_injector import FailureInjector, FailureSpec
 from rptest.services.admin_ops_fuzzer import AdminOperationsFuzzer
-from rptest.services.franz_go_verifiable_services import (
-    FranzGoVerifiableProducer,
-    await_minimum_produced_records,
-)
+from rptest.services.kgo_verifier_services import KgoVerifierProducer
+
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.clients.types import TopicSpec
 from rptest.clients.rpk import RpkTool, RpkException
 from ducktape.cluster.cluster_spec import ClusterSpec
 from ducktape.mark import matrix
+from ducktape.mark import ok_to_fail
 
 # We inject failures which might cause consumer groups
 # to re-negotiate, so it is necessary to have a longer
@@ -318,6 +317,9 @@ class PartitionBalancerTest(EndToEndTest):
             ns.make_available()
             self.run_validation(consumer_timeout_sec=CONSUMER_TIMEOUT)
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/5154
+    # https://github.com/redpanda-data/redpanda/issues/6075
+    # https://github.com/redpanda-data/redpanda/issues/5836
     @cluster(num_nodes=7, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     def test_fuzz_admin_ops(self):
         self.start_redpanda(num_nodes=5)
@@ -375,6 +377,8 @@ class PartitionBalancerTest(EndToEndTest):
             ns.make_available()
             self.run_validation(consumer_timeout_sec=CONSUMER_TIMEOUT)
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/5884
+    # https://github.com/redpanda-data/redpanda/issues/5980
     @cluster(num_nodes=6, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     def test_full_nodes(self):
         """
@@ -426,11 +430,11 @@ class PartitionBalancerTest(EndToEndTest):
 
         # produce around 2GB of data, this should be enough to fill node disks
         # to a bit more than 70% usage on average
-        producer = FranzGoVerifiableProducer(self.test_context,
-                                             self.redpanda,
-                                             self.topic,
-                                             msg_size=102_400,
-                                             msg_count=19_000)
+        producer = KgoVerifierProducer(self.test_context,
+                                       self.redpanda,
+                                       self.topic,
+                                       msg_size=102_400,
+                                       msg_count=19_000)
         producer.start(clean=False)
 
         wait_until(lambda: get_total_disk_usage() / 5 / disk_size > 0.7,

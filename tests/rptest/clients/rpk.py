@@ -415,6 +415,9 @@ class RpkTool:
                 if "COORDINATOR_NOT_AVAILABLE" in e.msg:
                     # Transient, return None to retry
                     return None
+                elif "NOT_COORDINATOR" in e.msg:
+                    # Transient, retry
+                    return None
                 elif "Kafka replied that group" in e.msg:
                     # Transient, return None to retry
                     # e.g. Kafka replied that group repeat01 has broker coordinator 8, but did not reply with that broker in the broker list
@@ -467,6 +470,10 @@ class RpkTool:
 
     def group_seek_to_group(self, group, to_group):
         cmd = ["seek", group, "--to-group", to_group]
+        self._run_group(cmd)
+
+    def group_seek_to_file(self, group, file):
+        cmd = ["seek", group, "--to-file", file]
         self._run_group(cmd)
 
     def group_delete(self, group):

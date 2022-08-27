@@ -37,6 +37,7 @@ from rptest.clients.kafka_cat import KafkaCat
 from rptest.services.admin import Admin
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.services.rolling_restarter import RollingRestarter
+from rptest.clients.rpk_remote import RpkRemoteTool
 from rptest.services.storage import ClusterStorage, NodeStorage
 from rptest.services.utils import BadLogLines, NodeCrash
 from rptest.clients.python_librdkafka import PythonLibrdkafka
@@ -82,15 +83,9 @@ CHAOS_LOG_ALLOW_LIST = [
         "(raft|rpc) - .*(client_request_timeout|disconnected_endpoint|Broken pipe|Connection reset by peer)"
     ),
 
-    # e.g. raft - [group_id:59, {kafka/test-topic-319-1639161306093460/0}] consensus.cc:2301 - unable to replicate updated configuration: raft::errc::replicated_entry_truncated
-    re.compile("raft - .*replicated_entry_truncated"),
-
     # e.g. cluster - controller_backend.cc:466 - exception while executing partition operation: {type: update_finished, ntp: {kafka/test-topic-1944-1639161306808363/1}, offset: 413, new_assignment: { id: 1, group_id: 65, replicas: {{node_id: 3, shard: 2}, {node_id: 4, shard: 2}, {node_id: 1, shard: 0}} }, previous_assignment: {nullopt}} - std::__1::__fs::filesystem::filesystem_error (error system:39, filesystem error: remove failed: Directory not empty [/var/lib/redpanda/data/kafka/test-topic-1944-1639161306808363])
     re.compile("cluster - .*Directory not empty"),
     re.compile("r/heartbeat - .*cannot find consensus group"),
-
-    # raft - [follower: {id: {1}, revision: {9}}] [group_id:1, {kafka/topic-xyeyqcbyxi/0}] - recovery_stm.cc:422 - recovery append entries error: rpc::errc::exponential_backoff
-    re.compile("raft - .*recovery append entries error"),
 
     # rpc - Service handler threw an exception: std::exception (std::exception)
     re.compile("rpc - Service handler threw an exception: std"),
@@ -483,7 +478,6 @@ class RedpandaService(Service):
                  context,
                  num_brokers,
                  *,
-                 enable_rp=True,
                  extra_rp_conf=None,
                  extra_node_conf=None,
                  enable_pp=False,
@@ -499,7 +493,6 @@ class RedpandaService(Service):
                  skip_if_no_redpanda_log: bool = False):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
-        self._enable_rp = enable_rp
         self._extra_rp_conf = extra_rp_conf or dict()
         self._enable_pp = enable_pp
         self._enable_sr = enable_sr
@@ -948,6 +941,28 @@ class RedpandaService(Service):
             else:
                 yield filename
 
+    def __is_status_ready(self, node):
+        """
+        Calls Admin API's v1/status/ready endpoint to verify if the node
+        is ready
+        """
+        status = None
+        try:
+            status = Admin.ready(node).get("status")
+        except requests.exceptions.ConnectionError:
+            self.logger.debug(
+                f"node {node.name} not yet accepting connections")
+            return False
+        except:
+            self.logger.exception(
+                f"error on getting status from {node.account.hostname}")
+            raise
+        if status != "ready":
+            self.logger.debug(
+                f"status of {node.account.hostname} isn't ready: {status}")
+            return False
+        return True
+
     def start_node(self,
                    node,
                    override_cfg_params=None,
@@ -984,24 +999,6 @@ class RedpandaService(Service):
                     f"Non-XFS filesystem {fs} at {self.PERSISTENT_ROOT} on {node.name}"
                 )
 
-        def is_status_ready():
-            status = None
-            try:
-                status = Admin.ready(node).get("status")
-            except requests.exceptions.ConnectionError:
-                self.logger.debug(
-                    f"node {node.name} not yet accepting connections")
-                return False
-            except:
-                self.logger.exception(
-                    f"error on getting status from {node.account.hostname}")
-                raise
-            if status != "ready":
-                self.logger.debug(
-                    f"status of {node.account.hostname} isn't ready: {status}")
-                return False
-            return True
-
         def start_rp():
             self.start_redpanda(node)
 
@@ -1015,7 +1012,7 @@ class RedpandaService(Service):
                 )
             else:
                 wait_until(
-                    is_status_ready,
+                    lambda: self.__is_status_ready(node),
                     timeout_sec=timeout,
                     backoff_sec=self._startup_poll_interval(first_start),
                     err_msg=
@@ -1026,6 +1023,35 @@ class RedpandaService(Service):
         self.start_service(node, start_rp)
         if not expect_fail:
             self._started.append(node)
+
+    def start_node_with_rpk(self, node, additional_args=""):
+        """
+        Start a single instance of redpanda using rpk. similar to start_node, 
+        this function will not return until redpanda appears to have started 
+        successfully.
+        """
+        node.account.mkdirs(RedpandaService.DATA_DIR)
+        node.account.mkdirs(os.path.dirname(RedpandaService.NODE_CONFIG_FILE))
+
+        env_vars = " ".join(
+            [f"{k}={v}" for (k, v) in self._environment.items()])
+        rpk = RpkRemoteTool(self, node)
+
+        def start_rp():
+            rpk.redpanda_start(RedpandaService.STDOUT_STDERR_CAPTURE,
+                               additional_args, env_vars)
+
+            wait_until(
+                lambda: self.__is_status_ready(node),
+                timeout_sec=60,
+                backoff_sec=1,
+                err_msg=
+                f"Redpanda service {node.account.hostname} failed to start within 60 sec using rpk",
+                retry_on_exc=True)
+
+        self.logger.debug(f"Node status prior to redpanda startup:")
+        self.start_service(node, start_rp)
+        self._started.append(node)
 
     def _log_node_process_state(self, node):
         """
@@ -1173,7 +1199,7 @@ class RedpandaService(Service):
                 "Nodes report restart required but expect_restart is False")
 
     def monitor_log(self, node):
-        assert node in self._started
+        assert node in self.nodes
         return node.account.monitor_log(RedpandaService.STDOUT_STDERR_CAPTURE)
 
     def raise_on_crash(self):
@@ -1250,7 +1276,7 @@ class RedpandaService(Service):
                 self.logger.info(
                     f"{RedpandaService.STDOUT_STDERR_CAPTURE} not found on {node.account.hostname}. Skipping log scan."
                 )
-                return
+                continue
 
             self.logger.info(
                 f"Scanning node {node.account.hostname} log for errors...")
@@ -1509,7 +1535,6 @@ class RedpandaService(Service):
                            node_ip=node_ip,
                            kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
                            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
-                           enable_rp=self._enable_rp,
                            enable_pp=self._enable_pp,
                            enable_sr=self._enable_sr,
                            superuser=self._superuser,
@@ -1602,13 +1627,15 @@ class RedpandaService(Service):
                               nodes,
                               override_cfg_params=None,
                               start_timeout=None,
-                              stop_timeout=None):
+                              stop_timeout=None,
+                              use_maintenance_mode=True):
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
         restarter = RollingRestarter(self)
         restarter.restart_nodes(nodes,
                                 override_cfg_params=override_cfg_params,
                                 start_timeout=start_timeout,
-                                stop_timeout=stop_timeout)
+                                stop_timeout=stop_timeout,
+                                use_maintenance_mode=use_maintenance_mode)
 
     def registered(self, node):
         """
@@ -1794,12 +1821,12 @@ class RedpandaService(Service):
         }
 
     def broker_address(self, node):
-        assert node in self._started
+        assert node in self.nodes
         cfg = self._node_configs[node]
         return f"{node.account.hostname}:{one_or_many(cfg['redpanda']['kafka_api'])['port']}"
 
     def admin_endpoint(self, node):
-        assert node in self._started
+        assert node in self.nodes
         return f"{node.account.hostname}:9644"
 
     def admin_endpoints_list(self):
@@ -1911,7 +1938,10 @@ class RedpandaService(Service):
         """
         counts = {self.idx(node): None for node in self.nodes}
         for node in self.nodes:
-            metrics = self.metrics(node)
+            try:
+                metrics = self.metrics(node)
+            except:
+                return False
             idx = self.idx(node)
             for family in metrics:
                 for sample in family.samples:
