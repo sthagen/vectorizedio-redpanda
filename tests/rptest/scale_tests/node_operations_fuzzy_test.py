@@ -37,6 +37,13 @@ ALLOWED_REPLICATION = [1, 3]
 V22_1_CHAOS_ALLOW_LOGS = [
     re.compile("storage - Could not parse header"),
     re.compile("storage - Cannot continue parsing"),
+    re.compile(
+        ".*controller_backend.*exception while executing partition operation:.*"
+    ),
+    # rpc - Service handler threw an exception: std::exception (std::exception)
+    re.compile("rpc - Service handler threw an exception: std"),
+    # rpc - Service handler threw an exception: seastar::broken_promise (broken promise)"
+    re.compile("rpc - Service handler threw an exception: seastar"),
 ]
 
 

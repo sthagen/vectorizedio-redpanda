@@ -1,4 +1,5 @@
 from copyreg import dispatch_table
+import os
 import random
 from urllib.error import HTTPError
 from numpy import partition
@@ -7,7 +8,7 @@ import requests
 from rptest.services.cluster import cluster
 
 from ducktape.utils.util import wait_until
-from ducktape.mark import matrix
+from ducktape.mark import matrix, parametrize
 from ducktape.mark import ok_to_fail
 
 from rptest.clients.types import TopicSpec
@@ -16,7 +17,7 @@ from rptest.services.verifiable_producer import TopicPartition
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.services.admin import Admin
 from rptest.tests.partition_movement import PartitionMovementMixin
-from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST, SISettings
+from rptest.services.redpanda import RESTART_LOG_ALLOW_LIST, SISettings, MetricsEndpoint
 
 NO_RECOVERY = "no_recovery"
 RESTART_RECOVERY = "restart_recovery"
@@ -42,29 +43,101 @@ class PartitionMoveInterruption(PartitionMovementMixin, EndToEndTest):
             **kwargs)
 
         self._ctx = ctx
-        self.throughput = 10000
         self.moves = 10
-        self.min_records = 100000
         self.partition_count = 20
         self.consumer_timeout_seconds = 90
+
+        if os.environ.get('BUILD_TYPE', None) == 'debug':
+            self.throughput = 1000
+            self.min_records = 10000
+        else:
+            self.throughput = 10000
+            self.min_records = 100000
+
+    def get_moving_to_node_metrics(self, node):
+        metrics = self.redpanda.metrics_sample(
+            "moving_to_node", [node],
+            metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS)
+        return int(sum([metric.value for metric in metrics.samples]))
+
+    def get_moving_from_node_metrics(self, node):
+        metrics = self.redpanda.metrics_sample(
+            "moving_from_node", [node],
+            metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS)
+        return int(sum([metric.value for metric in metrics.samples]))
+
+    def get_cancelling_movements_for_node_metrics(self, node):
+        metrics = self.redpanda.metrics_sample(
+            "node_cancelling_movements", [node],
+            metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS)
+        return int(sum([metric.value for metric in metrics.samples]))
+
+    def metrics_correct(self, prev_assignment, assignmets):
+        prev_assignment_nodes = [a["node_id"] for a in prev_assignment]
+        assignment_nodes = [a["node_id"] for a in assignmets]
+        moving_from_node_sum = 0
+        moving_to_node_sum = 0
+        self.logger.debug(
+            f"Checking metrics for movement from {prev_assignment_nodes} to {assignment_nodes}"
+        )
+        for node in self.redpanda.nodes:
+            node_id = self.redpanda.idx(node)
+            moving_to_node_partitions_amount = self.get_moving_to_node_metrics(
+                node)
+            moving_to_node_sum += moving_to_node_partitions_amount
+            moving_from_node_partitions_amount = self.get_moving_from_node_metrics(
+                node)
+            moving_from_node_sum += moving_from_node_partitions_amount
+            cancelling_movements_for_node = self.get_cancelling_movements_for_node_metrics(
+                node)
+
+            self.logger.debug(f"Node: {node_id}, \
+                moving_to_node_partitions_amount: {moving_to_node_partitions_amount}, \
+                moving_from_node_partitions_amount: {moving_from_node_partitions_amount}, \
+                cancelling_movements_for_node: {cancelling_movements_for_node}"
+                              )
+
+            if node_id in prev_assignment_nodes and node_id not in assignment_nodes:
+                if moving_to_node_partitions_amount != 0 or \
+                    moving_from_node_partitions_amount != 1:
+                    return False
+            elif node_id not in prev_assignment_nodes and node_id in assignment_nodes:
+                if moving_to_node_partitions_amount != 1 or \
+                    moving_from_node_partitions_amount != 0:
+                    return False
+            else:
+                if moving_to_node_partitions_amount != 0 or \
+                    moving_from_node_partitions_amount != 0:
+                    return False
+
+            if cancelling_movements_for_node != 0:
+                return False
+
+        return moving_to_node_sum == moving_from_node_sum
+
+    def check_metrics(self, prev_assignment=[], assignmets=[]):
+        return wait_until(
+            lambda: self.metrics_correct(prev_assignment, assignmets),
+            timeout_sec=10)
 
     def _random_move_and_cancel(self, unclean_abort):
         metadata = self.client().describe_topics()
         topic, partition = self._random_partition(metadata)
-        prev_assignment, _ = self._dispatch_random_partition_move(
+        prev_assignment, assignments = self._dispatch_random_partition_move(
             topic=topic, partition=partition, allow_no_op=False)
 
         self._wait_for_move_in_progress(topic, partition)
+        self.check_metrics(prev_assignment, assignments)
         self._request_move_cancel(unclean_abort=unclean_abort,
                                   topic=topic,
                                   partition=partition,
                                   previous_assignment=prev_assignment)
+        self.check_metrics()
 
     def _throttle_recovery(self, new_value):
         self.redpanda.set_cluster_config(
             {"raft_learner_recovery_rate": str(new_value)})
 
-    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/5887
     @cluster(num_nodes=7, log_allow_list=RESTART_LOG_ALLOW_LIST)
     @matrix(replication_factor=[1, 3],
             unclean_abort=[True, False],
@@ -99,15 +172,16 @@ class PartitionMoveInterruption(PartitionMovementMixin, EndToEndTest):
                     [random.choice(self.redpanda.nodes)])
 
         if unclean_abort:
-            # do not run offsets validation as we may experience data loss since partition movement is forcibly cancelled
+            # do not run offsets validation as we may experience data loss since partition movement is forcibly cancelling
             wait_until(lambda: self.producer.num_acked > 20000, timeout_sec=60)
 
             self.producer.stop()
             self.consumer.stop()
         else:
-            self.run_validation(enable_idempotence=False,
-                                consumer_timeout_sec=45,
-                                min_records=self.min_records)
+            self.run_validation(
+                enable_idempotence=False,
+                consumer_timeout_sec=self.consumer_timeout_seconds,
+                min_records=self.min_records)
 
     @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/5608
     # https://github.com/redpanda-data/redpanda/issues/6020
@@ -160,7 +234,7 @@ class PartitionMoveInterruption(PartitionMovementMixin, EndToEndTest):
                     [random.choice(self.redpanda.nodes)])
 
         if unclean_abort:
-            # do not run offsets validation as we may experience data loss since partition movement is forcibly cancelled
+            # do not run offsets validation as we may experience data loss since partition movement is forcibly cancelling
             wait_until(lambda: self.producer.num_acked > 20000, timeout_sec=60)
 
             self.producer.stop()

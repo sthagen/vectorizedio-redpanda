@@ -65,7 +65,7 @@ class ClusterConfigUpgradeTest(RedpandaTest):
         self.redpanda.restart_nodes(
             [node], override_cfg_params={'delete_retention_ms': '1234'})
         assert admin.get_cluster_config()['delete_retention_ms'] == 9876
-        assert self.redpanda.search_log(
+        assert self.redpanda.search_log_any(
             "Ignoring value for 'delete_retention_ms'")
 
 
@@ -665,6 +665,18 @@ class ClusterConfigTest(RedpandaTest):
 
         return version, text
 
+    def _noop_export_import(self):
+        # Intentionally enabling --all flag to test all properties
+        text = self._export(True)
+
+        # Validate that RPK gives us valid yaml
+        _ = yaml.full_load(text)
+
+        with tempfile.NamedTemporaryFile('w') as file:
+            file.write(text)
+            file.flush()
+            return self.rpk.cluster_config_import(file.name, True)
+
     @cluster(num_nodes=3)
     def test_rpk_export_import(self):
         """
@@ -672,6 +684,9 @@ class ClusterConfigTest(RedpandaTest):
         also `edit` (which is just an export/import cycle with
         a text editor run in the middle)
         """
+        # A no-op export & import check:
+        assert "No changes were made." in self._noop_export_import()
+
         # An arbitrary tunable for checking --all
         tunable_property = 'kafka_qdc_depth_alpha'
 
@@ -975,11 +990,11 @@ class ClusterConfigTest(RedpandaTest):
             self._wait_for_version_sync(patch_result['config_version'])
 
             # Check value was/was not printed to log while applying
-            assert self.redpanda.search_log(value) is expect_log
+            assert self.redpanda.search_log_any(value) is expect_log
 
             # Check we do/don't print on next startup
             self.redpanda.restart_nodes(self.redpanda.nodes)
-            assert self.redpanda.search_log(value) is expect_log
+            assert self.redpanda.search_log_any(value) is expect_log
 
         # Default valued secrets are still shown.
         self._check_value_everywhere("cloud_storage_secret_key", None)

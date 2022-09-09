@@ -49,9 +49,11 @@ segment::segment(
   segment_appender_ptr a,
   std::optional<compacted_index_writer> ci,
   std::optional<batch_cache_index> c,
-  storage_resources& resources) noexcept
+  storage_resources& resources,
+  segment::generation_id gen) noexcept
   : _resources(resources)
   , _appender_callbacks(this)
+  , _generation_id(gen)
   , _tracker(tkr)
   , _reader(std::move(r))
   , _idx(std::move(i))
@@ -342,7 +344,7 @@ segment::do_truncate(model::offset prev_last_offset, size_t physical) {
 ss::future<bool> segment::materialize_index() {
     vassert(
       _tracker.base_offset == _tracker.dirty_offset,
-      "Materializing the index must happen tracking any data. {}",
+      "Materializing the index must happen before tracking any data. {}",
       *this);
     return _idx.materialize_index().then([this](bool yn) {
         if (yn) {

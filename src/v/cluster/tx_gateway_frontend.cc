@@ -1069,7 +1069,7 @@ ss::future<add_offsets_tx_reply> tx_gateway_frontend::do_add_offsets_to_tx(
     }
 
     auto group_info = co_await _rm_group_proxy->begin_group_tx(
-      request.group_id, pid, tx.tx_seq, timeout);
+      request.group_id, pid, tx.tx_seq, tx.timeout_ms);
     if (group_info.ec != tx_errc::none) {
         vlog(txlog.warn, "error on begining group tx: {}", group_info.ec);
         co_return add_offsets_tx_reply{.error_code = group_info.ec};
@@ -1447,10 +1447,6 @@ tx_gateway_frontend::do_abort_tm_tx(
     }
 
     if (tx.status == tm_transaction::tx_status::ongoing) {
-        if (expected_term != tx.etag) {
-            // making sure we're canceling a tx started within current term
-            co_return tx_errc::invalid_txn_state;
-        }
         auto changed_tx = co_await stm->mark_tx_aborting(expected_term, tx.id);
         if (!changed_tx.has_value()) {
             if (changed_tx.error() == tm_stm::op_status::not_leader) {
@@ -1768,7 +1764,7 @@ ss::future<bool> tx_gateway_frontend::try_create_tx_topic() {
       model::kafka_internal_namespace,
       model::tx_manager_topic,
       1,
-      config::shard_local_cfg().transaction_coordinator_replication()};
+      _controller->internal_topic_replication()};
 
     topic.properties.segment_size
       = config::shard_local_cfg().transaction_coordinator_log_segment_size;

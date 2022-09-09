@@ -349,6 +349,45 @@ void admin_server::log_request(
       req.get_url());
 }
 
+void admin_server::log_exception(
+  const ss::sstring& url,
+  const request_auth_result& auth_state,
+  std::exception_ptr eptr) const {
+    using http_status = ss::httpd::reply::status_type;
+    using http_status_ut = std::underlying_type_t<http_status>;
+    const auto log_ex = [&](
+                          std::optional<http_status_ut> status = std::nullopt) {
+        std::stringstream os;
+        const auto username
+          = (auth_state.get_username().size() > 0 ? auth_state.get_username() : "_anonymous");
+        /// Strip URL of query parameters in the case sensitive information
+        /// might have been passed
+        fmt::print(
+          os,
+          "[{}] exception intercepted - url: [{}]",
+          username,
+          url.substr(0, url.find('?')));
+        if (status) {
+            fmt::print(os, " http_return_status[{}]", *status);
+        }
+        fmt::print(os, " reason - {}", eptr);
+        return os.str();
+    };
+
+    try {
+        std::rethrow_exception(eptr);
+    } catch (ss::httpd::base_exception& ex) {
+        const auto status = static_cast<http_status_ut>(ex.status());
+        if (ex.status() == http_status::internal_server_error) {
+            vlog(logger.error, "{}", log_ex(status));
+        } else if (status >= 400) {
+            vlog(logger.warn, "{}", log_ex(status));
+        }
+    } catch (...) {
+        vlog(logger.error, "{}", log_ex());
+    }
+}
+
 void admin_server::rearm_log_level_timer() {
     _log_level_timer.cancel();
 
@@ -685,7 +724,12 @@ ss::future<> admin_server::throw_on_error(
               "can not update broker {} state, invalid state transition "
               "requested",
               id));
+        case cluster::errc::timeout:
+            throw ss::httpd::base_exception(
+              fmt::format("Timeout: {}", ec.message()),
+              ss::httpd::reply::status_type::gateway_timeout);
         case cluster::errc::update_in_progress:
+        case cluster::errc::leadership_changed:
         case cluster::errc::waiting_for_recovery:
         case cluster::errc::no_leader_controller:
             throw ss::httpd::base_exception(
@@ -1818,8 +1862,10 @@ void admin_server::register_broker_routes() {
                                       .get_node_drain_status(
                                         id, model::time_from_now(5s));
           if (maybe_drain_status.has_error()) {
-              co_await throw_on_error(
-                *req, maybe_drain_status.error(), model::controller_ntp, id);
+              throw ss::httpd::base_exception(
+                fmt::format(
+                  "Unexpected error: {}", maybe_drain_status.error().message()),
+                ss::httpd::reply::status_type::service_unavailable);
           }
 
           ss::httpd::broker_json::broker ret;
@@ -2466,7 +2512,7 @@ void admin_server::register_partition_routes() {
         -> ss::future<ss::json::json_return_type> {
           using reconfiguration = ss::httpd::partition_json::reconfiguration;
           std::vector<reconfiguration> ret;
-          auto in_progress
+          auto& in_progress
             = _controller->get_topics_state().local().updates_in_progress();
 
           ret.reserve(in_progress.size());
@@ -2475,9 +2521,9 @@ void admin_server::register_partition_routes() {
               r.ns = ntp.ns;
               r.topic = ntp.tp.topic;
               r.partition = ntp.tp.partition;
-              r.status = fmt::format("{}", status.state);
+              r.status = fmt::format("{}", status.get_state());
 
-              for (auto& bs : status.previous_replicas) {
+              for (auto& bs : status.get_previous_replicas()) {
                   ss::httpd::partition_json::assignment replica;
                   replica.node_id = bs.node_id;
                   replica.core = bs.shard;
