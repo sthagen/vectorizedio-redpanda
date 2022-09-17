@@ -13,6 +13,9 @@
 #include "archival/service.h"
 #include "archival/upload_controller.h"
 #include "cli_parser.h"
+#include "cloud_storage/cache_service.h"
+#include "cloud_storage/partition_recovery_manager.h"
+#include "cloud_storage/remote.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"
 #include "cluster/fwd.h"
@@ -210,17 +213,17 @@ int application::run(int ac, char** av) {
     }
     // use endl for explicit flushing
     std::cout << community_msg << std::endl;
-    vlog(_log.info, "Redpanda {}", redpanda_version());
-    struct ::utsname buf;
-    ::uname(&buf);
-    vlog(
-      _log.info,
-      "kernel={}, nodename={}, machine={}",
-      buf.release,
-      buf.nodename,
-      buf.machine);
 
     return app.run(ac, av, [this, &app] {
+        vlog(_log.info, "Redpanda {}", redpanda_version());
+        struct ::utsname buf;
+        ::uname(&buf);
+        vlog(
+          _log.info,
+          "kernel={}, nodename={}, machine={}",
+          buf.release,
+          buf.nodename,
+          buf.machine);
         auto& cfg = app.configuration();
         log_system_resources(_log, cfg);
         // NOTE: we validate required args here instead of above because run()
@@ -721,10 +724,16 @@ void application::wire_up_redpanda_services() {
     raft_group_manager
       .start(
         model::node_id(config::node().node_id()),
-        config::shard_local_cfg().raft_io_timeout_ms(),
         _scheduling_groups.raft_sg(),
-        config::shard_local_cfg().raft_heartbeat_interval_ms(),
-        config::shard_local_cfg().raft_heartbeat_timeout_ms(),
+        [] {
+            return raft::group_manager::configuration{
+              .heartbeat_interval
+              = config::shard_local_cfg().raft_heartbeat_interval_ms.bind(),
+              .heartbeat_timeout
+              = config::shard_local_cfg().raft_heartbeat_timeout_ms.bind(),
+              .raft_io_timeout_ms
+              = config::shard_local_cfg().raft_io_timeout_ms()};
+        },
         [] {
             return raft::recovery_memory_quota::configuration{
               .max_recovery_memory
@@ -1066,7 +1075,8 @@ void application::wire_up_redpanda_services() {
       controller.get(),
       std::ref(id_allocator_frontend),
       _rm_group_proxy.get(),
-      std::ref(rm_partition_frontend))
+      std::ref(rm_partition_frontend),
+      std::ref(_feature_table))
       .get();
     /**
      * Schedule partition stop before the transaction coordinator is asked to be

@@ -11,6 +11,7 @@
 
 #include "cluster/logger.h"
 #include "cluster/types.h"
+#include "model/record.h"
 #include "raft/errc.h"
 #include "raft/types.h"
 #include "storage/record_batch_builder.h"
@@ -18,13 +19,58 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
+#include <seastar/util/bool_class.hh>
 
 #include <filesystem>
 #include <optional>
 
 namespace cluster {
 
-static model::record_batch serialize_tx(tm_transaction tx) {
+namespace {
+
+tm_transaction_v1::tx_status
+downgrade_status(tm_transaction::tx_status status) {
+    switch (status) {
+    case tm_transaction::tx_status::ongoing:
+        return tm_transaction_v1::tx_status::ongoing;
+    case tm_transaction::tx_status::preparing:
+        return tm_transaction_v1::tx_status::preparing;
+    case tm_transaction::tx_status::prepared:
+        return tm_transaction_v1::tx_status::prepared;
+    case tm_transaction::tx_status::aborting:
+        return tm_transaction_v1::tx_status::aborting;
+    case tm_transaction::tx_status::killed:
+        return tm_transaction_v1::tx_status::killed;
+    case tm_transaction::tx_status::ready:
+        return tm_transaction_v1::tx_status::ready;
+    case tm_transaction::tx_status::tombstone:
+        return tm_transaction_v1::tx_status::tombstone;
+    }
+    vassert(false, "unknown status: {}", status);
+}
+
+tm_transaction_v1 downgrade_tx(const tm_transaction& tx) {
+    tm_transaction_v1 result;
+    result.id = tx.id;
+    result.pid = tx.pid;
+    result.tx_seq = tx.tx_seq;
+    result.etag = tx.etag;
+    result.status = downgrade_status(tx.status);
+    result.timeout_ms = tx.timeout_ms;
+    result.last_update_ts = tx.last_update_ts;
+    for (auto& partition : tx.partitions) {
+        result.partitions.push_back(tm_transaction_v1::tx_partition{
+          .ntp = partition.ntp, .etag = partition.etag});
+    }
+    for (auto& group : tx.groups) {
+        result.groups.push_back(tm_transaction_v1::tx_group{
+          .group_id = group.group_id, .etag = group.etag});
+    }
+    return result;
+}
+
+template<typename T>
+model::record_batch do_serialize_tx(T tx) {
     iobuf key;
     reflection::serialize(key, model::record_batch_type::tm_update);
     auto pid_id = tx.pid.id;
@@ -32,7 +78,7 @@ static model::record_batch serialize_tx(tm_transaction tx) {
     reflection::serialize(key, pid_id, tx_id);
 
     iobuf value;
-    reflection::serialize(value, tm_transaction::version);
+    reflection::serialize(value, T::version);
     reflection::serialize(value, std::move(tx));
 
     storage::record_batch_builder b(
@@ -41,20 +87,35 @@ static model::record_batch serialize_tx(tm_transaction tx) {
     return std::move(b).build();
 }
 
+} // namespace
+
+model::record_batch tm_stm::serialize_tx(tm_transaction tx) {
+    if (use_new_tx_version()) {
+        return do_serialize_tx(tx);
+    }
+    auto old_tx = downgrade_tx(tx);
+    return do_serialize_tx(old_tx);
+}
+
 std::ostream& operator<<(std::ostream& o, const tm_transaction& tx) {
     return o << "{tm_transaction: id=" << tx.id << ", status=" << tx.status
-             << ", pid=" << tx.pid << ", etag=" << tx.etag
+             << ", pid=" << tx.pid << ", last_pid=" << tx.last_pid
+             << ", etag=" << tx.etag
              << ", size(partitions)=" << tx.partitions.size()
              << ", tx_seq=" << tx.tx_seq << "}";
 }
 
-tm_stm::tm_stm(ss::logger& logger, raft::consensus* c)
+tm_stm::tm_stm(
+  ss::logger& logger,
+  raft::consensus* c,
+  ss::sharded<feature_table>& feature_table)
   : persisted_stm("tx.coordinator.snapshot", logger, c)
   , _sync_timeout(config::shard_local_cfg().tm_sync_timeout_ms.value())
   , _transactional_id_expiration(
       config::shard_local_cfg().transactional_id_expiration_ms.value())
   , _recovery_policy(
-      config::shard_local_cfg().tm_violation_recovery_policy.value()) {}
+      config::shard_local_cfg().tm_violation_recovery_policy.value())
+  , _feature_table(feature_table) {}
 
 std::optional<tm_transaction> tm_stm::get_tx(kafka::transactional_id tx_id) {
     auto tx = _mem_txes.find(tx_id);
@@ -69,6 +130,10 @@ std::optional<tm_transaction> tm_stm::get_tx(kafka::transactional_id tx_id) {
 }
 
 ss::future<checked<model::term_id, tm_stm::op_status>> tm_stm::barrier() {
+    return ss::with_gate(_gate, [this] { return do_barrier(); });
+}
+
+ss::future<checked<model::term_id, tm_stm::op_status>> tm_stm::do_barrier() {
     if (!_c->is_leader()) {
         return ss::make_ready_future<
           checked<model::term_id, tm_stm::op_status>>(
@@ -104,6 +169,11 @@ ss::future<checked<model::term_id, tm_stm::op_status>> tm_stm::barrier() {
 
 ss::future<checked<model::term_id, tm_stm::op_status>>
 tm_stm::sync(model::timeout_clock::duration timeout) {
+    return ss::with_gate(_gate, [this, timeout] { return do_sync(timeout); });
+}
+
+ss::future<checked<model::term_id, tm_stm::op_status>>
+tm_stm::do_sync(model::timeout_clock::duration timeout) {
     if (!_c->is_leader()) {
         co_return tm_stm::op_status::not_leader;
     }
@@ -122,6 +192,12 @@ tm_stm::sync(model::timeout_clock::duration timeout) {
 
 ss::future<checked<tm_transaction, tm_stm::op_status>>
 tm_stm::update_tx(tm_transaction tx, model::term_id term) {
+    return ss::with_gate(
+      _gate, [this, tx, term] { return do_update_tx(tx, term); });
+}
+
+ss::future<checked<tm_transaction, tm_stm::op_status>>
+tm_stm::do_update_tx(tm_transaction tx, model::term_id term) {
     auto batch = serialize_tx(tx);
 
     auto r = co_await replicate_quorum_ack(term, std::move(batch));
@@ -223,6 +299,7 @@ ss::future<checked<tm_transaction, tm_stm::op_status>> tm_stm::reset_tx_ready(
     }
     tm_transaction tx = tx_opt.value();
     tx.status = tm_transaction::tx_status::ready;
+    tx.last_pid = model::unknown_pid;
     tx.partitions.clear();
     tx.groups.clear();
     tx.etag = term;
@@ -267,7 +344,8 @@ ss::future<tm_stm::op_status> tm_stm::re_register_producer(
   model::term_id expected_term,
   kafka::transactional_id tx_id,
   std::chrono::milliseconds transaction_timeout_ms,
-  model::producer_identity pid) {
+  model::producer_identity pid,
+  model::producer_identity last_pid) {
     vlog(
       clusterlog.trace, "Registering existing tx: id={}, pid={}", tx_id, pid);
 
@@ -278,6 +356,7 @@ ss::future<tm_stm::op_status> tm_stm::re_register_producer(
     tm_transaction tx = tx_opt.value();
     tx.status = tm_transaction::tx_status::ready;
     tx.pid = pid;
+    tx.last_pid = last_pid;
     tx.tx_seq += 1;
     tx.etag = expected_term;
     tx.timeout_ms = transaction_timeout_ms;
@@ -300,6 +379,18 @@ ss::future<tm_stm::op_status> tm_stm::register_new_producer(
   kafka::transactional_id tx_id,
   std::chrono::milliseconds transaction_timeout_ms,
   model::producer_identity pid) {
+    return ss::with_gate(
+      _gate, [this, expected_term, tx_id, transaction_timeout_ms, pid] {
+          return do_register_new_producer(
+            expected_term, tx_id, transaction_timeout_ms, pid);
+      });
+}
+
+ss::future<tm_stm::op_status> tm_stm::do_register_new_producer(
+  model::term_id expected_term,
+  kafka::transactional_id tx_id,
+  std::chrono::milliseconds transaction_timeout_ms,
+  model::producer_identity pid) {
     vlog(clusterlog.trace, "Registering new tx: id={}, pid={}", tx_id, pid);
 
     auto tx_opt = get_tx(tx_id);
@@ -310,6 +401,7 @@ ss::future<tm_stm::op_status> tm_stm::register_new_producer(
     auto tx = tm_transaction{
       .id = tx_id,
       .pid = pid,
+      .last_pid = model::unknown_pid,
       .tx_seq = model::tx_seq(0),
       .etag = expected_term,
       .status = tm_transaction::tx_status::ready,
@@ -429,6 +521,10 @@ tm_stm::apply_snapshot(stm_snapshot_header hdr, iobuf&& tm_ss_buf) {
 }
 
 ss::future<stm_snapshot> tm_stm::take_snapshot() {
+    return ss::with_gate(_gate, [this] { return do_take_snapshot(); });
+}
+
+ss::future<stm_snapshot> tm_stm::do_take_snapshot() {
     tm_snapshot tm_ss;
     tm_ss.offset = _insync_offset;
     for (auto& entry : _log_txes) {
@@ -461,16 +557,26 @@ ss::future<> tm_stm::apply(model::record_batch b) {
     auto version = reflection::adl<int8_t>{}.from(val_reader);
 
     tm_transaction tx;
-    if (version == tm_transaction_v0::version) {
+    switch (version) {
+    case tm_transaction_v0::version: {
         auto tx0 = reflection::adl<tm_transaction_v0>{}.from(val_reader);
         tx = tx0.upcast();
-    } else {
+        break;
+    }
+    case tm_transaction_v1::version: {
+        auto tx1 = reflection::adl<tm_transaction_v1>{}.from(val_reader);
+        tx = tx1.upcast();
+        break;
+    }
+    default: {
         vassert(
           version == tm_transaction::version,
           "unknown group inflight tx record version: {} expected: {}",
           version,
           tm_transaction::version);
         tx = reflection::adl<tm_transaction>{}.from(val_reader);
+        break;
+    }
     }
 
     auto key_buf = record.release_key();
@@ -605,6 +711,7 @@ ss::future<> tm_stm::expire_tx(kafka::transactional_id tx_id) {
     tm_transaction tx = tx_opt.value();
     tx.etag = _insync_term;
     tx.status = tm_transaction::tx_status::tombstone;
+    tx.last_pid = model::unknown_pid;
     tx.partitions.clear();
     tx.groups.clear();
     tx.last_update_ts = clock_type::now();

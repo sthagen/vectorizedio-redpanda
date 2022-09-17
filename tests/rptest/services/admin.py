@@ -631,9 +631,15 @@ class Admin:
     def list_users(self, node=None):
         return self._request("get", "security/users", node=node).json()
 
-    def partition_transfer_leadership(self, namespace, topic, partition,
-                                      target_id):
-        path = f"partitions/{namespace}/{topic}/{partition}/transfer_leadership?target={target_id}"
+    def partition_transfer_leadership(self,
+                                      namespace,
+                                      topic,
+                                      partition,
+                                      target_id=None):
+        path = f"partitions/{namespace}/{topic}/{partition}/transfer_leadership"
+        if target_id:
+            path += f"?target={target_id}"
+
         self._request("POST", path)
 
     def get_partition_leader(self, *, namespace, topic, partition, node=None):
@@ -687,25 +693,25 @@ class Admin:
         ret = self._request('post', path=path, node=leader)
         return ret.status_code == 200
 
-    def maintenance_start(self, node):
+    def maintenance_start(self, node, dst_node=None):
         """
-        Start maintenanceing on node.
+        Start maintenanceing on 'node', sending the request to 'dst_node'.
         """
         id = self.redpanda.idx(node)
         url = f"brokers/{id}/maintenance"
         self.redpanda.logger.info(
             f"Starting maintenance on node {node.name}/{id}")
-        return self._request("put", url)
+        return self._request("put", url, node=dst_node)
 
-    def maintenance_stop(self, node):
+    def maintenance_stop(self, node, dst_node=None):
         """
-        Stop maintenanceing on node.
+        Stop maintenanceing on 'node', sending the request to 'dst_node'.
         """
         id = self.redpanda.idx(node)
         url = f"brokers/{id}/maintenance"
         self.redpanda.logger.info(
             f"Stopping maintenance on node {node.name}/{id}")
-        return self._request("delete", url)
+        return self._request("delete", url, node=dst_node)
 
     def maintenance_status(self, node):
         """

@@ -45,9 +45,11 @@ ss::future<> state_machine::handle_eviction() {
 }
 
 ss::future<> state_machine::stop() {
+    vlog(_log.debug, "Asked to stop state_machine");
     _waiters.stop();
     _as.request_abort();
-    return _gate.close();
+    return _gate.close().then(
+      [this] { vlog(_log.debug, "state_machine is stopped"); });
 }
 
 ss::future<> state_machine::wait(
@@ -134,11 +136,15 @@ ss::future<> state_machine::apply() {
                 }
             });
       })
-      .handle_exception_type([](const raft::offset_monitor::wait_aborted&) {})
+      .handle_exception_type([](const raft::offset_monitor::wait_timed_out&) {})
+      .handle_exception_type([](const ss::abort_requested_exception&) {})
       .handle_exception_type([](const ss::gate_closed_exception&) {})
       .handle_exception([this](const std::exception_ptr& e) {
           vlog(
-            _log.info, "State machine for ntp={} handles {}", _raft->ntp(), e);
+            _log.info,
+            "State machine for ntp={} caught exception {}",
+            _raft->ntp(),
+            e);
       });
 }
 

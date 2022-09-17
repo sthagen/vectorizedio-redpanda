@@ -27,7 +27,7 @@ import (
 	"k8s.io/utils/pointer"
 )
 
-// nolint:funlen // this is ok for a test
+//nolint:funlen // this is ok for a test
 func TestDefault(t *testing.T) {
 	type test struct {
 		name                                string
@@ -780,7 +780,7 @@ func TestCreation(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// nolint:dupl // the values are different
+	//nolint:dupl // the values are different
 	t.Run("incorrect redpanda memory (need <= limit)", func(t *testing.T) {
 		memory := redpandaCluster.DeepCopy()
 		memory.Spec.Resources = v1alpha1.RedpandaResourceRequirements{
@@ -804,7 +804,7 @@ func TestCreation(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// nolint:dupl // the values are different
+	//nolint:dupl // the values are different
 	t.Run("correct redpanda memory", func(t *testing.T) {
 		memory := redpandaCluster.DeepCopy()
 		memory.Spec.Resources = v1alpha1.RedpandaResourceRequirements{
@@ -828,7 +828,7 @@ func TestCreation(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	// nolint:dupl // the values are different
+	//nolint:dupl // the values are different
 	t.Run("correct redpanda memory (boundary check)", func(t *testing.T) {
 		memory := redpandaCluster.DeepCopy()
 		memory.Spec.Resources = v1alpha1.RedpandaResourceRequirements{
@@ -1021,6 +1021,118 @@ func TestCreation(t *testing.T) {
 		}}}
 		err := rp.ValidateCreate()
 		assert.Error(t, err)
+	})
+	t.Run("endpoint template not allowed for schemaregistry", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+		const commonDomain = "company.org"
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.SchemaRegistry = &v1alpha1.SchemaRegistryAPI{External: &v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        commonDomain,
+			EndpointTemplate: "xxx",
+		}}
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	//nolint:dupl // not really a duplicate
+	t.Run("endpoint template not allowed for adminapi", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+		const commonDomain = "company.org"
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.AdminAPI = append(rp.Spec.Configuration.AdminAPI, v1alpha1.AdminAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        commonDomain,
+			EndpointTemplate: "xxx",
+		}})
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	t.Run("endpoint template without subdomain is not allowed in kafka API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			EndpointTemplate: "xxx",
+		}})
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	t.Run("endpoint template without subdomain is not allowed in pandaproxy API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled: true,
+		}})
+		rp.Spec.Configuration.PandaproxyAPI = append(rp.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			EndpointTemplate: "xxx",
+		}})
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	t.Run("invalid endpoint template in kafka API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        "example.com",
+			EndpointTemplate: "{{.Inexistent}}",
+		}})
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	t.Run("valid endpoint template in kafka API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        "example.com",
+			EndpointTemplate: "{{.Index}}-broker",
+		}})
+		err := rp.ValidateCreate()
+		assert.NoError(t, err)
+	})
+	//nolint:dupl // not really a duplicate
+	t.Run("invalid endpoint template in pandaproxy API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		const commonDomain = "mydomain"
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.PandaproxyAPI = append(rp.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        commonDomain,
+			EndpointTemplate: "{{.Index | nonexistent }}",
+		}})
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	//nolint:dupl // not really a duplicate
+	t.Run("valid endpoint template in pandaproxy API", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+
+		const commonDomain = "mydomain"
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.PandaproxyAPI = append(rp.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:          true,
+			Subdomain:        commonDomain,
+			EndpointTemplate: "{{.Index}}-pp",
+		}})
+		err := rp.ValidateCreate()
+		assert.NoError(t, err)
 	})
 }
 
@@ -1233,7 +1345,7 @@ func TestExternalKafkaPortSpecified(t *testing.T) {
 func TestKafkaTLSRules(t *testing.T) {
 	rpCluster := validRedpandaCluster()
 
-	// nolint:dupl // the tests are not duplicates
+	//nolint:dupl // the tests are not duplicates
 	t.Run("different issuer for two tls listeners", func(t *testing.T) {
 		newRp := rpCluster.DeepCopy()
 		newRp.Spec.Configuration.KafkaAPI[0].TLS = v1alpha1.KafkaAPITLS{
@@ -1256,7 +1368,7 @@ func TestKafkaTLSRules(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// nolint:dupl // the tests are not duplicates
+	//nolint:dupl // the tests are not duplicates
 	t.Run("same issuer for two tls listeners is allowed", func(t *testing.T) {
 		newRp := rpCluster.DeepCopy()
 		newRp.Spec.Configuration.KafkaAPI[0].TLS = v1alpha1.KafkaAPITLS{
@@ -1279,7 +1391,7 @@ func TestKafkaTLSRules(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	// nolint:dupl // the tests are not duplicates
+	//nolint:dupl // the tests are not duplicates
 	t.Run("different nodeSecretRef for two tls listeners", func(t *testing.T) {
 		newRp := rpCluster.DeepCopy()
 		newRp.Spec.Configuration.KafkaAPI[0].TLS = v1alpha1.KafkaAPITLS{
@@ -1302,7 +1414,7 @@ func TestKafkaTLSRules(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// nolint:dupl // the tests are not duplicates
+	//nolint:dupl // the tests are not duplicates
 	t.Run("same nodesecretref for two tls listeners is allowed", func(t *testing.T) {
 		newRp := rpCluster.DeepCopy()
 		newRp.Spec.Configuration.KafkaAPI[0].TLS = v1alpha1.KafkaAPITLS{

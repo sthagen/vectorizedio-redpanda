@@ -260,7 +260,8 @@ func preparePVCResource(
 }
 
 // obj returns resource managed client.Object
-// nolint:funlen // The complexity of obj function will be address in the next version TODO
+//
+//nolint:funlen // The complexity of obj function will be address in the next version
 func (r *StatefulSetResource) obj(
 	ctx context.Context,
 ) (k8sclient.Object, error) {
@@ -279,17 +280,26 @@ func (r *StatefulSetResource) obj(
 	nodeSelector := r.pandaCluster.Spec.NodeSelector
 
 	if len(r.pandaCluster.Spec.Configuration.KafkaAPI) == 0 {
-		// TODO
+		// TODO: Fix this
 		return nil, nil
 	}
 
 	externalListener := r.pandaCluster.ExternalListener()
 	externalSubdomain := ""
 	externalAddressType := ""
+	externalEndpointTemplate := ""
 	if externalListener != nil {
 		externalSubdomain = externalListener.External.Subdomain
 		externalAddressType = externalListener.External.PreferredAddressType
+		externalEndpointTemplate = externalListener.External.EndpointTemplate
 	}
+
+	externalPandaProxyAPI := r.pandaCluster.PandaproxyAPIExternal()
+	externalPandaProxyEndpointTemplate := ""
+	if externalPandaProxyAPI != nil {
+		externalPandaProxyEndpointTemplate = externalPandaProxyAPI.External.EndpointTemplate
+	}
+
 	tlsVolumes, tlsVolumeMounts := r.volumeProvider.Volumes()
 
 	// We set statefulset replicas via status.currentReplicas in order to control it from the handleScaling function
@@ -386,6 +396,23 @@ func (r *StatefulSetResource) obj(
 								{
 									Name:  "EXTERNAL_CONNECTIVITY_ADDRESS_TYPE",
 									Value: externalAddressType,
+								},
+								{
+									Name:  "EXTERNAL_CONNECTIVITY_KAFKA_ENDPOINT_TEMPLATE",
+									Value: externalEndpointTemplate,
+								},
+								{
+									Name:  "EXTERNAL_CONNECTIVITY_PANDA_PROXY_ENDPOINT_TEMPLATE",
+									Value: externalPandaProxyEndpointTemplate,
+								},
+								{
+									Name: "HOST_IP_ADDRESS",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											APIVersion: "v1",
+											FieldPath:  "status.hostIP",
+										},
+									},
 								},
 								{
 									Name:  "HOST_PORT",
@@ -584,7 +611,7 @@ func (r *StatefulSetResource) getPostStartHook() *corev1.Handler {
 	}
 }
 
-// nolint:goconst // no need
+//nolint:goconst // no need
 func (r *StatefulSetResource) composeCURLMaintenanceCommand(
 	options string, urlOverwrite *string,
 ) string {

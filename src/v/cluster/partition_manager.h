@@ -12,9 +12,11 @@
 #pragma once
 
 #include "cloud_storage/cache_service.h"
+#include "cloud_storage/fwd.h"
 #include "cloud_storage/partition_recovery_manager.h"
 #include "cloud_storage/remote.h"
 #include "cluster/feature_table.h"
+#include "cluster/fwd.h"
 #include "cluster/ntp_callbacks.h"
 #include "cluster/partition.h"
 #include "cluster/types.h"
