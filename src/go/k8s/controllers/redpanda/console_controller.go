@@ -141,7 +141,7 @@ func (r *Reconciling) Do(
 	// NewIngress will not create Ingress if subdomain is empty
 	subdomain := ""
 	if ex := cluster.ExternalListener(); ex != nil && ex.GetExternal().Subdomain != "" {
-		subdomain = fmt.Sprintf("console.%s", ex.GetExternal().Subdomain)
+		subdomain = ex.GetExternal().Subdomain
 	} else {
 		r.EventRecorder.Event(
 			console,
@@ -150,13 +150,22 @@ func (r *Reconciling) Do(
 		)
 	}
 
+	// Ingress with TLS and "/debug" "/admin" paths disabled
+	ingressResource := resources.NewIngress(r.Client, console, r.Scheme, subdomain, console.GetName(), consolepkg.ServicePortName, log)
+	ingressResource = ingressResource.WithDefaultEndpoint("console")
+	ingressResource = ingressResource.WithUserConfig(console.Spec.Ingress)
+	ingressResource = ingressResource.WithTLS(resources.LEClusterIssuer, fmt.Sprintf("%s-redpanda", cluster.GetName()))
+	ingressResource = ingressResource.WithAnnotations(map[string]string{
+		"nginx.ingress.kubernetes.io/server-snippet": "if ($request_uri ~* ^/(debug|admin)) {\n\treturn 403;\n\t}",
+	})
+
 	applyResources := []resources.Resource{
 		consolepkg.NewKafkaSA(r.Client, r.Scheme, console, cluster, r.clusterDomain, r.AdminAPIClientFactory, log),
 		consolepkg.NewKafkaACL(r.Client, r.Scheme, console, cluster, r.KafkaAdminClientFactory, log),
 		configmapResource,
 		consolepkg.NewDeployment(r.Client, r.Scheme, console, cluster, r.Store, log),
 		consolepkg.NewService(r.Client, r.Scheme, console, r.clusterDomain, log),
-		resources.NewIngress(r.Client, console, r.Scheme, subdomain, console.GetName(), consolepkg.ServicePortName, log).WithTLS(resources.LEClusterIssuer, fmt.Sprintf("%s-redpanda", cluster.GetName())),
+		ingressResource,
 	}
 	for _, each := range applyResources {
 		if err := each.Ensure(ctx); err != nil { //nolint:gocritic // more readable

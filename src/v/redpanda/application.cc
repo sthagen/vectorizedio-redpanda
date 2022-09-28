@@ -54,7 +54,6 @@
 #include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/rest/proxy.h"
 #include "pandaproxy/schema_registry/api.h"
-#include "platform/stop_signal.h"
 #include "raft/group_manager.h"
 #include "raft/recovery_throttle.h"
 #include "raft/service.h"
@@ -246,9 +245,7 @@ int application::run(int ac, char** av) {
                 initialize();
                 check_environment();
                 setup_metrics();
-                wire_up_services();
-                configure_admin_server();
-                start(app_signal);
+                wire_up_and_start(app_signal);
                 app_signal.wait().get();
                 vlog(_log.info, "Stopping...");
             } catch (...) {
@@ -686,12 +683,16 @@ void application::wire_up_services() {
           *_schema_reg_config,
           std::reference_wrapper(controller));
     }
+    configure_admin_server();
 }
 
 void application::wire_up_redpanda_services() {
     ss::smp::invoke_on_all([] {
         return storage::internal::chunks().start();
     }).get();
+
+    syschecks::systemd_message("Creating feature table").get();
+    construct_service(_feature_table).get();
 
     // cluster
     syschecks::systemd_message("Adding raft client cache").get();
@@ -745,7 +746,8 @@ void application::wire_up_redpanda_services() {
         },
         std::ref(_connection_cache),
         std::ref(storage),
-        std::ref(recovery_throttle))
+        std::ref(recovery_throttle),
+        std::ref(_feature_table))
       .get();
 
     // custom handling for recovery_throttle and raft group manager shutdown.
@@ -779,9 +781,6 @@ void application::wire_up_redpanda_services() {
 
         cloud_configs.stop().get();
     }
-
-    syschecks::systemd_message("Creating feature table").get();
-    construct_service(_feature_table).get();
 
     syschecks::systemd_message("Adding partition manager").get();
     construct_service(
@@ -909,7 +908,7 @@ void application::wire_up_redpanda_services() {
     }
 
     // group membership
-    syschecks::systemd_message("Creating partition manager").get();
+    syschecks::systemd_message("Creating kafka group managers").get();
     construct_service(
       _group_manager,
       model::kafka_group_nt,
@@ -1235,7 +1234,8 @@ application::set_proxy_client_config(ss::sstring name, std::any val) {
       });
 }
 
-void application::start(::stop_signal& app_signal) {
+void application::wire_up_and_start(::stop_signal& app_signal) {
+    wire_up_services();
     start_redpanda(app_signal);
 
     if (_proxy_config) {

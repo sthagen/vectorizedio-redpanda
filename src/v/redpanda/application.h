@@ -26,7 +26,6 @@
 #include "pandaproxy/rest/fwd.h"
 #include "pandaproxy/schema_registry/configuration.h"
 #include "pandaproxy/schema_registry/fwd.h"
-#include "platform/stop_signal.h"
 #include "raft/fwd.h"
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/cpu_scheduling.h"
@@ -37,6 +36,7 @@
 #include "seastarx.h"
 #include "ssx/metrics.h"
 #include "storage/fwd.h"
+#include "utils/stop_signal.h"
 #include "v8_engine/fwd.h"
 
 #include <seastar/core/app-template.hh>
@@ -61,12 +61,7 @@ public:
       std::optional<YAML::Node> schema_reg_client_cfg = std::nullopt,
       std::optional<scheduling_groups> = std::nullopt);
     void check_environment();
-    void configure_admin_server();
-    void wire_up_services();
-    void wire_up_redpanda_services();
-    void start(::stop_signal&);
-    void start_redpanda(::stop_signal&);
-    void start_kafka(::stop_signal&);
+    void wire_up_and_start(::stop_signal&);
 
     explicit application(ss::sstring = "redpanda::main");
     ~application();
@@ -112,6 +107,12 @@ public:
 private:
     using deferred_actions
       = std::vector<ss::deferred_action<std::function<void()>>>;
+
+    void configure_admin_server();
+    void wire_up_services();
+    void wire_up_redpanda_services();
+    void start_redpanda(::stop_signal&);
+    void start_kafka(::stop_signal&);
 
     // All methods are calleds from Seastar thread
     ss::app_template::config setup_app_config();
@@ -164,7 +165,7 @@ private:
     ss::logger _log;
 
     ss::sharded<rpc::connection_cache> _connection_cache;
-    ss::sharded<cluster::feature_table> _feature_table;
+    ss::sharded<features::feature_table> _feature_table;
     ss::sharded<kafka::group_manager> _group_manager;
     ss::sharded<kafka::group_manager> _co_group_manager;
     ss::sharded<net::server> _rpc;
