@@ -29,6 +29,7 @@
 #include "storage/segment_appender_utils.h"
 #include "utils/gate_guard.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file-types.hh>
 #include <seastar/core/file.hh>
@@ -164,6 +165,11 @@ ss::future<log_recovery_result> partition_downloader::download_log() {
         auto topic_manifest_path = topic_manifest::get_topic_manifest_path(
           _ntpc.ntp().ns, _ntpc.ntp().tp.topic);
         co_return co_await download_log(topic_manifest_path);
+
+    } catch (const ss::abort_requested_exception&) {
+        throw;
+    } catch (const ss::gate_closed_exception&) {
+        throw;
     } catch (...) {
         // We can get here if the parttion manifest is missing (or some
         // other failure is preventing us from recovering the partition). In
@@ -355,7 +361,7 @@ partition_downloader::download_log_with_capped_size(
     size_t total_size = 0;
     std::deque<segment> staged_downloads;
     model::offset start_offset{0};
-    model::offset start_delta{0};
+    model::offset_delta start_delta{0};
     for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
         const auto& meta = it->second.meta;
         if (total_size > max_size) {
@@ -375,8 +381,9 @@ partition_downloader::download_log_with_capped_size(
         staged_downloads.push_front(it->second);
         total_size += meta.size_bytes;
         start_offset = meta.base_offset;
-        start_delta = meta.delta_offset == model::offset() ? start_delta
-                                                           : meta.delta_offset;
+        start_delta = meta.delta_offset == model::offset_delta()
+                        ? start_delta
+                        : meta.delta_offset;
     }
     vlog(
       _ctxlog.info,
@@ -447,7 +454,7 @@ partition_downloader::download_log_with_capped_time(
 
     std::deque<segment> staged_downloads;
     model::offset start_offset{0};
-    model::offset start_delta{0};
+    model::offset_delta start_delta{0};
     for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
         const auto& meta = it->second.meta;
         if (
@@ -470,8 +477,9 @@ partition_downloader::download_log_with_capped_time(
         }
         staged_downloads.push_front(it->second);
         start_offset = meta.base_offset;
-        start_delta = meta.delta_offset == model::offset() ? start_delta
-                                                           : meta.delta_offset;
+        start_delta = meta.delta_offset == model::offset_delta()
+                        ? start_delta
+                        : meta.delta_offset;
     }
     vlog(
       _ctxlog.info,

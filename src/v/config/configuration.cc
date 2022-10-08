@@ -53,6 +53,15 @@ configuration::configuration()
        .example = "268435456",
        .visibility = visibility::tunable},
       std::nullopt)
+  , log_segment_size_jitter_percent(
+      *this,
+      "log_segment_size_jitter_percent",
+      "Random variation to the segment size limit used for each partition",
+      {.needs_restart = needs_restart::yes,
+       .example = "2",
+       .visibility = visibility::tunable},
+      5,
+      {.min = 0, .max = 99})
   , compacted_log_segment_size(
       *this,
       "compacted_log_segment_size",
@@ -1387,7 +1396,14 @@ configuration::configuration()
       "enable_rack_awareness",
       "Enables rack-aware replica assignment",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      false) {}
+      false)
+  , node_status_interval(
+      *this,
+      "node_status_interval",
+      "Time interval between two node status messages. Node status messages "
+      "establish liveness status outside of the Raft protocol.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      100ms) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

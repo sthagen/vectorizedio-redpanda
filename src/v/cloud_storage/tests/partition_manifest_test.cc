@@ -188,6 +188,65 @@ inline ss::input_stream<char> make_manifest_stream(std::string_view json) {
     return make_iobuf_input_stream(std::move(i));
 }
 
+SEASTAR_THREAD_TEST_CASE(test_segment_contains) {
+    constexpr std::string_view manifest_with_gaps = R"json({
+    "version": 1,
+    "namespace": "test-ns",
+    "topic": "test-topic",
+    "partition": 42,
+    "revision": 1,
+    "last_offset": 59,
+    "segments": {
+        "10-1-v1.log": {
+            "is_compacted": false,
+            "size_bytes": 1024,
+            "base_offset": 10,
+            "committed_offset": 19
+        },
+        "20-1-v1.log": {
+            "is_compacted": false,
+            "size_bytes": 2048,
+            "base_offset": 20,
+            "committed_offset": 29,
+            "max_timestamp": 1234567890
+        },
+        "30-1-v1.log": {
+            "is_compacted": false,
+            "size_bytes": 4096,
+            "base_offset": 30,
+            "committed_offset": 39,
+            "max_timestamp": 1234567890
+        },
+        "50-1-v1.log": {
+            "is_compacted": false,
+            "size_bytes": 4096,
+            "base_offset": 50,
+            "committed_offset": 59,
+            "max_timestamp": 1234567890
+        }
+    }
+    })json";
+    partition_manifest m;
+    m.update(make_manifest_stream(manifest_with_gaps)).get0();
+    BOOST_REQUIRE(m.segment_containing(model::offset{9}) == m.end());
+    BOOST_REQUIRE(m.segment_containing(model::offset{90}) == m.end());
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{39}) == std::next(m.begin(), 2));
+    BOOST_REQUIRE(m.segment_containing(model::offset{10}) == m.begin());
+    BOOST_REQUIRE(m.segment_containing(model::offset{15}) == m.begin());
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{22}) == std::next(m.begin()));
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{38}) == std::next(m.begin(), 2));
+    BOOST_REQUIRE(m.segment_containing(model::offset{42}) == m.end());
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{50}) == std::prev(m.end()));
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{52}) == std::prev(m.end()));
+    BOOST_REQUIRE(
+      m.segment_containing(model::offset{59}) == std::prev(m.end()));
+}
+
 SEASTAR_THREAD_TEST_CASE(test_manifest_type) {
     partition_manifest m;
     BOOST_REQUIRE(m.get_manifest_type() == manifest_type::partition);
@@ -355,7 +414,7 @@ SEASTAR_THREAD_TEST_CASE(test_max_segment_meta_update) {
          model::offset(19),
          model::timestamp(123456),
          model::timestamp(123456789),
-         model::offset(12313),
+         model::offset_delta(12313),
          model::initial_revision_id(3),
          model::term_id(3)}}};
 
@@ -397,7 +456,7 @@ SEASTAR_THREAD_TEST_CASE(test_metas_get_smaller) {
          .committed_offset = model::offset(19),
          .base_timestamp = model::timestamp(123456),
          .max_timestamp = model::timestamp(123456789),
-         .delta_offset = model::offset(12313),
+         .delta_offset = model::offset_delta(12313),
          .ntp_revision = model::initial_revision_id(3),
          .archiver_term = model::term_id(3)}},
       {"20-1-v1.log",
@@ -578,7 +637,7 @@ SEASTAR_THREAD_TEST_CASE(test_segment_meta_serde_compat) {
       .committed_offset = model::offset{34},
       .base_timestamp = timestamp,
       .max_timestamp = timestamp,
-      .delta_offset = model::offset{7},
+      .delta_offset = model::offset_delta{7},
       .ntp_revision = model::initial_revision_id{42},
       .archiver_term = model::term_id{123},
     };
@@ -595,7 +654,7 @@ SEASTAR_THREAD_TEST_CASE(test_segment_meta_serde_compat) {
       .committed_offset = meta_new.committed_offset,
       .base_timestamp = meta_new.base_timestamp,
       .max_timestamp = meta_new.max_timestamp,
-      .delta_offset = meta_new.delta_offset,
+      .delta_offset = model::offset_cast(meta_new.delta_offset),
     };
 
     BOOST_CHECK(

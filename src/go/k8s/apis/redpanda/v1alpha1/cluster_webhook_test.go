@@ -527,23 +527,55 @@ func TestValidateUpdate_NoError(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("external proxy listener cannot have port specified", func(t *testing.T) {
-		multiPort := redpandaCluster.DeepCopy()
-		multiPort.Spec.Configuration.PandaproxyAPI = append(multiPort.Spec.Configuration.PandaproxyAPI,
-			v1alpha1.PandaproxyAPI{External: v1alpha1.PandaproxyExternalConnectivityConfig{ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{Enabled: true}}, Port: 123},
-			v1alpha1.PandaproxyAPI{Port: 321})
-		err := multiPort.ValidateUpdate(redpandaCluster)
-
-		assert.Error(t, err)
-	})
-
 	t.Run("pandaproxy tls disabled with client auth enabled", func(t *testing.T) {
 		tls := redpandaCluster.DeepCopy()
-		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI,
-			v1alpha1.PandaproxyAPI{TLS: v1alpha1.PandaproxyAPITLS{Enabled: false, RequireClientAuth: true}})
+		tls.Spec.Configuration.KafkaAPI = append(tls.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{
+			External: v1alpha1.ExternalConnectivityConfig{Enabled: true},
+			Port:     30092,
+		})
+		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{
+			External: v1alpha1.PandaproxyExternalConnectivityConfig{
+				ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{Enabled: true},
+			},
+			TLS: v1alpha1.PandaproxyAPITLS{Enabled: false, RequireClientAuth: true},
+		})
 
 		err := tls.ValidateUpdate(redpandaCluster)
 		assert.Error(t, err)
+	})
+
+	t.Run("pandaproxy tls issuerref with secretref is not allowed", func(t *testing.T) {
+		tls := redpandaCluster.DeepCopy()
+		tls.Spec.Configuration.KafkaAPI = append(tls.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{
+			External: v1alpha1.ExternalConnectivityConfig{Enabled: true, Subdomain: "cluster.com"},
+			Port:     30092,
+		})
+		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{
+			External: v1alpha1.PandaproxyExternalConnectivityConfig{
+				ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{Enabled: true, Subdomain: "cluster.com"},
+			},
+			TLS: v1alpha1.PandaproxyAPITLS{Enabled: true, IssuerRef: &cmmeta.ObjectReference{}, NodeSecretRef: &corev1.ObjectReference{}},
+		})
+
+		err := tls.ValidateUpdate(redpandaCluster)
+		assert.Error(t, err)
+	})
+
+	t.Run("pandaproxy tls can specify issuerref", func(t *testing.T) {
+		tls := redpandaCluster.DeepCopy()
+		tls.Spec.Configuration.KafkaAPI = append(tls.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{
+			External: v1alpha1.ExternalConnectivityConfig{Enabled: true, Subdomain: "cluster.com"},
+			Port:     30092,
+		})
+		tls.Spec.Configuration.PandaproxyAPI = append(tls.Spec.Configuration.PandaproxyAPI, v1alpha1.PandaproxyAPI{
+			External: v1alpha1.PandaproxyExternalConnectivityConfig{
+				ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{Enabled: true, Subdomain: "cluster.com"},
+			},
+			TLS: v1alpha1.PandaproxyAPITLS{Enabled: true, IssuerRef: &cmmeta.ObjectReference{}},
+		})
+
+		err := tls.ValidateUpdate(redpandaCluster)
+		assert.NoError(t, err)
 	})
 
 	t.Run("resource limits/requests on redpanda resources", func(t *testing.T) {
@@ -1028,6 +1060,7 @@ func TestCreation(t *testing.T) {
 		err := rp.ValidateCreate()
 		assert.Error(t, err)
 	})
+	//nolint:dupl // not really a duplicate
 	t.Run("endpoint template not allowed for schemaregistry", func(t *testing.T) {
 		rp := redpandaCluster.DeepCopy()
 		const commonDomain = "company.org"
@@ -1042,6 +1075,44 @@ func TestCreation(t *testing.T) {
 				Subdomain:        commonDomain,
 				EndpointTemplate: "xxx",
 			},
+		}}
+		err := rp.ValidateCreate()
+		assert.Error(t, err)
+	})
+	//nolint:dupl // not really a duplicate
+	t.Run("endpoint allowed for schemaregistry", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+		const commonDomain = "company.org"
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.SchemaRegistry = &v1alpha1.SchemaRegistryAPI{External: &v1alpha1.SchemaRegistryExternalConnectivityConfig{
+			ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{
+				Enabled:   true,
+				Subdomain: commonDomain,
+			},
+			Endpoint: "xxx",
+		}}
+		err := rp.ValidateCreate()
+		assert.NoError(t, err)
+	})
+	//nolint:dupl // not really a duplicate
+	t.Run("invalid endpoint not allowed for schemaregistry", func(t *testing.T) {
+		rp := redpandaCluster.DeepCopy()
+		const commonDomain = "company.org"
+
+		rp.Spec.Configuration.KafkaAPI = append(rp.Spec.Configuration.KafkaAPI, v1alpha1.KafkaAPI{External: v1alpha1.ExternalConnectivityConfig{
+			Enabled:   true,
+			Subdomain: commonDomain,
+		}})
+		rp.Spec.Configuration.SchemaRegistry = &v1alpha1.SchemaRegistryAPI{External: &v1alpha1.SchemaRegistryExternalConnectivityConfig{
+			ExternalConnectivityConfig: v1alpha1.ExternalConnectivityConfig{
+				Enabled:   true,
+				Subdomain: commonDomain,
+			},
+			Endpoint: "xx.xx",
 		}}
 		err := rp.ValidateCreate()
 		assert.Error(t, err)

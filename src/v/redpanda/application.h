@@ -15,6 +15,8 @@
 #include "cloud_storage/fwd.h"
 #include "cluster/config_manager.h"
 #include "cluster/fwd.h"
+#include "cluster/node_status_backend.h"
+#include "cluster/node_status_table.h"
 #include "config/node_config.h"
 #include "coproc/fwd.h"
 #include "kafka/client/configuration.h"
@@ -22,6 +24,7 @@
 #include "kafka/server/fwd.h"
 #include "net/conn_quota.h"
 #include "net/fwd.h"
+#include "pandaproxy/fwd.h"
 #include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/rest/fwd.h"
 #include "pandaproxy/schema_registry/configuration.h"
@@ -65,7 +68,7 @@ public:
       std::optional<YAML::Node> schema_reg_client_cfg = std::nullopt,
       std::optional<scheduling_groups> = std::nullopt);
     void check_environment();
-    void wire_up_and_start(::stop_signal&);
+    void wire_up_and_start(::stop_signal&, bool test_mode = false);
 
     explicit application(ss::sstring = "redpanda::main");
     ~application();
@@ -103,6 +106,8 @@ public:
     ss::sharded<cluster::tx_gateway_frontend> tx_gateway_frontend;
     ss::sharded<v8_engine::data_policy_table> data_policies;
     ss::sharded<cloud_storage::cache> shadow_index_cache;
+    ss::sharded<cluster::node_status_backend> node_status_backend;
+    ss::sharded<cluster::node_status_table> node_status_table;
 
 private:
     using deferred_actions
@@ -173,6 +178,7 @@ private:
     ss::sharded<net::conn_quota> _kafka_conn_quotas;
     ss::sharded<net::server> _kafka_server;
     ss::sharded<kafka::client::client> _proxy_client;
+    std::unique_ptr<pandaproxy::sharded_client_cache> _proxy_client_cache;
     ss::sharded<pandaproxy::rest::proxy> _proxy;
     std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;

@@ -76,7 +76,7 @@ public:
         model::offset committed_offset;
         model::timestamp base_timestamp;
         model::timestamp max_timestamp;
-        model::offset delta_offset;
+        model::offset_delta delta_offset;
 
         model::initial_revision_id ntp_revision;
         model::term_id archiver_term;
@@ -176,6 +176,10 @@ public:
     manifest_type get_manifest_type() const override {
         return manifest_type::partition;
     };
+
+    /// Returns an iterator to the segment containing offset o, such that o >=
+    /// segment.base_offset and o <= segment.committed_offset.
+    const_iterator segment_containing(model::offset o) const;
 
 private:
     /// Update manifest content from json document that supposed to be generated

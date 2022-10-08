@@ -25,6 +25,7 @@
 #include "cluster/metadata_dissemination_handler.h"
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/node/local_monitor.h"
+#include "cluster/node_status_rpc_handler.h"
 #include "cluster/partition_balancer_rpc_handler.h"
 #include "cluster/partition_manager.h"
 #include "cluster/rm_partition_frontend.h"
@@ -54,6 +55,7 @@
 #include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/rest/proxy.h"
 #include "pandaproxy/schema_registry/api.h"
+#include "pandaproxy/sharded_client_cache.h"
 #include "raft/group_manager.h"
 #include "raft/recovery_throttle.h"
 #include "raft/service.h"
@@ -581,7 +583,8 @@ void application::configure_admin_server() {
       std::ref(shard_table),
       std::ref(metadata_cache),
       std::ref(archival_scheduler),
-      std::ref(_connection_cache))
+      std::ref(_connection_cache),
+      std::ref(node_status_table))
       .get();
 }
 
@@ -611,6 +614,8 @@ manager_config_from_global_config(scheduling_groups& sgs) {
       config::shard_local_cfg().log_segment_size.bind(),
       config::shard_local_cfg().compacted_log_segment_size.bind(),
       config::shard_local_cfg().max_compacted_log_segment_size.bind(),
+      storage::jitter_percents(
+        config::shard_local_cfg().log_segment_size_jitter_percent()),
       storage::debug_sanitize_files::no,
       priority_manager::local().compaction_priority(),
       config::shard_local_cfg().retention_bytes.bind(),
@@ -716,6 +721,17 @@ void application::wire_up_services() {
           _proxy_client,
           to_yaml(*_proxy_client_config, config::redact_secrets::no))
           .get();
+
+        construct_single_service(_proxy_client_cache);
+
+        _proxy_client_cache
+          ->start(
+            smp_service_groups.proxy_smp_sg(),
+            to_yaml(*_proxy_client_config, config::redact_secrets::no),
+            _proxy_config->client_cache_max_size.value(),
+            _proxy_config->client_keep_alive.value())
+          .get();
+
         construct_service(
           _proxy,
           to_yaml(*_proxy_config, config::redact_secrets::no),
@@ -723,7 +739,9 @@ void application::wire_up_services() {
           // TODO: Improve memory budget for services
           // https://github.com/redpanda-data/redpanda/issues/1392
           memory_groups::kafka_total_memory(),
-          std::reference_wrapper(_proxy_client))
+          std::reference_wrapper(_proxy_client),
+          std::reference_wrapper(*_proxy_client_cache),
+          controller.get())
           .get();
     }
     if (_schema_reg_config) {
@@ -872,6 +890,18 @@ void application::wire_up_redpanda_services() {
       std::ref(cloud_storage_api));
     controller->wire_up().get0();
 
+    construct_service(node_status_table, config::node().node_id()).get();
+
+    construct_single_service_sharded(
+      node_status_backend,
+      config::node().node_id(),
+      std::ref(controller->get_members_table()),
+      std::ref(_feature_table),
+      std::ref(node_status_table),
+      ss::sharded_parameter(
+        [] { return config::shard_local_cfg().node_status_interval.bind(); }))
+      .get();
+
     syschecks::systemd_message("Creating kafka metadata cache").get();
     construct_service(
       metadata_cache,
@@ -942,6 +972,17 @@ void application::wire_up_redpanda_services() {
           std::ref(archival_scheduler),
           make_upload_controller_config(_scheduling_groups.archival_upload()))
           .get();
+
+        // In order to stop segment uploads and downloads we need
+        // to close conneciton so active uploads and downloads will be
+        // stopped.
+        _deferred.emplace_back([this] {
+            if (cloud_storage_api.local_is_initialized()) {
+                cloud_storage_api
+                  .invoke_on_all(&cloud_storage::remote::shutdown_connections)
+                  .get();
+            }
+        });
     }
 
     // group membership
@@ -1249,8 +1290,20 @@ application::set_proxy_client_config(ss::sstring name, std::any val) {
       });
 }
 
-void application::wire_up_and_start(::stop_signal& app_signal) {
+void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     wire_up_services();
+
+    if (test_mode) {
+        // When running inside a unit test fixture, we may fast-forward
+        // some of initialization that would usually wait for the controller
+        // to commit some state to its log.
+        vlog(_log.warn, "Running in unit test mode");
+        _feature_table
+          .invoke_on_all(
+            [](features::feature_table& ft) { ft.testing_activate_all(); })
+          .get();
+    }
+
     start_redpanda(app_signal);
 
     if (_proxy_config) {
@@ -1283,6 +1336,10 @@ void application::start_redpanda(::stop_signal& app_signal) {
     // single instance
     storage_node.invoke_on_all(&storage::node_api::start).get0();
 
+    // single instance
+    node_status_backend.invoke_on_all(&cluster::node_status_backend::start)
+      .get();
+
     // Early initialization of disk stats, so that logic for e.g. picking
     // falloc sizes works without having to wait for a local_monitor tick.
     auto tmp_lm = cluster::node::local_monitor(
@@ -1312,6 +1369,30 @@ void application::start_redpanda(::stop_signal& app_signal) {
       .get();
 
     storage.invoke_on_all(&storage::api::start).get();
+
+    ssx::background = _feature_table.invoke_on_all(
+      [this](features::feature_table& ft) -> ss::future<> {
+          try {
+              co_await ft.await_feature(features::feature::rpc_v2_by_default);
+              if (ss::this_shard_id() == 0) {
+                  vlog(_log.info, "Activating RPC protocol v2");
+              }
+              _connection_cache.local().set_default_transport_version(
+                rpc::transport_version::v2);
+          } catch (ss::abort_requested_exception&) {
+              // Shutting down
+              co_return;
+          } catch (...) {
+              // Should never happen, abort is the only exception that
+              // await_feature can throw, other than perhaps bad_alloc.
+              vlog(
+                _log.error,
+                "Unexpected error awaiting RPCv2 feature: {} {}",
+                std::current_exception(),
+                ss::current_backtrace());
+              co_return;
+          }
+      });
 
     syschecks::systemd_message("Starting the partition manager").get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();
@@ -1386,6 +1467,11 @@ void application::start_redpanda(::stop_signal& app_signal) {
             _scheduling_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
             std::ref(controller->get_partition_balancer()));
+
+          proto->register_service<cluster::node_status_rpc_handler>(
+            _scheduling_groups.node_status(),
+            smp_service_groups.cluster_smp_sg(),
+            std::ref(node_status_backend));
 
           if (!config::shard_local_cfg().disable_metrics()) {
               proto->setup_metrics();

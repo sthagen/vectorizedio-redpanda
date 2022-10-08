@@ -370,6 +370,7 @@ class SecurityConfig:
         self.endpoint_authn_method: Optional[str] = None
         self.tls_provider: Optional[TLSProvider] = None
         self.require_client_auth: bool = True
+        self.pp_authn_method: Optional[str] = None
 
         # The rules to extract principal from mtls
         self.principal_mapping_rules = self.__DEFAULT_PRINCIPAL_MAPPING_RULES
@@ -448,6 +449,10 @@ class RedpandaService(Service):
         'default_topic_partitions': 4,
         'enable_metrics_reporter': False,
         'superusers': [SUPERUSER_CREDENTIALS[0]],
+        # Disable segment size jitter to make tests more deterministic if they rely on
+        # inspecting storage internals (e.g. number of segments after writing a certain
+        # amount of data).
+        'log_segment_size_jitter_percent': 0,
     }
 
     logs = {
@@ -552,9 +557,10 @@ class RedpandaService(Service):
             f"ResourceSettings: dedicated_nodes={self._dedicated_nodes}")
 
         if si_settings is not None:
-            self._extra_rp_conf = si_settings.update_rp_conf(
-                self._extra_rp_conf)
-        self._si_settings = si_settings
+            self.set_si_settings(si_settings)
+        else:
+            self._si_settings = None
+
         self.s3_client: Optional[S3Client] = None
 
         if environment is None:
@@ -582,6 +588,14 @@ class RedpandaService(Service):
 
     def set_extra_rp_conf(self, conf):
         self._extra_rp_conf = conf
+        if self._si_settings is not None:
+            self._extra_rp_conf = self._si_settings.update_rp_conf(
+                self._extra_rp_conf)
+
+    def set_si_settings(self, si_settings: SISettings):
+        self._si_settings = si_settings
+        self._extra_rp_conf = self._si_settings.update_rp_conf(
+            self._extra_rp_conf)
 
     def add_extra_rp_conf(self, conf):
         self._extra_rp_conf = {**self._extra_rp_conf, **conf}
@@ -611,6 +625,9 @@ class RedpandaService(Service):
 
     def endpoint_authn_method(self):
         return self._security.endpoint_authn_method
+
+    def pp_authn_method(self):
+        return self._security.pp_authn_method
 
     def require_client_auth(self):
         return self._security.require_client_auth
@@ -1552,7 +1569,8 @@ class RedpandaService(Service):
                            enable_sr=self._enable_sr,
                            superuser=self._superuser,
                            sasl_enabled=self.sasl_enabled(),
-                           endpoint_authn_method=self.endpoint_authn_method())
+                           endpoint_authn_method=self.endpoint_authn_method(),
+                           pp_authn_method=self.pp_authn_method())
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1590,6 +1608,11 @@ class RedpandaService(Service):
 
     def write_bootstrap_cluster_config(self):
         conf = copy.deepcopy(self.CLUSTER_CONFIG_DEFAULTS)
+
+        if self._installer.installed_version != RedpandaInstaller.HEAD:
+            # If we're running an older version, exclude some newer configs
+            del conf['log_segment_size_jitter_percent']
+
         if self._extra_rp_conf:
             self.logger.debug(
                 "Setting custom cluster configuration options: {}".format(

@@ -24,11 +24,18 @@
 #include <seastar/net/socket_defs.hh>
 
 namespace rpc {
+
+/**
+ * Provides an interface to get a connected rpc::transport, transparently
+ * reconnecting if the underlying transport has become invalid.
+ */
 class reconnect_transport {
 public:
     explicit reconnect_transport(
-      rpc::transport_configuration c, backoff_policy backoff_policy)
-      : _transport(std::move(c))
+      rpc::transport_configuration c,
+      backoff_policy backoff_policy,
+      std::optional<connection_cache_label> label = std::nullopt)
+      : _transport(std::move(c), std::move(label))
       , _backoff_policy(std::move(backoff_policy)) {}
 
     bool is_valid() const { return _transport.is_valid(); }

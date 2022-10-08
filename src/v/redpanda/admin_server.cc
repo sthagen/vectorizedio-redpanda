@@ -25,6 +25,7 @@
 #include "cluster/members_frontend.h"
 #include "cluster/members_table.h"
 #include "cluster/metadata_cache.h"
+#include "cluster/node_status_table.h"
 #include "cluster/partition_balancer_backend.h"
 #include "cluster/partition_balancer_rpc_service.h"
 #include "cluster/partition_manager.h"
@@ -105,7 +106,8 @@ admin_server::admin_server(
   ss::sharded<cluster::shard_table>& st,
   ss::sharded<cluster::metadata_cache>& metadata_cache,
   ss::sharded<archival::scheduler_service>& archival_service,
-  ss::sharded<rpc::connection_cache>& connection_cache)
+  ss::sharded<rpc::connection_cache>& connection_cache,
+  ss::sharded<cluster::node_status_table>& node_status_table)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
   , _cfg(std::move(cfg))
@@ -116,7 +118,8 @@ admin_server::admin_server(
   , _metadata_cache(metadata_cache)
   , _connection_cache(connection_cache)
   , _auth(config::shard_local_cfg().admin_api_require_auth.bind(), _controller)
-  , _archival_service(archival_service) {}
+  , _archival_service(archival_service)
+  , _node_status_table(node_status_table) {}
 
 ss::future<> admin_server::start() {
     configure_metrics_route();
@@ -728,13 +731,14 @@ ss::future<> admin_server::throw_on_error(
             throw ss::httpd::base_exception(
               fmt::format("Timeout: {}", ec.message()),
               ss::httpd::reply::status_type::gateway_timeout);
+        case cluster::errc::replication_error:
         case cluster::errc::update_in_progress:
         case cluster::errc::leadership_changed:
         case cluster::errc::waiting_for_recovery:
         case cluster::errc::no_leader_controller:
         case cluster::errc::shutting_down:
             throw ss::httpd::base_exception(
-              fmt::format("Not ready ({})", ec.message()),
+              fmt::format("Service unavailable ({})", ec.message()),
               ss::httpd::reply::status_type::service_unavailable);
         case cluster::errc::not_leader:
             throw co_await redirect_to_leader(req, ntp);
@@ -742,7 +746,7 @@ ss::future<> admin_server::throw_on_error(
             throw co_await redirect_to_leader(req, model::controller_ntp);
         case cluster::errc::no_update_in_progress:
             throw ss::httpd::bad_request_exception(
-              "can not cancel partition move operation as there is no move "
+              "Cannot cancel partition move operation as there is no move "
               "in progress");
         default:
             throw ss::httpd::server_error_exception(
@@ -2831,6 +2835,27 @@ void admin_server::register_debug_routes() {
           }
 
           co_return ss::json::json_return_type(ans);
+      });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_peer_status,
+      [this](std::unique_ptr<ss::httpd::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          model::node_id id = parse_broker_id(*req);
+          auto node_status = _node_status_table.local().get_node_status(id);
+
+          if (!node_status) {
+              throw ss::httpd::bad_param_exception(
+                fmt::format("Unknown node with id {}", id));
+          }
+
+          auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+            rpc::clock_type::now() - node_status->last_seen);
+
+          seastar::httpd::debug_json::peer_status ret;
+          ret.since_last_status = delta.count();
+
+          co_return ret;
       });
 }
 

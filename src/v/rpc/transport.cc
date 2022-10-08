@@ -52,15 +52,16 @@ struct client_context_impl final : streaming_context {
 };
 
 transport::transport(
-  transport_configuration c,
-  [[maybe_unused]] std::optional<ss::sstring> service_name)
+  transport_configuration c, std::optional<connection_cache_label> label)
   : base_transport(base_transport::configuration{
     .server_addr = std::move(c.server_addr),
     .credentials = std::move(c.credentials),
   })
-  , _memory(c.max_queued_bytes, "rpc/transport-mem") {
+  , _memory(c.max_queued_bytes, "rpc/transport-mem")
+  , _version(c.version)
+  , _default_version(c.version) {
     if (!c.disable_metrics) {
-        setup_metrics(service_name);
+        setup_metrics(label);
     }
 }
 
@@ -88,7 +89,7 @@ void transport::reset_state() {
      */
     _last_seq = sequence_t{0};
     _seq = sequence_t{0};
-    _version = transport_version::v1;
+    _version = _default_version;
 }
 
 ss::future<>
@@ -222,14 +223,18 @@ void transport::dispatch_send() {
                   auto it = _requests_queue.begin();
                   _last_seq = it->first;
                   auto buffer = std::move(it->second->buffer).get();
+                  // These units are released once we are out of scope here
+                  // and that is intentional because the underlying write call
+                  // to the batched output stream guarantees us the in-order
+                  // delivery of the dispatched write calls, which is the intent
+                  // of holding on to the units up until this point.
                   auto units = std::move(it->second->resource_units);
                   auto v = std::move(*buffer).as_scattered();
                   auto msg_size = v.size();
                   _requests_queue.erase(it->first);
-                  return _out.write(std::move(v))
-                    .finally([this, msg_size, units = std::move(units)] {
-                        _probe.add_bytes_sent(msg_size);
-                    });
+                  auto f = _out.write(std::move(v));
+                  return std::move(f).finally(
+                    [this, msg_size] { _probe.add_bytes_sent(msg_size); });
               });
         }).handle_exception([this](std::exception_ptr e) {
             vlog(rpclog.info, "Error dispatching socket write:{}", e);
@@ -283,8 +288,9 @@ ss::future<> transport::dispatch(header h) {
     return fut;
 }
 
-void transport::setup_metrics(const std::optional<ss::sstring>& service_name) {
-    _probe.setup_metrics(_metrics, service_name, server_address());
+void transport::setup_metrics(
+  const std::optional<connection_cache_label>& label) {
+    _probe.setup_metrics(_metrics, label, server_address());
 }
 
 transport::~transport() {

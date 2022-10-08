@@ -491,18 +491,16 @@ func (r *Cluster) validatePandaproxyListeners() field.ErrorList {
 			}
 			foundListenerWithTLS = true
 		}
-		tlsErrors := validatePandaproxyTLS(p.TLS,
+		tlsErrs := validateListener(
+			p.TLS.Enabled,
+			p.TLS.RequireClientAuth,
+			p.TLS.IssuerRef,
+			p.TLS.NodeSecretRef,
 			field.NewPath("spec").Child("configuration").Child("pandaproxyApi").Index(i).Child("tls"),
-			&p.External,
-			field.NewPath("spec").Child("configuration").Child("pandaproxyApi").Index(i).Child("external"))
-		allErrs = append(allErrs, tlsErrors...)
-		// TODO(#2256): Add support for external listener + TLS certs for IPs
-		if p.TLS.Enabled && p.External.Enabled && p.External.Subdomain == "" {
-			allErrs = append(allErrs,
-				field.Invalid(field.NewPath("spec").Child("configuration").Child("pandaproxyApi").Index(i).Child("external").Child("subdomain"),
-					r.Spec.Configuration.PandaproxyAPI[i].External.Subdomain,
-					"TLS requires specifying a subdomain"))
-		}
+			&p.External.ExternalConnectivityConfig,
+			field.NewPath("spec").Child("configuration").Child("pandaproxyApi").Index(i).Child("external"),
+		)
+		allErrs = append(allErrs, tlsErrs...)
 	}
 
 	// If we have an external proxy listener and no other listeners, we're missing an internal one
@@ -586,6 +584,12 @@ func (r *Cluster) validateSchemaRegistryListener() field.ErrorList {
 			field.Invalid(field.NewPath("spec").Child("configuration").Child("schemaRegistry").Child("port"),
 				r.Spec.Configuration.SchemaRegistry,
 				"port must be in the range [30000-32768] when using a static node port"))
+	}
+	if schemaRegistry.External.Endpoint != "" && !validHostnameSegment.MatchString(schemaRegistry.External.Endpoint) {
+		allErrs = append(allErrs,
+			field.Invalid(field.NewPath("spec").Child("configuration").Child("schemaRegistry").Child("external").Child("endpoint"),
+				r.Spec.Configuration.SchemaRegistry.External.Endpoint,
+				fmt.Sprintf("endpoint for schema registry does not match regexp %s", validHostnameSegment.String())))
 	}
 
 	return allErrs
@@ -786,30 +790,6 @@ func validateListener(
 				"Cannot provide both IssuerRef and NodeSecretRef"))
 	}
 	if tlsEnabled && external != nil && external.Enabled && external.Subdomain == "" {
-		allErrs = append(allErrs,
-			field.Invalid(
-				externalPath.Child("subdomain"),
-				external.Subdomain,
-				"TLS requires specifying a subdomain"))
-	}
-	return allErrs
-}
-
-func validatePandaproxyTLS(
-	tlsConfig PandaproxyAPITLS,
-	path *field.Path,
-	external *PandaproxyExternalConnectivityConfig,
-	externalPath *field.Path,
-) field.ErrorList {
-	var allErrs field.ErrorList
-	if tlsConfig.RequireClientAuth && !tlsConfig.Enabled {
-		allErrs = append(allErrs,
-			field.Invalid(
-				path.Child("requireclientauth"),
-				tlsConfig.RequireClientAuth,
-				"Enabled has to be set to true for RequireClientAuth to be allowed to be true"))
-	}
-	if tlsConfig.Enabled && external != nil && external.Enabled && external.Subdomain == "" {
 		allErrs = append(allErrs,
 			field.Invalid(
 				externalPath.Child("subdomain"),

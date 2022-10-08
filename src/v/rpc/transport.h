@@ -43,11 +43,20 @@ class rpc_integration_fixture_oc_ns_adl_only_no_upgrade;
 namespace rpc {
 struct client_context_impl;
 
+/**
+ * Transport implementation used for internal RPC traffic.
+ *
+ * As callers send buffers over the wire, the transport associates each with an
+ * an appropriate response handler to use upon getting a response.
+ *
+ * Once connected, the transport repeatedly reads from the wire until an
+ * invalid response is received, or until shut down.
+ */
 class transport final : public net::base_transport {
 public:
     explicit transport(
       transport_configuration c,
-      std::optional<ss::sstring> service_name = std::nullopt);
+      std::optional<connection_cache_label> label = std::nullopt);
     ~transport() override;
     transport(transport&&) noexcept = default;
     // semaphore is not move assignable
@@ -84,7 +93,7 @@ private:
     ss::future<> do_reads();
     ss::future<> dispatch(header);
     void fail_outstanding_futures() noexcept final;
-    void setup_metrics(const std::optional<ss::sstring>&);
+    void setup_metrics(const std::optional<connection_cache_label>&);
 
     ss::future<result<std::unique_ptr<streaming_context>>>
       do_send(sequence_t, netbuf, rpc::client_opts);
@@ -94,14 +103,21 @@ private:
     make_response_handler(netbuf&, const rpc::client_opts&);
 
     ssx::semaphore _memory;
+    /**
+     * Map of response handlers to use when processing a buffer read from the
+     * wire.
+     *
+     * NOTE: _correlation_idx is unrelated to the sequence type used to define
+     * on-wire ordering below.
+     */
     absl::flat_hash_map<uint32_t, std::unique_ptr<internal::response_handler>>
       _correlations;
     uint32_t _correlation_idx{0};
     ss::metrics::metric_groups _metrics;
     /**
-     * ordered map containing in-flight requests. The map preserves order of
-     * calling send_typed function. It is fine to use btree_map in here as it
-     * ususally contains only few elements.
+     * Ordered map containing requests to be sent over the wire. The map
+     * preserves order of calling send_typed function. It is fine to use
+     * btree_map in here as it ususally contains only few elements.
      */
     requests_queue_t _requests_queue;
     sequence_t _seq;
@@ -111,10 +127,15 @@ private:
      * version level used when dispatching requests. this value may change
      * during the lifetime of the transport. for example the version may be
      * upgraded if it is discovered that a server supports a newer version.
-     *
-     * reset to v1 in reset_state() to support reconnect_transport.
      */
-    transport_version _version{transport_version::v1};
+    transport_version _version;
+
+    /*
+     * The initial version for new connections.  If we upgrade to a newer
+     * version from negotiation with a peer, _version will be incremented
+     * but will reset to _default_version when reset_state() is called.
+     */
+    transport_version _default_version;
 
     friend class ::rpc_integration_fixture_oc_ns_adl_serde_no_upgrade;
     friend class ::rpc_integration_fixture_oc_ns_adl_only_no_upgrade;
