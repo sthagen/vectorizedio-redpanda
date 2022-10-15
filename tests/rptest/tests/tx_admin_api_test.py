@@ -33,8 +33,6 @@ class TxAdminTest(RedpandaTest):
               self).__init__(test_context=test_context,
                              num_brokers=3,
                              extra_rp_conf={
-                                 "enable_idempotence": True,
-                                 "enable_transactions": True,
                                  "tx_timeout_delay_ms": 10000000,
                                  "abort_timed_out_transactions_interval_ms":
                                  10000000,
@@ -341,8 +339,7 @@ class TxAdminTest(RedpandaTest):
             raise Exception("init_transaction should fail")
         except ck.cimpl.KafkaException as e:
             kafka_error = e.args[0]
-            assert kafka_error.code(
-            ) == ck.cimpl.KafkaError.BROKER_NOT_AVAILABLE
+            assert kafka_error.code() == ck.cimpl.KafkaError.INVALID_TXN_STATE
 
         txs_info = self.admin.get_all_transactions()
         assert len(

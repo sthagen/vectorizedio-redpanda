@@ -416,7 +416,7 @@ ss::future<try_abort_reply> tx_gateway_frontend::do_try_abort(
     if (term_opt.value() != expected_term) {
         co_return try_abort_reply{tx_errc::unknown_server_error};
     }
-    auto tx_opt = stm->get_tx(tx_id);
+    auto tx_opt = co_await stm->get_tx(tx_id);
     if (!tx_opt) {
         co_return try_abort_reply::make_aborted();
     }
@@ -477,9 +477,16 @@ tx_gateway_frontend::do_commit_tm_tx(
         co_return tx_errc::invalid_txn_state;
     }
     auto term = term_opt.value();
-    auto tx_opt = stm->get_tx(tx_id);
+    auto tx_opt = co_await stm->get_tx(tx_id);
     if (!tx_opt.has_value()) {
-        co_return tx_errc::invalid_txn_state;
+        auto status = tx_opt.error();
+        tx_errc err = tx_errc::invalid_txn_state;
+        if (status == tm_stm::op_status::not_leader) {
+            err = tx_errc::leader_not_found;
+        } else if (status == tm_stm::op_status::unknown) {
+            err = tx_errc::unknown_server_error;
+        }
+        co_return err;
     }
     auto tx = tx_opt.value();
     if (tx.pid != pid) {
@@ -500,9 +507,7 @@ ss::future<cluster::init_tm_tx_reply> tx_gateway_frontend::init_tm_tx(
   std::chrono::milliseconds transaction_timeout_ms,
   model::timeout_clock::duration timeout,
   model::producer_identity expected_pid) {
-    if (
-      expected_pid != model::unknown_pid
-      && !allow_init_tm_request_with_expected_pid()) {
+    if (expected_pid != model::unknown_pid && !is_transaction_ga()) {
         co_return cluster::init_tm_tx_reply{tx_errc::not_coordinator};
     }
 
@@ -762,7 +767,7 @@ ss::future<cluster::init_tm_tx_reply> tx_gateway_frontend::do_init_tm_tx(
     if (!term_opt.has_value()) {
         if (term_opt.error() == tm_stm::op_status::not_leader) {
             vlog(
-              txlog.warn,
+              txlog.trace,
               "this node isn't a leader for tx.id={} coordinator",
               tx_id);
             co_return init_tm_tx_reply{tx_errc::not_coordinator};
@@ -775,9 +780,12 @@ ss::future<cluster::init_tm_tx_reply> tx_gateway_frontend::do_init_tm_tx(
         co_return init_tm_tx_reply{tx_errc::invalid_txn_state};
     }
     auto term = term_opt.value();
-    auto tx_opt = stm->get_tx(tx_id);
+    auto tx_opt = co_await stm->get_tx(tx_id);
 
     if (!tx_opt.has_value()) {
+        if (tx_opt.error() == tm_stm::op_status::not_leader) {
+            co_return init_tm_tx_reply{tx_errc::leader_not_found};
+        }
         allocate_id_reply pid_reply
           = co_await _id_allocator_frontend.local().allocate_id(timeout);
         if (pid_reply.ec != errc::success) {
@@ -1290,11 +1298,18 @@ tx_gateway_frontend::do_end_txn(
         co_return tx_errc::invalid_txn_state;
     }
     auto term = term_opt.value();
-    auto tx_opt = stm->get_tx(request.transactional_id);
+    auto tx_opt = co_await stm->get_tx(request.transactional_id);
 
     if (!tx_opt.has_value()) {
-        outcome->set_value(tx_errc::invalid_producer_id_mapping);
-        co_return tx_errc::invalid_producer_id_mapping;
+        auto status = tx_opt.error();
+        tx_errc err = tx_errc::invalid_producer_id_mapping;
+        if (status == tm_stm::op_status::not_leader) {
+            err = tx_errc::leader_not_found;
+        } else if (status == tm_stm::op_status::unknown) {
+            err = tx_errc::unknown_server_error;
+        }
+        outcome->set_value(err);
+        co_return err;
     }
 
     model::producer_identity pid{request.producer_id, request.producer_epoch};
@@ -1362,7 +1377,7 @@ tx_gateway_frontend::do_end_txn(
     }
     tx = r.value();
 
-    auto ongoing_tx = stm->mark_tx_ongoing(tx.id);
+    auto ongoing_tx = co_await stm->mark_tx_ongoing(tx.id);
     if (!ongoing_tx.has_value()) {
         co_return tx_errc::unknown_server_error;
     }
@@ -1482,7 +1497,9 @@ tx_gateway_frontend::do_commit_tm_tx(
               group.group_id, group.etag, tx.pid, tx.tx_seq, timeout));
         }
 
-        if (tx.status == tm_transaction::tx_status::ongoing) {
+        if (
+          !is_transaction_ga()
+          && tx.status == tm_transaction::tx_status::ongoing) {
             auto preparing_tx = co_await stm->mark_tx_preparing(
               expected_term, tx.id);
             if (!preparing_tx.has_value()) {
@@ -1530,15 +1547,26 @@ tx_gateway_frontend::do_commit_tm_tx(
         outcome->set_value(tx_errc::unknown_server_error);
         throw;
     }
-    outcome->set_value(tx_errc::none);
 
     auto changed_tx = co_await stm->mark_tx_prepared(expected_term, tx.id);
     if (!changed_tx.has_value()) {
         if (changed_tx.error() == tm_stm::op_status::not_leader) {
+            outcome->set_value(tx_errc::not_coordinator);
             co_return tx_errc::not_coordinator;
         }
+        outcome->set_value(tx_errc::unknown_server_error);
         co_return tx_errc::unknown_server_error;
     }
+
+    // We can reduce the number of disk operation if we will not write
+    // preparing state on disk. But after it we should ans to client when we
+    // sure that tx will be recommited after fail. We can guarantee it only
+    // if we ans after marking tx prepared. Becase after fail tx will be
+    // recommited again and client will see expected bechavior.
+    // Also we do not need to support old bechavior with feature flag, because
+    // now we will ans client later than in old versions. So we do not break
+    // anything
+    outcome->set_value(tx_errc::none);
     tx = changed_tx.value();
 
     std::vector<ss::future<commit_group_tx_reply>> gfs;
@@ -1629,9 +1657,16 @@ tx_gateway_frontend::get_ongoing_tx(
   model::producer_identity pid,
   kafka::transactional_id tx_id,
   model::timeout_clock::duration timeout) {
-    auto tx_opt = stm->get_tx(tx_id);
+    auto tx_opt = co_await stm->get_tx(tx_id);
     if (!tx_opt.has_value()) {
-        co_return tx_errc::invalid_producer_id_mapping;
+        auto status = tx_opt.error();
+        tx_errc err = tx_errc::invalid_producer_id_mapping;
+        if (status == tm_stm::op_status::not_leader) {
+            err = tx_errc::leader_not_found;
+        } else if (status == tm_stm::op_status::unknown) {
+            err = tx_errc::unknown_server_error;
+        }
+        co_return err;
     }
     auto tx = tx_opt.value();
 
@@ -1708,7 +1743,7 @@ tx_gateway_frontend::get_ongoing_tx(
         }
     }
 
-    auto ongoing_tx = stm->reset_tx_ongoing(tx.id, expected_term);
+    auto ongoing_tx = co_await stm->reset_tx_ongoing(tx.id, expected_term);
     if (!ongoing_tx.has_value()) {
         co_return tx_errc::invalid_txn_state;
     }
@@ -1814,7 +1849,7 @@ ss::future<> tx_gateway_frontend::do_expire_old_tx(
         co_return;
     }
     auto term = term_opt.value();
-    auto tx_opt = stm->get_tx(tx_id);
+    auto tx_opt = co_await stm->get_tx(tx_id);
     if (!tx_opt) {
         // either timeout or already expired
         co_return;

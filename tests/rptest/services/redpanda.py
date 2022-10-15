@@ -26,22 +26,26 @@ from typing import Mapping, Optional, Tuple, Union, Any
 
 import yaml
 from ducktape.services.service import Service
+from ducktape.tests.test import TestContext
 from rptest.archival.s3_client import S3Client
 from ducktape.cluster.remoteaccount import RemoteCommandError
+from ducktape.utils.local_filesystem_utils import mkdir_p
 from ducktape.utils.util import wait_until
 from ducktape.cluster.cluster import ClusterNode
 from prometheus_client.parser import text_string_to_metric_families
 from ducktape.errors import TimeoutError
 
 from rptest.clients.kafka_cat import KafkaCat
+from rptest.clients.rpk import RpkTool
+from rptest.clients.rpk_remote import RpkRemoteTool
+from rptest.clients.python_librdkafka import PythonLibrdkafka
+from rptest.services import tls
 from rptest.services.admin import Admin
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.services.rolling_restarter import RollingRestarter
-from rptest.clients.rpk_remote import RpkRemoteTool
 from rptest.services.storage import ClusterStorage, NodeStorage
 from rptest.services.utils import BadLogLines, NodeCrash
-from rptest.clients.python_librdkafka import PythonLibrdkafka
-from rptest.services import tls
+from rptest.util import wait_until_result
 
 Partition = collections.namedtuple('Partition',
                                    ['index', 'leader', 'replicas'])
@@ -371,6 +375,7 @@ class SecurityConfig:
         self.tls_provider: Optional[TLSProvider] = None
         self.require_client_auth: bool = True
         self.pp_authn_method: Optional[str] = None
+        self.sr_authn_method: Optional[str] = None
 
         # The rules to extract principal from mtls
         self.principal_mapping_rules = self.__DEFAULT_PRINCIPAL_MAPPING_RULES
@@ -580,6 +585,9 @@ class RedpandaService(Service):
         # stash a copy here so that we can quickly look up e.g. addresses later.
         self._node_configs = {}
 
+    def set_skip_if_no_redpanda_log(self, v: bool):
+        self._skip_if_no_redpanda_log = v
+
     def set_environment(self, environment: dict[str, str]):
         self._environment = environment
 
@@ -740,7 +748,8 @@ class RedpandaService(Service):
               clean_nodes=True,
               start_si=True,
               parallel: bool = True,
-              expect_fail: bool = False):
+              expect_fail: bool = False,
+              auto_assign_node_id: bool = False):
         """
         Start the service on all nodes.
 
@@ -795,7 +804,8 @@ class RedpandaService(Service):
             self.logger.debug("%s: starting node" % self.who_am_i(node))
             self.start_node(node,
                             first_start=first_start,
-                            expect_fail=expect_fail)
+                            expect_fail=expect_fail,
+                            auto_assign_node_id=auto_assign_node_id)
 
         self._for_nodes(to_start, start_one, parallel=parallel)
 
@@ -999,7 +1009,8 @@ class RedpandaService(Service):
                    timeout=None,
                    write_config=True,
                    first_start=False,
-                   expect_fail: bool = False):
+                   expect_fail: bool = False,
+                   auto_assign_node_id: bool = False):
         """
         Start a single instance of redpanda. This function will not return until
         redpanda appears to have started successfully. If redpanda does not
@@ -1010,7 +1021,9 @@ class RedpandaService(Service):
         node.account.mkdirs(os.path.dirname(RedpandaService.NODE_CONFIG_FILE))
 
         if write_config:
-            self.write_node_conf_file(node, override_cfg_params)
+            self.write_node_conf_file(node,
+                                      override_cfg_params,
+                                      auto_assign_node_id=auto_assign_node_id)
 
         if timeout is None:
             timeout = self.node_ready_timeout_s
@@ -1428,6 +1441,22 @@ class RedpandaService(Service):
         Override default stop() to execude stop_node in parallel
         """
         self._stop_time = time.time()  # The last time stop is invoked
+        self.logger.info("%s: exporting cluster config" % self.who_am_i())
+
+        service_dir = os.path.join(
+            TestContext.results_dir(self._context, self._context.test_index),
+            self.service_id)
+        cluster_config_filename = os.path.join(service_dir,
+                                               "cluster_config.yaml")
+        self.logger.debug("%s: cluster_config_filename %s" %
+                          (self.who_am_i(), cluster_config_filename))
+
+        if not os.path.isdir(service_dir):
+            mkdir_p(service_dir)
+
+        rpk = RpkTool(self)
+        rpk.cluster_config_export(cluster_config_filename, True)
+
         self.logger.info("%s: stopping service" % self.who_am_i())
 
         self._for_nodes(self.nodes,
@@ -1509,6 +1538,17 @@ class RedpandaService(Service):
             # installation to preserve!
             self._installer.reset_current_install([node])
 
+    def trim_logs(self):
+        # Excessive logging may cause disks to fill up quickly.
+        # Call this method to removes TRACE and DEBUG log lines from redpanda logs
+        # Ensure this is only done on tests that have passed
+        def prune(node):
+            node.account.ssh(
+                f"sed -i -E -e '/TRACE|DEBUG/d' {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
+            )
+
+        self._for_nodes(self.nodes, prune, parallel=True)
+
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
 
@@ -1545,13 +1585,22 @@ class RedpandaService(Service):
     def started_nodes(self):
         return self._started
 
-    def write_node_conf_file(self, node, override_cfg_params=None):
+    def write_node_conf_file(self,
+                             node,
+                             override_cfg_params=None,
+                             auto_assign_node_id=False):
         """
         Write the node config file for a redpanda node: this is the YAML representation
         of Redpanda's `node_config` class.  Distinct from Redpanda's _cluster_ configuration
         which is written separately.
         """
         node_info = {self.idx(n): n for n in self.nodes}
+
+        node_id = self.idx(node)
+        include_seed_servers = node_id > 1
+        if auto_assign_node_id:
+            # Supply None so it's omitted from the config.
+            node_id = None
 
         # Grab the IP to use it as an alternative listener address, to
         # exercise code paths that deal with multiple listeners
@@ -1561,7 +1610,8 @@ class RedpandaService(Service):
                            node=node,
                            data_dir=RedpandaService.DATA_DIR,
                            nodes=node_info,
-                           node_id=self.idx(node),
+                           node_id=node_id,
+                           include_seed_servers=include_seed_servers,
                            node_ip=node_ip,
                            kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
                            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
@@ -1570,7 +1620,8 @@ class RedpandaService(Service):
                            superuser=self._superuser,
                            sasl_enabled=self.sasl_enabled(),
                            endpoint_authn_method=self.endpoint_authn_method(),
-                           pp_authn_method=self.pp_authn_method())
+                           pp_authn_method=self._security.pp_authn_method,
+                           sr_authn_method=self._security.sr_authn_method)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1644,7 +1695,8 @@ class RedpandaService(Service):
                       nodes,
                       override_cfg_params=None,
                       start_timeout=None,
-                      stop_timeout=None):
+                      stop_timeout=None,
+                      auto_assign_node_id=False):
 
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
         with concurrent.futures.ThreadPoolExecutor(
@@ -1656,8 +1708,11 @@ class RedpandaService(Service):
                              nodes))
             list(
                 executor.map(
-                    lambda n: self.start_node(
-                        n, override_cfg_params, timeout=start_timeout), nodes))
+                    lambda n: self.start_node(n,
+                                              override_cfg_params,
+                                              timeout=start_timeout,
+                                              auto_assign_node_id=
+                                              auto_assign_node_id), nodes))
 
     def rolling_restart_nodes(self,
                               nodes,
@@ -1681,9 +1736,9 @@ class RedpandaService(Service):
         We first check the admin API to do a kafka-independent check, and then verify
         that kafka clients see the same thing.
         """
-        idx = self.idx(node)
+        node_id = self.node_id(node)
         self.logger.debug(
-            f"registered: checking if broker {idx} ({node.name} is registered..."
+            f"registered: checking if broker {node_id} ({node.name}) is registered..."
         )
 
         # Query all nodes' admin APIs, so that we don't advance during setup until
@@ -1703,7 +1758,7 @@ class RedpandaService(Service):
                 return False
             found = None
             for b in admin_brokers:
-                if b['node_id'] == idx:
+                if b['node_id'] == node_id:
                     found = b
                     break
 
@@ -1733,7 +1788,7 @@ class RedpandaService(Service):
         client = PythonLibrdkafka(self, tls_cert=self._tls_cert, **auth_args)
 
         brokers = client.brokers()
-        broker = brokers.get(idx, None)
+        broker = brokers.get(node_id, None)
         if broker is None:
             # This should never happen, because we already checked via the admin API
             # that the node of interest had become visible to all peers.
@@ -1795,6 +1850,10 @@ class RedpandaService(Service):
         for ns in listdir(store.data_dir, True):
             if ns == '.coprocessor_offset_checkpoints':
                 continue
+            if ns == 'cloud_storage_cache':
+                # Default cache dir is sub-path of data dir
+                continue
+
             ns = store.add_namespace(ns, os.path.join(store.data_dir, ns))
             for topic in listdir(ns.path):
                 topic = ns.add_topic(topic, os.path.join(ns.path, topic))
@@ -2002,6 +2061,21 @@ class RedpandaService(Service):
             assert num_shards > 0
             shards_per_node[self.idx(node)] = num_shards
         return shards_per_node
+
+    def node_id(self, node):
+        def _try_get_node_id():
+            try:
+                node_cfg = self._admin.get_node_config(node)
+            except:
+                return (False, -1)
+            return (True, node_cfg["node_id"])
+
+        node_id = wait_until_result(
+            _try_get_node_id,
+            timeout_sec=30,
+            err_msg=f"couldn't reach admin endpoing for {node.account.hostname}"
+        )
+        return node_id
 
     def healthy(self):
         """

@@ -12,6 +12,7 @@
 #pragma once
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "model/namespace.h"
 #include "ssx/sformat.h"
 #include "tristate.h"
 
@@ -44,10 +45,13 @@ public:
         topic_recovery_enabled recovery_enabled = topic_recovery_enabled::yes;
         // if set the value will control how data is uploaded and retrieved
         // to/from S3
-        model::shadow_indexing_mode shadow_indexing_mode
-          = model::shadow_indexing_mode::disabled;
+        std::optional<model::shadow_indexing_mode> shadow_indexing_mode;
 
         std::optional<bool> read_replica;
+
+        tristate<size_t> retention_local_target_bytes{std::nullopt};
+        tristate<std::chrono::milliseconds> retention_local_target_ms{
+          std::nullopt};
 
         friend std::ostream&
         operator<<(std::ostream&, const default_overrides&);
@@ -143,19 +147,23 @@ public:
     }
 
     bool is_archival_enabled() const {
-        return _overrides != nullptr
-               && model::is_archival_enabled(_overrides->shadow_indexing_mode);
+        return _overrides != nullptr && _overrides->shadow_indexing_mode
+               && model::is_archival_enabled(
+                 _overrides->shadow_indexing_mode.value());
     }
 
     bool is_remote_fetch_enabled() const {
-        return _overrides != nullptr
-               && model::is_fetch_enabled(_overrides->shadow_indexing_mode);
+        return _overrides != nullptr && _overrides->shadow_indexing_mode
+               && model::is_fetch_enabled(
+                 _overrides->shadow_indexing_mode.value());
     }
 
     bool is_read_replica_mode_enabled() const {
         return _overrides != nullptr && _overrides->read_replica
                && _overrides->read_replica.value();
     }
+
+    bool is_internal_topic() const { return _ntp.ns != model::kafka_namespace; }
 
 private:
     model::ntp _ntp;

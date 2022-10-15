@@ -37,8 +37,6 @@ class ShadowIndexingTxTest(RedpandaTest):
 
     def __init__(self, test_context):
         extra_rp_conf = dict(
-            enable_idempotence=True,
-            enable_transactions=True,
             enable_leader_balancer=False,
             partition_autobalancing_mode="off",
             group_initial_rebalance_delay=300,
@@ -96,7 +94,8 @@ class ShadowIndexingTxTest(RedpandaTest):
         kafka_tools.alter_topic_config(
             self.topic,
             {
-                TopicSpec.PROPERTY_RETENTION_BYTES: 3 * self.segment_size,
+                TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES:
+                3 * self.segment_size,
             },
         )
         wait_for_segments_removal(redpanda=self.redpanda,

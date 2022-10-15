@@ -99,7 +99,7 @@ struct follower_index_metadata {
     model::offset last_sent_offset;
     // timestamp of last append_entries_rpc call
     clock_type::time_point last_sent_append_entries_req_timestamp;
-    clock_type::time_point last_received_append_entries_reply_timestamp;
+    clock_type::time_point last_received_reply_timestamp;
     uint32_t heartbeats_failed{0};
     // The pair of sequences used to track append entries requests sent and
     // received by the follower. Every time append entries request is created
@@ -472,9 +472,15 @@ enum class consistency_level { quorum_ack, leader_ack, no_ack };
 
 struct replicate_options {
     explicit replicate_options(consistency_level l)
-      : consistency(l) {}
+      : consistency(l)
+      , timeout(std::nullopt) {}
+
+    replicate_options(consistency_level l, std::chrono::milliseconds timeout)
+      : consistency(l)
+      , timeout(timeout) {}
 
     consistency_level consistency;
+    std::optional<std::chrono::milliseconds> timeout;
 };
 
 using offset_translator_delta = named_type<int64_t, struct ot_delta_tag>;

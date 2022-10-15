@@ -19,6 +19,7 @@ constexpr error_code map_topic_error_code(cluster::errc code) {
     case cluster::errc::success:
         return error_code::none;
     case cluster::errc::topic_invalid_config:
+    case cluster::errc::invalid_retention_configuration:
         return error_code::invalid_config;
     case cluster::errc::topic_invalid_partitions:
         return error_code::invalid_partitions;
@@ -45,6 +46,8 @@ constexpr error_code map_topic_error_code(cluster::errc code) {
         return error_code::not_coordinator;
     case cluster::errc::invalid_request:
         return error_code::invalid_request;
+    case cluster::errc::throttling_quota_exceeded:
+        return error_code::throttling_quota_exceeded;
     case cluster::errc::replication_error:
     case cluster::errc::shutting_down:
     case cluster::errc::join_request_dispatch_error:

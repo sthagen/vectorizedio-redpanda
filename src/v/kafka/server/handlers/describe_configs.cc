@@ -294,12 +294,12 @@ static void report_broker_config(
           result.resource_name.data() + result.resource_name.size(), // NOLINT
           broker_id);
         if (res.ec == std::errc()) {
-            if (broker_id != config::node().node_id()) {
+            if (broker_id != *config::node().node_id()) {
                 result.error_code = error_code::invalid_request;
                 result.error_message = ssx::sformat(
                   "Unexpected broker id {} expected {}",
                   broker_id,
-                  config::node().node_id());
+                  *config::node().node_id());
                 return;
             }
         } else {
@@ -563,6 +563,25 @@ ss::future<response_ptr> describe_configs_handler::handle(
                 : std::nullopt,
               request.data.include_synonyms,
               &describe_as_string<bool>);
+
+            add_topic_config_if_requested(
+              resource,
+              result,
+              topic_property_retention_local_target_bytes,
+              ctx.metadata_cache().get_default_retention_local_target_bytes(),
+              topic_property_retention_local_target_bytes,
+              topic_config->properties.retention_local_target_bytes,
+              request.data.include_synonyms);
+
+            add_topic_config_if_requested(
+              resource,
+              result,
+              topic_property_retention_local_target_ms,
+              std::make_optional(
+                ctx.metadata_cache().get_default_retention_local_target_ms()),
+              topic_property_retention_local_target_ms,
+              topic_config->properties.retention_local_target_ms,
+              request.data.include_synonyms);
 
             // Data-policy property
             ss::sstring property_name = "redpanda.datapolicy";

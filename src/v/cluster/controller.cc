@@ -13,6 +13,7 @@
 #include "cluster/config_frontend.h"
 #include "cluster/controller_api.h"
 #include "cluster/controller_backend.h"
+#include "cluster/controller_log_limiter.h"
 #include "cluster/controller_service.h"
 #include "cluster/data_policy_frontend.h"
 #include "cluster/feature_backend.h"
@@ -98,12 +99,8 @@ ss::future<> controller::wire_up() {
       .then([this] { _probe.start(); });
 }
 
-ss::future<> controller::start() {
-    std::vector<model::broker> initial_raft0_brokers;
-    if (config::node().seed_servers().empty()) {
-        initial_raft0_brokers.push_back(
-          cluster::make_self_broker(config::node()));
-    }
+ss::future<>
+controller::start(std::vector<model::broker> initial_raft0_brokers) {
     return create_raft0(
              _partition_manager,
              _shard_table,
@@ -116,6 +113,8 @@ ss::future<> controller::start() {
       .then([this] {
           return _members_manager.start_single(
             _raft0,
+            std::ref(_stm),
+            std::ref(_feature_table),
             std::ref(_members_table),
             std::ref(_connections),
             std::ref(_partition_allocator),
@@ -148,7 +147,33 @@ ss::future<> controller::start() {
             std::ref(_as));
       })
       .then([this] {
+          limiter_configuration limiter_conf{
+            config::shard_local_cfg()
+              .enable_controller_log_rate_limiting.bind(),
+            config::shard_local_cfg().rps_limit_topic_operations.bind(),
+            config::shard_local_cfg()
+              .controller_log_accummulation_rps_capacity_topic_operations
+              .bind(),
+            config::shard_local_cfg()
+              .rps_limit_acls_and_users_operations.bind(),
+            config::shard_local_cfg()
+              .controller_log_accummulation_rps_capacity_acls_and_users_operations
+              .bind(),
+            config::shard_local_cfg()
+              .rps_limit_node_management_operations.bind(),
+            config::shard_local_cfg()
+              .controller_log_accummulation_rps_capacity_node_management_operations
+              .bind(),
+            config::shard_local_cfg().rps_limit_move_operations.bind(),
+            config::shard_local_cfg()
+              .controller_log_accummulation_rps_capacity_move_operations.bind(),
+            config::shard_local_cfg().rps_limit_configuration_operations.bind(),
+            config::shard_local_cfg()
+              .controller_log_accummulation_rps_capacity_configuration_operations
+              .bind(),
+          };
           return _stm.start_single(
+            std::move(limiter_conf),
             std::ref(clusterlog),
             _raft0.get(),
             raft::persistent_last_applied::yes,

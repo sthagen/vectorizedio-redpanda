@@ -81,6 +81,7 @@
 #include <seastar/http/api_docs.hh>
 #include <seastar/http/httpd.hh>
 #include <seastar/http/reply.hh>
+#include <seastar/http/request.hh>
 
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -437,7 +438,7 @@ ss::future<ss::httpd::redirect_exception> admin_server::redirect_to_leader(
           ss::httpd::reply::status_type::service_unavailable);
     }
 
-    if (leader_id_opt.value() == config::node().node_id()) {
+    if (leader_id_opt.value() == *config::node().node_id()) {
         vlog(
           logger.info,
           "Can't redirect to leader from leader node ({})",
@@ -558,7 +559,7 @@ bool need_redirect_to_leader(
           ss::httpd::reply::status_type::service_unavailable);
     }
 
-    return leader_id_opt.value() != config::node().node_id();
+    return leader_id_opt.value() != *config::node().node_id();
 }
 
 model::node_id parse_broker_id(const ss::httpd::request& req) {
@@ -748,6 +749,10 @@ ss::future<> admin_server::throw_on_error(
             throw ss::httpd::bad_request_exception(
               "Cannot cancel partition move operation as there is no move "
               "in progress");
+        case cluster::errc::throttling_quota_exceeded:
+            throw ss::httpd::base_exception(
+              fmt::format("Too many requests: {}", ec.message()),
+              ss::httpd::reply::status_type::too_many_requests);
         default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected cluster error: {}", ec.message()));
@@ -898,7 +903,11 @@ void admin_server::register_config_routes() {
       ss::httpd::config_json::set_log_level,
       [this](std::unique_ptr<ss::httpd::request> req)
         -> ss::future<ss::json::json_return_type> {
-          auto name = req->param["name"];
+          ss::sstring name;
+          if (!ss::httpd::connection::url_decode(req->param["name"], name)) {
+              throw ss::httpd::bad_param_exception(fmt::format(
+                "Invalid parameter 'name' got {{{}}}", req->param["name"]));
+          }
 
           // current level: will be used revert after a timeout (optional)
           ss::log_level cur_level;

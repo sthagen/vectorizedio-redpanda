@@ -114,7 +114,9 @@ class VerifiableProducer(BackgroundThreadService):
                  enable_idempotence=False,
                  create_time=-1,
                  repeating_keys=None,
-                 retries=None):
+                 retries=None,
+                 transactional=False,
+                 tx_inject_aborts=False):
         """
         Args:
             :param max_messages                number of messages to be produced per producer
@@ -153,6 +155,8 @@ class VerifiableProducer(BackgroundThreadService):
         self.create_time = create_time
         self.repeating_keys = repeating_keys
         self.retries = retries
+        self.transactional = transactional
+        self.tx_inject_aborts = tx_inject_aborts
 
     def prop_file(self, node):
         idx = self.idx(node)
@@ -220,15 +224,17 @@ class VerifiableProducer(BackgroundThreadService):
                 with self.lock:
                     if data["name"] == "producer_send_error":
                         data["node"] = idx
-                        self.not_acked_values.append(
-                            self.message_validator(data["value"]))
+                        value = self.message_validator(data["value"])
+                        key = data["key"]
+                        self.not_acked_values.append((key, value))
                         self.produced_count[idx] += 1
 
                     elif data["name"] == "producer_send_success":
                         partition = TopicPartition(data["topic"],
                                                    data["partition"])
                         value = self.message_validator(data["value"])
-                        self.acked_values.append(value)
+                        key = data["key"]
+                        self.acked_values.append((key, value))
 
                         if partition not in self.acked_values_by_partition:
                             self.acked_values_by_partition[partition] = []
@@ -284,6 +290,11 @@ class VerifiableProducer(BackgroundThreadService):
             cmd += " --repeating-keys %s " % str(self.repeating_keys)
 
         cmd += " --producer.config %s" % VerifiableProducer.CONFIG_FILE
+
+        if self.transactional:
+            cmd += " --transactional"
+            if self.tx_inject_aborts:
+                cmd += " --enable-random-aborts"
 
         cmd += " 2>> %s | tee -a %s &" % (VerifiableProducer.STDOUT_CAPTURE,
                                           VerifiableProducer.STDOUT_CAPTURE)

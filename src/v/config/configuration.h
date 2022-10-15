@@ -240,6 +240,11 @@ struct configuration final : public config_store {
     property<int16_t> cloud_storage_upload_ctrl_min_shares;
     property<int16_t> cloud_storage_upload_ctrl_max_shares;
 
+    // Defaults for local retention for partitions of topics with
+    // cloud storage read and write enabled
+    property<std::optional<size_t>> retention_local_target_bytes_default;
+    property<std::chrono::milliseconds> retention_local_target_ms_default;
+
     // Archival cache
     property<size_t> cloud_storage_cache_size;
     property<std::chrono::milliseconds> cloud_storage_cache_check_interval_ms;
@@ -298,6 +303,23 @@ struct configuration final : public config_store {
     property<bool> enable_rack_awareness;
 
     property<std::chrono::milliseconds> node_status_interval;
+    // controller log limitng
+    property<bool> enable_controller_log_rate_limiting;
+    property<size_t> rps_limit_topic_operations;
+    property<std::optional<size_t>>
+      controller_log_accummulation_rps_capacity_topic_operations;
+    property<size_t> rps_limit_acls_and_users_operations;
+    property<std::optional<size_t>>
+      controller_log_accummulation_rps_capacity_acls_and_users_operations;
+    property<size_t> rps_limit_node_management_operations;
+    property<std::optional<size_t>>
+      controller_log_accummulation_rps_capacity_node_management_operations;
+    property<size_t> rps_limit_move_operations;
+    property<std::optional<size_t>>
+      controller_log_accummulation_rps_capacity_move_operations;
+    property<size_t> rps_limit_configuration_operations;
+    property<std::optional<size_t>>
+      controller_log_accummulation_rps_capacity_configuration_operations;
 
     configuration();
 

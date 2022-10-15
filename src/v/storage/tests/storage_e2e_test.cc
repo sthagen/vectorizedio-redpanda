@@ -138,12 +138,21 @@ FIXTURE_TEST(test_single_record_per_segment, storage_test_fixture) {
     auto ntp = model::ntp("default", "test", 0);
     auto log
       = mgr.manage(storage::ntp_config(ntp, mgr.config().base_dir)).get0();
-    auto headers = append_random_batches(log, 10, model::term_id(1), []() {
-        ss::circular_buffer<model::record_batch> batches;
-        batches.push_back(
-          model::test::make_random_batch(model::offset(0), 1, true));
-        return batches;
-    });
+    auto headers = append_random_batches(
+      log,
+      10,
+      model::term_id(1),
+      [](std::optional<model::timestamp> ts = std::nullopt) {
+          ss::circular_buffer<model::record_batch> batches;
+          batches.push_back(model::test::make_random_batch(
+            model::offset(0),
+            1,
+            true,
+            model::record_batch_type::raft_data,
+            std::nullopt,
+            ts));
+          return batches;
+      });
     log.flush().get0();
     auto batches = read_and_validate_all_batches(log);
     info("Flushed log: {}", log);
@@ -169,10 +178,16 @@ FIXTURE_TEST(test_segment_rolling, storage_test_fixture) {
       log,
       10,
       model::term_id(1),
-      []() {
+      [](std::optional<model::timestamp> ts = std::nullopt)
+        -> ss::circular_buffer<model::record_batch> {
           ss::circular_buffer<model::record_batch> batches;
-          batches.push_back(
-            model::test::make_random_batch(model::offset(0), 1, true));
+          batches.push_back(model::test::make_random_batch(
+            model::offset(0),
+            1,
+            true,
+            model::record_batch_type::raft_data,
+            std::nullopt,
+            ts));
           return batches;
       },
       storage::log_append_config::fsync::no,
@@ -192,10 +207,15 @@ FIXTURE_TEST(test_segment_rolling, storage_test_fixture) {
       log,
       10,
       model::term_id(1),
-      []() {
+      [](std::optional<model::timestamp> ts = std::nullopt) {
           ss::circular_buffer<model::record_batch> batches;
-          batches.push_back(
-            model::test::make_random_batch(model::offset(0), 1, true));
+          batches.push_back(model::test::make_random_batch(
+            model::offset(0),
+            1,
+            true,
+            model::record_batch_type::raft_data,
+            std::nullopt,
+            ts));
           return batches;
       },
       storage::log_append_config::fsync::no,
@@ -332,7 +352,9 @@ struct custom_ts_batch_generator {
     explicit custom_ts_batch_generator(model::timestamp start_ts)
       : _start_ts(start_ts) {}
 
-    ss::circular_buffer<model::record_batch> operator()() {
+    ss::circular_buffer<model::record_batch> operator()(
+      [[maybe_unused]] std::optional<model::timestamp> ts = std::nullopt) {
+        // The input timestamp is unused, this class does its own timestamping
         auto batches = model::test::make_random_batches(
           model::offset(0), random_generators::get_int(1, 10));
 
@@ -2845,6 +2867,65 @@ FIXTURE_TEST(test_self_compaction_while_reader_is_open, storage_test_fixture) {
                     .get();
     log.compact(std::move(ccfg)).get();
     stream.close().get();
+};
+
+FIXTURE_TEST(test_simple_compaction_rebuild_index, storage_test_fixture) {
+    // Test setup.
+    auto cfg = default_log_config(test_dir);
+    cfg.max_segment_size = config::mock_binding<size_t>(10_MiB);
+    cfg.stype = storage::log_config::storage_type::disk;
+    ss::abort_source as;
+    storage::log_manager mgr = make_log_manager(cfg);
+
+    auto deferred = ss::defer([&mgr]() mutable { mgr.stop().get0(); });
+    auto ntp = model::ntp("default", "test", 0);
+    storage::ntp_config::default_overrides overrides;
+    overrides.cleanup_policy_bitflags
+      = model::cleanup_policy_bitflags::compaction;
+    storage::ntp_config ntp_cfg(
+      ntp,
+      mgr.config().base_dir,
+      std::make_unique<storage::ntp_config::default_overrides>(overrides));
+    auto log = mgr.manage(std::move(ntp_cfg)).get0();
+    auto disk_log = get_disk_log(log);
+
+    // Append some linear kv ints
+    int num_appends = 5;
+    append_random_batches<linear_int_kv_batch_generator>(log, num_appends);
+    log.flush().get0();
+    disk_log->force_roll(ss::default_priority_class()).get();
+    BOOST_REQUIRE_EQUAL(disk_log->segment_count(), 2);
+
+    // Remove compacted indexes to trigger a full index rebuild.
+    auto seg_path = disk_log->segments()[0]->filename();
+    auto index_path = storage::internal::compacted_index_path(
+      std::filesystem::path(seg_path));
+
+    BOOST_REQUIRE(std::filesystem::remove(index_path));
+
+    auto batches = read_and_validate_all_batches(log);
+    BOOST_REQUIRE_EQUAL(
+      batches.size(),
+      num_appends * linear_int_kv_batch_generator::batches_per_call);
+    BOOST_REQUIRE(std::all_of(batches.begin(), batches.end(), [](auto& b) {
+        return b.record_count()
+               == linear_int_kv_batch_generator::records_per_batch;
+    }));
+
+    storage::compaction_config ccfg(
+      model::timestamp::min(),
+      std::nullopt,
+      model::offset::max(),
+      ss::default_priority_class(),
+      as);
+
+    log.compact(ccfg).get();
+
+    batches = read_and_validate_all_batches(log);
+    BOOST_REQUIRE_EQUAL(
+      batches.size(),
+      num_appends * linear_int_kv_batch_generator::batches_per_call);
+    linear_int_kv_batch_generator::validate_post_compaction(std::move(batches));
 };
 
 struct compact_test_args {

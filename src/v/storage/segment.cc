@@ -50,7 +50,8 @@ segment::segment(
   std::optional<compacted_index_writer> ci,
   std::optional<batch_cache_index> c,
   storage_resources& resources,
-  segment::generation_id gen) noexcept
+  segment::generation_id gen,
+  bool is_internal) noexcept
   : _resources(resources)
   , _appender_callbacks(this)
   , _generation_id(gen)
@@ -59,7 +60,8 @@ segment::segment(
   , _idx(std::move(i))
   , _appender(std::move(a))
   , _compaction_index(std::move(ci))
-  , _cache(std::move(c)) {
+  , _cache(std::move(c))
+  , _is_internal(is_internal) {
     if (_appender) {
         _appender->set_callbacks(&_appender_callbacks);
     }
@@ -391,7 +393,7 @@ ss::future<> segment::compaction_index_batch(const model::record_batch& b) {
     });
 }
 
-ss::future<append_result> segment::append(const model::record_batch& b) {
+ss::future<append_result> segment::do_append(const model::record_batch& b) {
     check_segment_not_closed("append()");
     vassert(
       b.base_offset() >= _tracker.base_offset,
@@ -444,9 +446,11 @@ ss::future<append_result> segment::append(const model::record_batch& b) {
         });
     auto index_fut = compaction_index_batch(b);
     return ss::when_all(std::move(write_fut), std::move(index_fut))
-      .then([](std::tuple<ss::future<append_result>, ss::future<>> p) {
+      .then([this](std::tuple<ss::future<append_result>, ss::future<>> p) {
           auto& [append_fut, index_fut] = p;
-          const bool has_error = append_fut.failed() || index_fut.failed();
+          const bool index_append_failed = index_fut.failed()
+                                           && has_compaction_index();
+          const bool has_error = append_fut.failed() || index_append_failed;
           if (!has_error) {
               index_fut.get();
               return std::move(append_fut);
@@ -470,6 +474,29 @@ ss::future<append_result> segment::append(const model::record_batch& b) {
           return ss::make_exception_future<append_result>(index_err);
       });
 }
+
+ss::future<append_result> segment::append(const model::record_batch& b) {
+    if (has_compaction_index() && b.header().attrs.is_transactional()) {
+        // With transactional batches, we do not know ahead of time whether the
+        // batch will be committed or aborted. We may not have this information
+        // during the lifetime of this segment as the batch may be aborted in
+        // the next segment. We mark this index as `incomplete` and rebuild it
+        // later from scratch during compaction.
+        try {
+            auto index = std::exchange(_compaction_index, std::nullopt);
+            index->set_flag(compacted_index::footer_flags::incomplete);
+            vlog(
+              gclog.info,
+              "Marking compaction index {} as incomplete",
+              index->filename());
+            co_await index->close();
+        } catch (...) {
+            co_return ss::coroutine::exception(std::current_exception());
+        }
+    }
+    co_return co_await do_append(b);
+}
+
 ss::future<append_result> segment::append(model::record_batch&& b) {
     return ss::do_with(std::move(b), [this](model::record_batch& b) mutable {
         return append(b);
@@ -574,7 +601,8 @@ ss::future<ss::lw_shared_ptr<segment>> open_segment(
   std::optional<batch_cache_index> batch_cache,
   size_t buf_size,
   unsigned read_ahead,
-  storage_resources& resources) {
+  storage_resources& resources,
+  bool is_internal) {
     auto const meta = segment_path::parse_segment_filename(
       path.filename().string());
     if (!meta || meta->version != record_version_type::v1) {
@@ -597,7 +625,8 @@ ss::future<ss::lw_shared_ptr<segment>> open_segment(
       index_name,
       meta->base_offset,
       segment_index::default_data_buffer_step,
-      sanitize_fileops);
+      sanitize_fileops,
+      is_internal);
 
     co_return ss::make_lw_shared<segment>(
       segment::offset_tracker(meta->term, meta->base_offset),
@@ -622,6 +651,7 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
   storage_resources& resources) {
     auto path = segment_path::make_segment_path(
       ntpc, base_offset, term, version);
+
     vlog(stlog.info, "Creating new segment {}", path.string());
     return open_segment(
              path,
@@ -629,7 +659,8 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
              std::move(batch_cache),
              buf_size,
              read_ahead,
-             resources)
+             resources,
+             ntpc.is_internal_topic())
       .then([path, &ntpc, sanitize_fileops, pc, &resources](
               ss::lw_shared_ptr<segment> seg) {
           return with_segment(
@@ -654,7 +685,9 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
                           seg->has_cache()
                             ? std::optional(std::move(seg->cache()->get()))
                             : std::nullopt,
-                          resources));
+                          resources,
+                          segment::generation_id{},
+                          seg->is_internal_topic()));
                   });
             });
       })
@@ -681,7 +714,9 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
                           seg->has_cache()
                             ? std::optional(std::move(seg->cache()->get()))
                             : std::nullopt,
-                          resources));
+                          resources,
+                          segment::generation_id{},
+                          seg->is_internal_topic()));
                   });
             });
       });

@@ -69,6 +69,9 @@ log_manager::log_manager(
     _config.compaction_interval.watch([this]() {
         _jitter = simple_time_jitter<ss::lowres_clock>{
           _config.compaction_interval()};
+        if (_compaction_timer.cancel()) {
+            _compaction_timer.rearm(_jitter());
+        }
     });
 }
 void log_manager::trigger_housekeeping() {
@@ -281,7 +284,8 @@ ss::future<log> log_manager::do_manage(ntp_config cfg) {
       config::shard_local_cfg().storage_read_buffer_size(),
       config::shard_local_cfg().storage_read_readahead_count(),
       last_clean_segment,
-      _resources);
+      _resources,
+      cfg.is_internal_topic());
 
     auto l = storage::make_disk_backed_log(
       std::move(cfg), *this, std::move(segments), _kvstore);
