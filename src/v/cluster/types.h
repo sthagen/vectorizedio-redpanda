@@ -22,7 +22,9 @@
 #include "model/timeout_clock.h"
 #include "raft/types.h"
 #include "security/acl.h"
+#include "security/credential_store.h"
 #include "security/license.h"
+#include "security/scram_credential.h"
 #include "serde/envelope.h"
 #include "serde/serde.h"
 #include "storage/ntp_config.h"
@@ -192,6 +194,20 @@ struct kafka_stages {
     // after this future is ready, request was successfully replicated with
     // requested consistency level
     ss::future<result<kafka_result>> replicate_finished;
+};
+
+/**
+ * When we remove a partition in the controller backend, we need to know
+ * whether the action is just for this node, or whether the partition
+ * is being deleted overall.
+ */
+enum class partition_removal_mode : uint8_t {
+    // We are removing a partition from this node only: delete
+    // local data but leave remote data alone.
+    local_only = 0,
+    // The partition is being permanently deleted from all nodes:
+    // remove remote data as well as local data.
+    global = 1
 };
 
 struct try_abort_request
@@ -891,7 +907,7 @@ struct join_node_request
 
 struct join_node_reply : serde::envelope<join_node_reply, serde::version<0>> {
     bool success{false};
-    model::node_id id{-1};
+    model::node_id id{model::unassigned_node_id};
 
     join_node_reply() noexcept = default;
 
@@ -1029,7 +1045,8 @@ struct topic_properties
       std::optional<remote_topic_properties> remote_topic_properties,
       std::optional<uint32_t> batch_max_bytes,
       tristate<size_t> retention_local_target_bytes,
-      tristate<std::chrono::milliseconds> retention_local_target_ms)
+      tristate<std::chrono::milliseconds> retention_local_target_ms,
+      bool remote_delete)
       : compression(compression)
       , cleanup_policy_bitflags(cleanup_policy_bitflags)
       , compaction_strategy(compaction_strategy)
@@ -1044,7 +1061,8 @@ struct topic_properties
       , remote_topic_properties(remote_topic_properties)
       , batch_max_bytes(batch_max_bytes)
       , retention_local_target_bytes(retention_local_target_bytes)
-      , retention_local_target_ms(retention_local_target_ms) {}
+      , retention_local_target_ms(retention_local_target_ms)
+      , remote_delete(remote_delete) {}
 
     std::optional<model::compression> compression;
     std::optional<model::cleanup_policy_bitflags> cleanup_policy_bitflags;
@@ -1061,6 +1079,13 @@ struct topic_properties
     std::optional<uint32_t> batch_max_bytes;
     tristate<size_t> retention_local_target_bytes{std::nullopt};
     tristate<std::chrono::milliseconds> retention_local_target_ms{std::nullopt};
+
+    // Remote deletes are enabled by default in new tiered storage topics,
+    // disabled by default in legacy topics during upgrade (the legacy path
+    // is handled during adl/serde decode).
+    // This is intentionally not an optional: all topics have a concrete value
+    // one way or another.  There is no "use the cluster default".
+    bool remote_delete{storage::ntp_config::default_remote_delete};
 
     bool is_compacted() const;
     bool has_overrides() const;
@@ -1084,7 +1109,8 @@ struct topic_properties
           remote_topic_properties,
           batch_max_bytes,
           retention_local_target_bytes,
-          retention_local_target_ms);
+          retention_local_target_ms,
+          remote_delete);
     }
 
     friend bool operator==(const topic_properties&, const topic_properties&)
@@ -1193,6 +1219,8 @@ struct incremental_topic_updates
     property_update<tristate<size_t>> retention_local_target_bytes;
     property_update<tristate<std::chrono::milliseconds>>
       retention_local_target_ms;
+    property_update<bool> remote_delete{
+      false, incremental_update_operation::none};
 
     auto serde_fields() {
         return std::tie(
@@ -1206,7 +1234,8 @@ struct incremental_topic_updates
           shadow_indexing,
           batch_max_bytes,
           retention_local_target_bytes,
-          retention_local_target_ms);
+          retention_local_target_ms,
+          remote_delete);
     }
 
     friend std::ostream&
@@ -1217,13 +1246,20 @@ struct incremental_topic_updates
       = default;
 };
 
+using replication_factor
+  = named_type<uint16_t, struct replication_factor_type_tag>;
+
+std::istream& operator>>(std::istream& i, replication_factor& cs);
+
 // This class contains updates for topic properties which are replicates not by
 // topic_frontend
 struct incremental_topic_custom_updates
-  : serde::envelope<incremental_topic_custom_updates, serde::version<0>> {
+  : serde::envelope<incremental_topic_custom_updates, serde::version<1>> {
     // Data-policy property is replicated by data_policy_frontend and handled by
     // data_policy_manager.
     property_update<std::optional<v8_engine::data_policy>> data_policy;
+    // Replication factor is custom handled.
+    property_update<std::optional<replication_factor>> replication_factor;
 
     friend std::ostream&
     operator<<(std::ostream&, const incremental_topic_custom_updates&);
@@ -1233,7 +1269,7 @@ struct incremental_topic_custom_updates
       const incremental_topic_custom_updates&)
       = default;
 
-    auto serde_fields() { return std::tie(data_policy); }
+    auto serde_fields() { return std::tie(data_policy, replication_factor); }
 };
 
 /**
@@ -1339,6 +1375,11 @@ struct topic_configuration
               properties.retention_duration,
               properties.retention_local_target_bytes,
               properties.retention_local_target_ms);
+
+            // Legacy tiered storage topics do not delete data on
+            // topic deletion.
+            properties.remote_delete
+              = storage::ntp_config::legacy_remote_delete;
         }
     }
 
@@ -1969,6 +2010,23 @@ struct cancel_moving_partition_replicas_cmd_data
     auto serde_fields() { return std::tie(force); }
 };
 
+struct move_topic_replicas_data
+  : serde::envelope<move_topic_replicas_data, serde::version<0>> {
+    move_topic_replicas_data() noexcept = default;
+    explicit move_topic_replicas_data(
+      model::partition_id partition, std::vector<model::broker_shard> replicas)
+      : partition(partition)
+      , replicas(std::move(replicas)) {}
+
+    model::partition_id partition;
+    std::vector<model::broker_shard> replicas;
+
+    auto serde_fields() { return std::tie(partition, replicas); }
+
+    friend std::ostream&
+    operator<<(std::ostream&, const move_topic_replicas_data&);
+};
+
 struct feature_update_license_update_cmd_data
   : serde::envelope<feature_update_license_update_cmd_data, serde::version<0>> {
     using rpc_adl_exempt = std::true_type;
@@ -1982,6 +2040,40 @@ struct feature_update_license_update_cmd_data
 
     friend std::ostream&
     operator<<(std::ostream&, const feature_update_license_update_cmd_data&);
+};
+
+struct user_and_credential
+  : serde::envelope<user_and_credential, serde::version<0>> {
+    using rpc_adl_exempt = std::true_type;
+    static constexpr int8_t current_version = 0;
+
+    user_and_credential() = default;
+    user_and_credential(
+      security::credential_user&& username_,
+      security::scram_credential&& credential_)
+      : username(std::move(username_))
+      , credential(std::move(credential_)) {}
+    friend bool
+    operator==(const user_and_credential&, const user_and_credential&)
+      = default;
+    auto serde_fields() { return std::tie(username, credential); }
+
+    security::credential_user username;
+    security::scram_credential credential;
+};
+
+struct bootstrap_cluster_cmd_data
+  : serde::envelope<bootstrap_cluster_cmd_data, serde::version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    friend bool operator==(
+      const bootstrap_cluster_cmd_data&, const bootstrap_cluster_cmd_data&)
+      = default;
+
+    auto serde_fields() { return std::tie(uuid, bootstrap_user_cred); }
+
+    model::cluster_uuid uuid;
+    std::optional<user_and_credential> bootstrap_user_cred;
 };
 
 enum class reconciliation_status : int8_t {
@@ -2444,6 +2536,8 @@ public:
 
     const assignments_set& get_assignments() const;
     assignments_set& get_assignments();
+
+    replication_factor get_replication_factor() const;
 
 private:
     topic_configuration _configuration;

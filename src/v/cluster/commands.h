@@ -91,6 +91,7 @@ static constexpr int8_t update_topic_properties_cmd_type = 4;
 static constexpr int8_t create_partition_cmd_type = 5;
 static constexpr int8_t create_non_replicable_topic_cmd_type = 6;
 static constexpr int8_t cancel_moving_partition_replicas_cmd_type = 7;
+static constexpr int8_t move_topic_replicas_cmd_type = 8;
 
 static constexpr int8_t create_user_cmd_type = 5;
 static constexpr int8_t delete_user_cmd_type = 6;
@@ -117,6 +118,9 @@ static constexpr int8_t cluster_config_status_cmd_type = 1;
 static constexpr int8_t feature_update_cmd_type = 0;
 static constexpr int8_t feature_update_license_update_cmd_type = 1;
 
+// cluster bootstrap commands
+static constexpr int8_t bootstrap_cluster_cmd_type = 0;
+
 using create_topic_cmd = controller_command<
   model::topic_namespace,
   topic_configuration_assignment,
@@ -137,6 +141,12 @@ using move_partition_replicas_cmd = controller_command<
   move_partition_replicas_cmd_type,
   model::record_batch_type::topic_management_cmd,
   serde_opts::adl_and_serde>;
+
+using move_topic_replicas_cmd = controller_command<
+  model::topic_namespace,
+  std::vector<move_topic_replicas_data>,
+  move_topic_replicas_cmd_type,
+  model::record_batch_type::topic_management_cmd>;
 
 using finish_moving_partition_replicas_cmd = controller_command<
   model::ntp,
@@ -281,6 +291,13 @@ using feature_update_license_update_cmd = controller_command<
   feature_update_license_update_cmd_type,
   model::record_batch_type::feature_update,
   serde_opts::serde_only>;
+
+// Cluster bootstrap
+using bootstrap_cluster_cmd = controller_command<
+  int8_t, // unused, always 0
+  bootstrap_cluster_cmd_data,
+  bootstrap_cluster_cmd_type,
+  model::record_batch_type::cluster_bootstrap_cmd>;
 
 // typelist utils
 template<typename T>

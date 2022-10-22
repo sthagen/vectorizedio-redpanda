@@ -10,6 +10,7 @@ import os
 import random
 import time
 
+from ducktape.mark import ok_to_fail
 from rptest.services.cluster import cluster
 from rptest.services.admin import Admin
 from rptest.util import wait_until, wait_until_result
@@ -24,7 +25,6 @@ from rptest.clients.types import TopicSpec
 from rptest.clients.rpk import RpkTool, RpkException
 from ducktape.cluster.cluster_spec import ClusterSpec
 from ducktape.mark import matrix
-from ducktape.mark import ok_to_fail
 
 # We inject failures which might cause consumer groups
 # to re-negotiate, so it is necessary to have a longer
@@ -437,7 +437,7 @@ class PartitionBalancerTest(PartitionBalancerService):
             ns.make_available()
             self.run_validation(consumer_timeout_sec=CONSUMER_TIMEOUT)
 
-    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/5884
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/6810
     @cluster(num_nodes=6, log_allow_list=CHAOS_LOG_ALLOW_LIST)
     def test_full_nodes(self):
         """

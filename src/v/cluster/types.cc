@@ -59,7 +59,8 @@ bool topic_properties::has_overrides() const {
            || recovery.has_value() || shadow_indexing.has_value()
            || read_replica.has_value() || batch_max_bytes.has_value()
            || retention_local_target_bytes.has_value()
-           || retention_local_target_ms.has_value();
+           || retention_local_target_ms.has_value()
+           || remote_delete != storage::ntp_config::default_remote_delete;
 }
 
 storage::ntp_config::default_overrides
@@ -74,6 +75,7 @@ topic_properties::get_ntp_cfg_overrides() const {
     ret.read_replica = read_replica;
     ret.retention_local_target_bytes = retention_local_target_bytes;
     ret.retention_local_target_ms = retention_local_target_ms;
+    ret.remote_delete = remote_delete;
     return ret;
 }
 
@@ -102,7 +104,8 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .read_replica = properties.read_replica,
             .retention_local_target_bytes
             = properties.retention_local_target_bytes,
-            .retention_local_target_ms = properties.retention_local_target_ms});
+            .retention_local_target_ms = properties.retention_local_target_ms,
+            .remote_delete = properties.remote_delete});
     }
     return {
       model::ntp(tp_ns.ns, tp_ns.tp, p_id),
@@ -238,7 +241,7 @@ std::ostream& operator<<(std::ostream& o, const topic_properties& properties) {
       "timestamp_type: {}, recovery_enabled: {}, shadow_indexing: {}, "
       "read_replica: {}, read_replica_bucket: {} remote_topic_properties: {}, "
       "batch_max_bytes: {}, retention_local_target_bytes: {}, "
-      "retention_local_target_ms: {}}}",
+      "retention_local_target_ms: {}, remote_delete: {}}}",
       properties.compression,
       properties.cleanup_policy_bitflags,
       properties.compaction_strategy,
@@ -253,7 +256,8 @@ std::ostream& operator<<(std::ostream& o, const topic_properties& properties) {
       properties.remote_topic_properties,
       properties.batch_max_bytes,
       properties.retention_local_target_bytes,
-      properties.retention_local_target_ms);
+      properties.retention_local_target_ms,
+      properties.remote_delete);
 
     return o;
 }
@@ -498,7 +502,7 @@ std::ostream& operator<<(std::ostream& o, const incremental_topic_updates& i) {
       "cleanup_policy_bitflags: {} compaction_strategy: {} timestamp_type: {} "
       "segment_size: {} retention_bytes: {} retention_duration: {} "
       "shadow_indexing: {}, batch_max_bytes: {}, retention_local_target_bytes: "
-      "{}, retention_local_target_ms: {}}}",
+      "{}, retention_local_target_ms: {}, remote_delete: {}}}",
       i.compression,
       i.cleanup_policy_bitflags,
       i.compaction_strategy,
@@ -509,16 +513,26 @@ std::ostream& operator<<(std::ostream& o, const incremental_topic_updates& i) {
       i.shadow_indexing,
       i.batch_max_bytes,
       i.retention_local_target_bytes,
-      i.retention_local_target_ms);
+      i.retention_local_target_ms,
+      i.remote_delete);
     return o;
 }
+
+std::istream& operator>>(std::istream& i, replication_factor& cs) {
+    ss::sstring s;
+    i >> s;
+    cs = replication_factor(boost::lexical_cast<replication_factor::type>(s));
+    return i;
+};
 
 std::ostream&
 operator<<(std::ostream& o, const incremental_topic_custom_updates& i) {
     fmt::print(
       o,
-      "{{incremental_topic_custom_updates: data_policy: {}}}",
-      i.data_policy);
+      "{{incremental_topic_custom_updates: data_policy: {}, "
+      "replication_factor: {}}}",
+      i.data_policy,
+      i.replication_factor);
     return o;
 }
 
@@ -591,6 +605,16 @@ topic_configuration& topic_metadata::get_configuration() {
 }
 
 assignments_set& topic_metadata::get_assignments() { return _assignments; }
+
+replication_factor topic_metadata::get_replication_factor() const {
+    // The main idea is do not use anymore replication_factor from topic_config.
+    // replication factor is dynamic property. And it is size of assigments set.
+    // So we will return rf for 0 partition, becasue it should exist for each
+    // topic
+    auto it = _assignments.find(model::partition_id(0));
+    return replication_factor(
+      static_cast<replication_factor::type>(it->replicas.size()));
+}
 
 std::ostream& operator<<(std::ostream& o, const non_replicable_topic& d) {
     fmt::print(
@@ -724,6 +748,11 @@ operator<<(std::ostream& o, const create_non_replicable_topics_request& r) {
 std::ostream&
 operator<<(std::ostream& o, const create_non_replicable_topics_reply& r) {
     fmt::print(o, "{{results: {}}}", r.results);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const move_topic_replicas_data& r) {
+    fmt::print(o, "{{partition: {}, replicas: {}}}", r.partition, r.replicas);
     return o;
 }
 
@@ -945,6 +974,9 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
       cfg.properties.retention_duration,
       cfg.properties.retention_local_target_bytes,
       cfg.properties.retention_local_target_ms);
+
+    // Legacy topics from pre-22.3 get remote delete disabled.
+    cfg.properties.remote_delete = storage::ntp_config::legacy_remote_delete;
 
     return cfg;
 }
@@ -1547,7 +1579,8 @@ void adl<cluster::incremental_topic_updates>::to(
       t.shadow_indexing,
       t.batch_max_bytes,
       t.retention_local_target_bytes,
-      t.retention_local_target_ms);
+      t.retention_local_target_ms,
+      t.remote_delete);
 }
 
 cluster::incremental_topic_updates
@@ -1621,6 +1654,7 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
         updates.retention_local_target_ms
           = adl<cluster::property_update<tristate<std::chrono::milliseconds>>>{}
               .from(in);
+        updates.remote_delete = adl<cluster::property_update<bool>>{}.from(in);
     }
 
     return updates;
@@ -1916,7 +1950,10 @@ adl<cluster::topic_properties>::from(iobuf_parser& parser) {
       remote_topic_properties,
       std::nullopt,
       tristate<size_t>{std::nullopt},
-      tristate<std::chrono::milliseconds>{std::nullopt}};
+      tristate<std::chrono::milliseconds>{std::nullopt},
+      // Backward compat: ADL-generation (pre-22.3) topics use legacy tiered
+      // storage mode in which topic deletion does not delete objects in S3
+      false};
 }
 
 void adl<cluster::cluster_property_kv>::to(

@@ -9,6 +9,7 @@
 
 #include "kafka/server/handlers/alter_configs.h"
 
+#include "cluster/types.h"
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/schemata/alter_configs_request.h"
@@ -44,6 +45,24 @@ void parse_and_set_optional(
     }
 
     property_update.value = boost::lexical_cast<T>(*value);
+}
+
+void parse_and_set_bool(
+  cluster::property_update<bool>& property_update,
+  const std::optional<ss::sstring>& value,
+  bool default_value) {
+    if (!value) {
+        property_update.value = default_value;
+    } else {
+        try {
+            property_update.value = string_switch<bool>(*(value))
+                                      .match("true", true)
+                                      .match("false", false);
+        } catch (...) {
+            // Our callers expect this exception type on malformed values
+            throw boost::bad_lexical_cast();
+        }
+    }
 }
 
 template<typename T>
@@ -116,6 +135,8 @@ create_topic_properties_update(alter_configs_resource& resource) {
       = cluster::incremental_update_operation::set;
     update.properties.shadow_indexing.op
       = cluster::incremental_update_operation::set;
+    update.custom_properties.replication_factor.op
+      = cluster::incremental_update_operation::set;
     update.custom_properties.data_policy.op
       = cluster::incremental_update_operation::none;
 
@@ -150,6 +171,12 @@ create_topic_properties_update(alter_configs_resource& resource) {
                 parse_and_set_tristate(
                   update.properties.retention_bytes, cfg.value);
                 continue;
+            }
+            if (cfg.name == topic_property_remote_delete) {
+                parse_and_set_bool(
+                  update.properties.remote_delete,
+                  cfg.value,
+                  storage::ntp_config::default_remote_delete);
             }
             if (cfg.name == topic_property_remote_write) {
                 auto set_value = update.properties.shadow_indexing.value
@@ -189,6 +216,11 @@ create_topic_properties_update(alter_configs_resource& resource) {
             if (cfg.name == topic_property_retention_local_target_bytes) {
                 parse_and_set_tristate(
                   update.properties.retention_local_target_bytes, cfg.value);
+                continue;
+            }
+            if (cfg.name == topic_property_replication_factor) {
+                parse_and_set_optional(
+                  update.custom_properties.replication_factor, cfg.value);
                 continue;
             }
             if (

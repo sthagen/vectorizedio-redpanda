@@ -100,6 +100,18 @@ CHAOS_LOG_ALLOW_LIST = [
     ),
 ]
 
+# Log errors that are expected in tests that change replication factor
+CHANGE_REPLICATION_FACTOR_ALLOW_LIST = [
+    re.compile(
+        "cluster - .*Unable to allocate topic with given replication factor"),
+]
+
+# Log errors emitted by refresh credentials system when cloud storage is enabled with IAM roles
+# without a corresponding mock service set up to return credentials
+IAM_ROLES_API_CALL_ALLOW_LIST = [
+    re.compile(r'cloud_roles - .*api request failed')
+]
+
 
 class MetricSamples:
     def __init__(self, samples: list[MetricSample]):
@@ -585,6 +597,12 @@ class RedpandaService(Service):
         # stash a copy here so that we can quickly look up e.g. addresses later.
         self._node_configs = {}
 
+        self._seed_servers = [self.nodes[0]] if len(self.nodes) > 0 else []
+
+    def set_seed_servers(self, node_list):
+        assert len(node_list) > 0
+        self._seed_servers = node_list
+
     def set_skip_if_no_redpanda_log(self, v: bool):
         self._skip_if_no_redpanda_log = v
 
@@ -601,6 +619,7 @@ class RedpandaService(Service):
                 self._extra_rp_conf)
 
     def set_si_settings(self, si_settings: SISettings):
+        si_settings.load_context(self.logger, self._context)
         self._si_settings = si_settings
         self._extra_rp_conf = self._si_settings.update_rp_conf(
             self._extra_rp_conf)
@@ -728,11 +747,13 @@ class RedpandaService(Service):
                 cb(n)
             return
 
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(nodes)) as executor:
-            # The list() wrapper is to cause futures to be evaluated here+now
-            # (including throwing any exceptions) and not just spawned in background.
-            list(executor.map(cb, nodes))
+        n_workers = len(nodes)
+        if n_workers > 0:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=n_workers) as executor:
+                # The list() wrapper is to cause futures to be evaluated here+now
+                # (including throwing any exceptions) and not just spawned in background.
+                list(executor.map(cb, nodes))
 
     def _startup_poll_interval(self, first_start):
         """
@@ -749,7 +770,8 @@ class RedpandaService(Service):
               start_si=True,
               parallel: bool = True,
               expect_fail: bool = False,
-              auto_assign_node_id: bool = False):
+              auto_assign_node_id: bool = False,
+              omit_seeds_on_idx_one: bool = True):
         """
         Start the service on all nodes.
 
@@ -805,7 +827,8 @@ class RedpandaService(Service):
             self.start_node(node,
                             first_start=first_start,
                             expect_fail=expect_fail,
-                            auto_assign_node_id=auto_assign_node_id)
+                            auto_assign_node_id=auto_assign_node_id,
+                            omit_seeds_on_idx_one=omit_seeds_on_idx_one)
 
         self._for_nodes(to_start, start_one, parallel=parallel)
 
@@ -1010,7 +1033,8 @@ class RedpandaService(Service):
                    write_config=True,
                    first_start=False,
                    expect_fail: bool = False,
-                   auto_assign_node_id: bool = False):
+                   auto_assign_node_id: bool = False,
+                   omit_seeds_on_idx_one: bool = True):
         """
         Start a single instance of redpanda. This function will not return until
         redpanda appears to have started successfully. If redpanda does not
@@ -1021,9 +1045,11 @@ class RedpandaService(Service):
         node.account.mkdirs(os.path.dirname(RedpandaService.NODE_CONFIG_FILE))
 
         if write_config:
-            self.write_node_conf_file(node,
-                                      override_cfg_params,
-                                      auto_assign_node_id=auto_assign_node_id)
+            self.write_node_conf_file(
+                node,
+                override_cfg_params,
+                auto_assign_node_id=auto_assign_node_id,
+                omit_seeds_on_idx_one=omit_seeds_on_idx_one)
 
         if timeout is None:
             timeout = self.node_ready_timeout_s
@@ -1284,7 +1310,6 @@ class RedpandaService(Service):
                         (node, "Redpanda process unexpectedly stopped"))
 
         if crashes:
-            self.save_executable()
             raise NodeCrash(crashes)
 
     def raise_on_bad_logs(self, allow_list=None):
@@ -1358,16 +1383,6 @@ class RedpandaService(Service):
                     self.logger.warn(
                         f"[{test_name}] Unexpected log line on {node.account.hostname}: {line}"
                     )
-
-        for node, lines in bad_lines.items():
-            # LeakSanitizer type errors may include raw backtraces that the devloper
-            # needs the binary to decode + investigate
-            if any([
-                    re.findall("Sanitizer|[Aa]ssert|SEGV|Segmentation fault",
-                               l) for l in lines
-            ]):
-                self.save_executable()
-                break
 
         if bad_lines:
             raise BadLogLines(bad_lines)
@@ -1588,7 +1603,8 @@ class RedpandaService(Service):
     def write_node_conf_file(self,
                              node,
                              override_cfg_params=None,
-                             auto_assign_node_id=False):
+                             auto_assign_node_id=False,
+                             omit_seeds_on_idx_one=True):
         """
         Write the node config file for a redpanda node: this is the YAML representation
         of Redpanda's `node_config` class.  Distinct from Redpanda's _cluster_ configuration
@@ -1596,8 +1612,11 @@ class RedpandaService(Service):
         """
         node_info = {self.idx(n): n for n in self.nodes}
 
+        include_seed_servers = True
         node_id = self.idx(node)
-        include_seed_servers = node_id > 1
+        if omit_seeds_on_idx_one and node_id == 1:
+            include_seed_servers = False
+
         if auto_assign_node_id:
             # Supply None so it's omitted from the config.
             node_id = None
@@ -1612,6 +1631,7 @@ class RedpandaService(Service):
                            nodes=node_info,
                            node_id=node_id,
                            include_seed_servers=include_seed_servers,
+                           seed_servers=self._seed_servers,
                            node_ip=node_ip,
                            kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
                            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
@@ -2118,54 +2138,6 @@ class RedpandaService(Service):
 
     def cov_enabled(self):
         return self._context.globals.get(self.COV_KEY, self.DEFAULT_COV_OPT)
-
-    def save_executable(self):
-        """
-        For the currently executing test, enable preserving the redpanda
-        executable as if it were a log.  This is expensive in storage space:
-        only do it if you catch an error that you think the binary will
-        be needed to make sense of, like a LeakSanitizer error.
-
-        This function does nothing in non-CI environments: in local development
-        environments, the developer already has the binary.
-        """
-
-        if self._saved_executable:
-            # Only ever do this once per test: the whole test runs with
-            # the same binaries.
-            return
-
-        # Assume that if 'CI' isn't explicitly set to false, we do want to keep
-        # the executable.
-        if os.environ.get('CI', None) == 'false':
-            self.logger.info("Skipping saving executable, not in CI")
-            return
-
-        self.logger.info(
-            f"Saving executable as {os.path.basename(self.EXECUTABLE_SAVE_PATH)}"
-        )
-
-        # Any node will do. Even in a mixed-version upgrade test, we should
-        # still have the original binaries available.
-        node = self.nodes[0]
-        if self._installer._started:
-            head_root_path = self._installer.root_for_version(
-                RedpandaInstaller.HEAD)
-            binary = f"{head_root_path}/libexec/redpanda"
-        else:
-            binary = self.find_raw_binary('redpanda')
-
-        save_to = self.EXECUTABLE_SAVE_PATH
-        try:
-            node.account.ssh(f"cd /tmp ; gzip -c {binary} > {save_to}")
-        except Exception as e:
-            # Don't obstruct remaining test teardown when trying to save binary during failure
-            # handling: eat the exception and log it.
-            self.logger.exception(
-                f"Error while compressing binary {binary} to {save_to}")
-        else:
-            self._saved_executable = True
-            self._context.log_collect['executable', self] = True
 
     def search_log_any(self, pattern: str, nodes: list[ClusterNode] = None):
         # Test helper for grepping the redpanda log.

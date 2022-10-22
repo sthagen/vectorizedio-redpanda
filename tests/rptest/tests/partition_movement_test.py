@@ -9,7 +9,6 @@
 
 import random
 import time
-from numpy import record
 import requests
 
 from rptest.services.cluster import cluster
@@ -817,6 +816,7 @@ class SIPartitionMovementTest(PartitionMovementMixin, EndToEndTest):
         partitions = 1 if self.debug_mode else 10
         return throughput, records, moves, partitions
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/6837
     @cluster(num_nodes=5, log_allow_list=PREV_VERSION_LOG_ALLOW_LIST)
     @matrix(num_to_upgrade=[0, 2])
     def test_shadow_indexing(self, num_to_upgrade):
@@ -847,6 +847,7 @@ class SIPartitionMovementTest(PartitionMovementMixin, EndToEndTest):
                             consumer_timeout_sec=45,
                             min_records=records)
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/6837
     @cluster(num_nodes=5, log_allow_list=PREV_VERSION_LOG_ALLOW_LIST)
     @matrix(num_to_upgrade=[0, 2])
     def test_cross_shard(self, num_to_upgrade):
