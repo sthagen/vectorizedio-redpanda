@@ -21,6 +21,7 @@ import threading
 import collections
 import re
 import uuid
+import zipfile
 from enum import Enum
 from typing import Mapping, Optional, Tuple, Union, Any
 
@@ -34,6 +35,7 @@ from ducktape.utils.util import wait_until
 from ducktape.cluster.cluster import ClusterNode
 from prometheus_client.parser import text_string_to_metric_families
 from ducktape.errors import TimeoutError
+from ducktape.tests.test import TestContext
 
 from rptest.clients.kafka_cat import KafkaCat
 from rptest.clients.rpk import RpkTool
@@ -110,6 +112,24 @@ CHANGE_REPLICATION_FACTOR_ALLOW_LIST = [
 # without a corresponding mock service set up to return credentials
 IAM_ROLES_API_CALL_ALLOW_LIST = [
     re.compile(r'cloud_roles - .*api request failed')
+]
+
+# Log errors are used in node_operation_fuzzy_test and partition_movement_test
+PREV_VERSION_LOG_ALLOW_LIST = [
+    # e.g. cluster - controller_backend.cc:400 - Error while reconciling topics - seastar::abort_requested_exception (abort requested)
+    "cluster - .*Error while reconciling topic.*",
+    # Typo fixed in recent versions.
+    # e.g.  raft - [follower: {id: {1}, revision: {10}}] [group_id:3, {kafka/topic/2}] - recovery_stm.cc:422 - recovery append entries error: raft group does not exists on target broker
+    "raft - .*raft group does not exists on target broker",
+    # e.g. rpc - Service handler thrown an exception - seastar::gate_closed_exception (gate closed)
+    "rpc - .*gate_closed_exception.*",
+    # Tests on mixed versions will start out with an unclean restart before
+    # starting a workload.
+    "(raft|rpc) - .*(disconnected_endpoint|Broken pipe|Connection reset by peer)",
+    # e.g.  raft - [group_id:3, {kafka/topic/2}] consensus.cc:2317 - unable to replicate updated configuration: raft::errc::replicated_entry_truncated
+    "raft - .*unable to replicate updated configuration: .*",
+    # e.g. recovery_stm.cc:432 - recovery append entries error: rpc::errc::client_request_timeout"
+    "raft - .*recovery append entries error.*client_request_timeout"
 ]
 
 
@@ -388,6 +408,7 @@ class SecurityConfig:
         self.require_client_auth: bool = True
         self.pp_authn_method: Optional[str] = None
         self.sr_authn_method: Optional[str] = None
+        self.auto_auth: Optional[bool] = None
 
         # The rules to extract principal from mtls
         self.principal_mapping_rules = self.__DEFAULT_PRINCIPAL_MAPPING_RULES
@@ -1267,6 +1288,31 @@ class RedpandaService(Service):
             raise AssertionError(
                 "Nodes report restart required but expect_restart is False")
 
+    def await_feature_active(self, feature_name: str, *, timeout_sec: int):
+        """
+        For use during upgrade tests, when after upgrade yo uwould like to block
+        until a particular feature is active (e.g. if it does migrations)
+        """
+        def is_active():
+            for n in self.nodes:
+                f = self._admin.get_features(node=n)
+                by_name = dict((f['name'], f) for f in f['features'])
+                try:
+                    state = by_name[feature_name]['state']
+                except KeyError:
+                    state = None
+
+                if state != 'active':
+                    self.logger.info(
+                        f"Feature {feature_name} not yet active on {n.name} (state {state})"
+                    )
+                    return False
+
+            self.logger.info(f"Feature {feature_name} is now active")
+            return True
+
+        wait_until(is_active, timeout_sec=timeout_sec, backoff_sec=1)
+
     def monitor_log(self, node):
         assert node in self.nodes, f"where node is {node.name}"
         return node.account.monitor_log(RedpandaService.STDOUT_STDERR_CAPTURE)
@@ -1311,6 +1357,63 @@ class RedpandaService(Service):
 
         if crashes:
             raise NodeCrash(crashes)
+
+    def cloud_storage_diagnostics(self):
+        """
+        When a cloud storage test fails, it is often useful to know what
+        the state of the S3 bucket was, and what was in the manifest
+        JSON files.
+
+        This function lists the contents of the bucket (up to a key count
+        limit) into the ducktape log, and writes a zip file into the ducktape
+        results directory containing a sample of the manifest.json files.
+        """
+        if not self._si_settings:
+            self.logger.debug("Skipping cloud diagnostics, no SI settings")
+            return
+
+        try:
+            self._cloud_storage_diagnostics()
+        except:
+            # We are running during test teardown, so do log the exception
+            # instead of propagating: this was a best effort thing
+            self.logger.exception("Failed to gather cloud storage diagnostics")
+
+    def _cloud_storage_diagnostics(self):
+        # In case it's a big test, do not exhaustively log every object
+        # or dump every manifest
+        key_dump_limit = 10000
+        manifest_dump_limit = 10
+
+        self.logger.info(
+            f"Gathering cloud storage diagnostics in bucket {self._si_settings.cloud_storage_bucket}"
+        )
+
+        manifests_to_dump = []
+        for o in self.s3_client.list_objects(
+                self._si_settings.cloud_storage_bucket):
+            key = o.Key
+            if key_dump_limit > 0:
+                self.logger.info(f"  {key}")
+                key_dump_limit -= 1
+
+            # Gather manifest.json and topic_manifest.json files
+            if key.endswith('manifest.json') and manifest_dump_limit > 0:
+                manifests_to_dump.append(key)
+                manifest_dump_limit -= 1
+
+        archive_basename = "cloud_diagnostics.zip"
+        archive_path = os.path.join(
+            TestContext.results_dir(self._context, self._context.test_index),
+            archive_basename)
+        with zipfile.ZipFile(archive_path, mode='w') as archive:
+            for m in manifests_to_dump:
+                self.logger.info(f"Fetching manifest {m}")
+                body = self.s3_client.get_object_data(
+                    self._si_settings.cloud_storage_bucket, m)
+                filename = m.replace("/", "_")
+                with archive.open(filename, "w") as outstr:
+                    outstr.write(body)
 
     def raise_on_bad_logs(self, allow_list=None):
         """
@@ -1358,6 +1461,8 @@ class RedpandaService(Service):
                 allowed = False
                 for a in allow_list:
                     if a.search(line) is not None:
+                        self.logger.warn(
+                            f"Ignoring allow-listed log line '{line}'")
                         allowed = True
                         break
 
@@ -1641,7 +1746,8 @@ class RedpandaService(Service):
                            sasl_enabled=self.sasl_enabled(),
                            endpoint_authn_method=self.endpoint_authn_method(),
                            pp_authn_method=self._security.pp_authn_method,
-                           sr_authn_method=self._security.sr_authn_method)
+                           sr_authn_method=self._security.sr_authn_method,
+                           auto_auth=self._security.auto_auth)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1716,7 +1822,8 @@ class RedpandaService(Service):
                       override_cfg_params=None,
                       start_timeout=None,
                       stop_timeout=None,
-                      auto_assign_node_id=False):
+                      auto_assign_node_id=False,
+                      omit_seeds_on_idx_one=True):
 
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
         with concurrent.futures.ThreadPoolExecutor(
@@ -1728,11 +1835,12 @@ class RedpandaService(Service):
                              nodes))
             list(
                 executor.map(
-                    lambda n: self.start_node(n,
-                                              override_cfg_params,
-                                              timeout=start_timeout,
-                                              auto_assign_node_id=
-                                              auto_assign_node_id), nodes))
+                    lambda n: self.start_node(
+                        n,
+                        override_cfg_params,
+                        timeout=start_timeout,
+                        auto_assign_node_id=auto_assign_node_id,
+                        omit_seeds_on_idx_one=omit_seeds_on_idx_one), nodes))
 
     def rolling_restart_nodes(self,
                               nodes,
@@ -1841,9 +1949,13 @@ class RedpandaService(Service):
 
         return None
 
-    def node_storage(self, node):
+    def node_storage(self, node, sizes: bool = False):
         """
         Retrieve a summary of storage on a node.
+
+        :param sizes: if true, stat each segment file and record its size in the
+                      `size` attribute of Segment.  This is expensive, only use it
+                      for small-ish numbers of segments.
         """
         def listdir(path, only_dirs=False):
             try:
@@ -1866,6 +1978,18 @@ class RedpandaService(Service):
 
             return [p[0] for p in paths if safe_isdir(p[1])]
 
+        def get_sizes(partition_path, segment_names, partition):
+            for s in segment_names:
+                try:
+                    stat = node.account.sftp_client.lstat(
+                        os.path.join(partition_path, s))
+                    partition.set_segment_size(s, stat.st_size)
+                except FileNotFoundError:
+                    # It is legal for a file to be deleted between a listdir
+                    # and a stat: update the partition object to reflect this,
+                    # rather than leaving a None size that could trip up sum()
+                    partition.delete_segment(s)
+
         store = NodeStorage(node.name, RedpandaService.DATA_DIR)
         for ns in listdir(store.data_dir, True):
             if ns == '.coprocessor_offset_checkpoints':
@@ -1878,12 +2002,15 @@ class RedpandaService(Service):
             for topic in listdir(ns.path):
                 topic = ns.add_topic(topic, os.path.join(ns.path, topic))
                 for num in listdir(topic.path):
-                    partition = topic.add_partition(
-                        num, node, os.path.join(topic.path, num))
-                    partition.add_files(listdir(partition.path))
+                    partition_path = os.path.join(topic.path, num)
+                    partition = topic.add_partition(num, node, partition_path)
+                    segment_names = listdir(partition.path)
+                    partition.add_files(segment_names)
+                    if sizes:
+                        get_sizes(partition_path, segment_names, partition)
         return store
 
-    def storage(self, all_nodes: bool = False):
+    def storage(self, all_nodes: bool = False, sizes: bool = False):
         """
         :param all_nodes: if true, report on all nodes, otherwise only report
                           on started nodes.
@@ -1892,7 +2019,7 @@ class RedpandaService(Service):
         """
         store = ClusterStorage()
         for node in (self.nodes if all_nodes else self._started):
-            s = self.node_storage(node)
+            s = self.node_storage(node, sizes=sizes)
             store.add_node(s)
         return store
 

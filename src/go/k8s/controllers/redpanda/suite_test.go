@@ -109,9 +109,9 @@ var _ = BeforeSuite(func(done Done) {
 		}
 		return testAdminAPI, nil
 	}
-	testStore = consolepkg.NewStore(k8sManager.GetClient())
+	testStore = consolepkg.NewStore(k8sManager.GetClient(), k8sManager.GetScheme())
 	testKafkaAdmin = &mockKafkaAdmin{}
-	testKafkaAdminFactory = func(context.Context, client.Client, *redpandav1alpha1.Cluster) (consolepkg.KafkaAdminClient, error) {
+	testKafkaAdminFactory = func(context.Context, client.Client, *redpandav1alpha1.Cluster, *consolepkg.Store) (consolepkg.KafkaAdminClient, error) {
 		return testKafkaAdmin, nil
 	}
 
@@ -353,6 +353,15 @@ func (m *mockAdminAPI) GetFeatures(
 			},
 		},
 	}, nil
+}
+
+func (m *mockAdminAPI) SetLicense(_ context.Context, _ interface{}) error {
+	m.monitor.Lock()
+	defer m.monitor.Unlock()
+	if m.unavailable {
+		return &unavailableError{}
+	}
+	return nil
 }
 
 //nolint:gocritic // It's test API

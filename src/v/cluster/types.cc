@@ -33,6 +33,79 @@
 
 namespace cluster {
 
+std::ostream& operator<<(std::ostream& o, const tx_errc& err) {
+    switch (err) {
+    case tx_errc::none:
+        o << "tx_errc::none";
+        break;
+    case tx_errc::leader_not_found:
+        o << "tx_errc::leader_not_found";
+        break;
+    case tx_errc::shard_not_found:
+        o << "tx_errc::shard_not_found";
+        break;
+    case tx_errc::partition_not_found:
+        o << "tx_errc::partition_not_found";
+        break;
+    case tx_errc::stm_not_found:
+        o << "tx_errc::stm_not_found";
+        break;
+    case tx_errc::partition_not_exists:
+        o << "tx_errc::partition_not_exists";
+        break;
+    case tx_errc::pid_not_found:
+        o << "tx_errc::pid_not_found";
+        break;
+    case tx_errc::timeout:
+        o << "tx_errc::timeout";
+        break;
+    case tx_errc::conflict:
+        o << "tx_errc::conflict";
+        break;
+    case tx_errc::fenced:
+        o << "tx_errc::fenced";
+        break;
+    case tx_errc::stale:
+        o << "tx_errc::stale";
+        break;
+    case tx_errc::not_coordinator:
+        o << "tx_errc::not_coordinator";
+        break;
+    case tx_errc::coordinator_not_available:
+        o << "tx_errc::coordinator_not_available";
+        break;
+    case tx_errc::preparing_rebalance:
+        o << "tx_errc::preparing_rebalance";
+        break;
+    case tx_errc::rebalance_in_progress:
+        o << "tx_errc::rebalance_in_progress";
+        break;
+    case tx_errc::coordinator_load_in_progress:
+        o << "tx_errc::coordinator_load_in_progress";
+        break;
+    case tx_errc::unknown_server_error:
+        o << "tx_errc::unknown_server_error";
+        break;
+    case tx_errc::request_rejected:
+        o << "tx_errc::request_rejected";
+        break;
+    case tx_errc::invalid_producer_epoch:
+        o << "tx_errc::invalid_producer_epoch";
+        break;
+    case tx_errc::invalid_txn_state:
+        o << "tx_errc::invalid_txn_state";
+        break;
+    case tx_errc::invalid_producer_id_mapping:
+        o << "tx_errc::invalid_producer_id_mapping";
+        break;
+    }
+    return o;
+}
+
+std::string tx_errc_category::message(int c) const {
+    return fmt::format("{{{}}}", static_cast<tx_errc>(c));
+}
+
 kafka_stages::kafka_stages(
   ss::future<> enq, ss::future<result<kafka_result>> offset_future)
   : request_enqueued(std::move(enq))
@@ -113,33 +186,6 @@ storage::ntp_config topic_configuration::make_ntp_config(
       std::move(overrides),
       rev,
       init_rev};
-}
-
-void topic_configuration::maybe_adjust_retention_policies(
-  std::optional<model::shadow_indexing_mode> topic_shadow_indexing_mode,
-  tristate<std::size_t>& retention_bytes,
-  tristate<std::chrono::milliseconds>& retention_ms,
-  tristate<std::size_t>& local_target_bytes,
-  tristate<std::chrono::milliseconds>& local_target_ms) {
-    auto cloud_storage_enabled
-      = config::shard_local_cfg().cloud_storage_enabled();
-
-    // Note that `remote_write_enabled` true when either of the topic
-    // config or cluster config are set to true. This includes the case
-    // when the topic property is explicitly set to false. This is confusing
-    // and may require revisiting.
-    auto remote_write_enabled
-      = model::is_archival_enabled(topic_shadow_indexing_mode.value_or(
-          model::shadow_indexing_mode::disabled))
-        || config::shard_local_cfg().cloud_storage_enable_remote_write();
-
-    if (cloud_storage_enabled && remote_write_enabled) {
-        local_target_bytes = retention_bytes;
-        local_target_ms = retention_ms;
-
-        retention_bytes = tristate<size_t>{};
-        retention_ms = tristate<std::chrono::milliseconds>{};
-    }
 }
 
 model::topic_metadata topic_configuration_assignment::get_metadata() const {
@@ -967,13 +1013,6 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
         cfg.properties.shadow_indexing
           = adl<std::optional<model::shadow_indexing_mode>>{}.from(in);
     }
-
-    cluster::topic_configuration::maybe_adjust_retention_policies(
-      cfg.properties.shadow_indexing,
-      cfg.properties.retention_bytes,
-      cfg.properties.retention_duration,
-      cfg.properties.retention_local_target_bytes,
-      cfg.properties.retention_local_target_ms);
 
     // Legacy topics from pre-22.3 get remote delete disabled.
     cfg.properties.remote_delete = storage::ntp_config::legacy_remote_delete;

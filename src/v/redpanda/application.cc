@@ -21,6 +21,8 @@
 #include "cluster/cluster_utils.h"
 #include "cluster/cluster_uuid.h"
 #include "cluster/controller.h"
+#include "cluster/ephemeral_credential_frontend.h"
+#include "cluster/ephemeral_credential_service.h"
 #include "cluster/fwd.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
@@ -38,16 +40,18 @@
 #include "cluster/topics_frontend.h"
 #include "cluster/tx_gateway.h"
 #include "cluster/tx_gateway_frontend.h"
+#include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/endpoint_tls_config.h"
 #include "config/node_config.h"
 #include "config/seed_server.h"
 #include "coproc/api.h"
 #include "coproc/partition_manager.h"
+#include "features/migrators.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
+#include "kafka/server/fetch_session_cache.h"
 #include "kafka/server/group_manager.h"
-#include "kafka/server/group_metadata_migration.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/protocol.h"
 #include "kafka/server/queue_depth_monitor.h"
@@ -56,10 +60,8 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "net/server.h"
-#include "pandaproxy/rest/configuration.h"
-#include "pandaproxy/rest/proxy.h"
+#include "pandaproxy/rest/api.h"
 #include "pandaproxy/schema_registry/api.h"
-#include "pandaproxy/sharded_client_cache.h"
 #include "raft/group_manager.h"
 #include "raft/recovery_throttle.h"
 #include "raft/service.h"
@@ -154,9 +156,13 @@ void application::shutdown() {
     if (controller) {
         controller->shutdown_input().get();
     }
-    if (kafka_group_migration) {
-        kafka_group_migration->await().get();
-    }
+
+    ss::do_for_each(
+      _migrators,
+      [](std::unique_ptr<features::feature_migrator>& fm) {
+          return fm->stop();
+      })
+      .get();
 
     // Stop processing heartbeats before stopping the partition manager (and
     // the underlying Raft consensus instances). Otherwise we'd process
@@ -722,32 +728,15 @@ make_upload_controller_config(ss::scheduling_group sg) {
 void application::wire_up_runtime_services(model::node_id node_id) {
     wire_up_redpanda_services(node_id);
     if (_proxy_config) {
-        construct_service(
-          _proxy_client,
-          to_yaml(*_proxy_client_config, config::redact_secrets::no))
-          .get();
-
-        construct_single_service(_proxy_client_cache);
-
-        _proxy_client_cache
-          ->start(
-            smp_service_groups.proxy_smp_sg(),
-            to_yaml(*_proxy_client_config, config::redact_secrets::no),
-            _proxy_config->client_cache_max_size.value(),
-            _proxy_config->client_keep_alive.value())
-          .get();
-
-        construct_service(
+        construct_single_service(
           _proxy,
-          to_yaml(*_proxy_config, config::redact_secrets::no),
           smp_service_groups.proxy_smp_sg(),
           // TODO: Improve memory budget for services
           // https://github.com/redpanda-data/redpanda/issues/1392
           memory_groups::kafka_total_memory(),
-          std::reference_wrapper(_proxy_client),
-          std::reference_wrapper(*_proxy_client_cache),
-          controller.get())
-          .get();
+          *_proxy_client_config,
+          *_proxy_config,
+          controller.get());
     }
     if (_schema_reg_config) {
         construct_single_service(
@@ -954,7 +943,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           std::ref(cloud_storage_api),
           std::ref(partition_manager),
           std::ref(controller->get_topics_state()),
-          std::ref(arch_configs))
+          std::ref(arch_configs),
+          std::ref(_feature_table))
           .get();
         arch_configs.stop().get();
 
@@ -985,6 +975,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(partition_manager),
       std::ref(controller->get_topics_state()),
       std::ref(tx_gateway_frontend),
+      std::ref(controller->get_feature_table()),
       &kafka::make_backward_compatible_serializer,
       std::ref(config::shard_local_cfg()),
       kafka::enable_group_metrics::no)
@@ -996,6 +987,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(partition_manager),
       std::ref(controller->get_topics_state()),
       std::ref(tx_gateway_frontend),
+      std::ref(controller->get_feature_table()),
       &kafka::make_consumer_offsets_serializer,
       std::ref(config::shard_local_cfg()),
       kafka::enable_group_metrics::yes)
@@ -1212,10 +1204,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
 }
 
 ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
-    return _proxy.invoke_on_all(
-      [name{std::move(name)}, val{std::move(val)}](pandaproxy::rest::proxy& p) {
-          p.config().get(name).set_value(val);
-      });
+    return _proxy->set_config(std::move(name), std::move(val));
 }
 
 bool application::archival_storage_enabled() {
@@ -1225,10 +1214,7 @@ bool application::archival_storage_enabled() {
 
 ss::future<>
 application::set_proxy_client_config(ss::sstring name, std::any val) {
-    return _proxy.invoke_on_all(
-      [name{std::move(name)}, val{std::move(val)}](pandaproxy::rest::proxy& p) {
-          p.client_config().get(name).set_value(val);
-      });
+    return _proxy->set_client_config(std::move(name), std::move(val));
 }
 
 void application::wire_up_bootstrap_services() {
@@ -1336,6 +1322,8 @@ void application::start_bootstrap_services() {
 
     storage.invoke_on_all(&storage::api::start).get();
 
+    // Before we start up our bootstrapping RPC service, load any relevant
+    // on-disk state we may need: existing cluster UUID, node ID, etc.
     if (std::optional<iobuf> cluster_uuid_buf = storage.local().kvs().get(
           cluster::cluster_uuid_key_space, bytes(cluster::cluster_uuid_key));
         cluster_uuid_buf) {
@@ -1347,24 +1335,29 @@ void application::start_bootstrap_services() {
           })
           .get();
     }
-
-    syschecks::systemd_message("Starting internal RPC bootstrap service").get();
-    _rpc
-      .invoke_on_all([this](rpc::rpc_server& s) {
-          std::vector<std::unique_ptr<rpc::service>> bootstrap_service;
-          bootstrap_service.push_back(
-            std::make_unique<cluster::bootstrap_service>(
-              _scheduling_groups.cluster_sg(),
-              smp_service_groups.cluster_smp_sg(),
-              std::ref(storage)));
-          s.add_services(std::move(bootstrap_service));
-      })
-      .get();
-    _rpc.invoke_on_all(&rpc::rpc_server::start).get();
-    vlog(
-      _log.info,
-      "Started RPC server listening at {}",
-      config::node().rpc_server());
+    static const bytes invariants_key("configuration_invariants");
+    auto configured_node_id = config::node().node_id();
+    if (auto invariants_buf = storage.local().kvs().get(
+          storage::kvstore::key_space::controller, invariants_key);
+        invariants_buf) {
+        auto invariants
+          = reflection::from_iobuf<cluster::configuration_invariants>(
+            std::move(*invariants_buf));
+        const auto& stored_node_id = invariants.node_id;
+        vlog(_log.info, "Loaded stored node ID for node: {}", stored_node_id);
+        if (
+          configured_node_id != std::nullopt
+          && *configured_node_id != stored_node_id) {
+            throw std::invalid_argument(ssx::sformat(
+              "Configured node ID {} doesn't match stored node ID {}",
+              *configured_node_id,
+              stored_node_id));
+        }
+        ss::smp::invoke_on_all([stored_node_id] {
+            config::node().node_id.set_value(
+              std::make_optional(stored_node_id));
+        }).get0();
+    }
 
     // Load the local node UUID, or create one if none exists.
     auto& kvs = storage.local().kvs();
@@ -1394,13 +1387,31 @@ void application::start_bootstrap_services() {
           storage.set_node_uuid(node_uuid);
       })
       .get();
+
+    syschecks::systemd_message("Starting internal RPC bootstrap service").get();
+    _rpc
+      .invoke_on_all([this](rpc::rpc_server& s) {
+          std::vector<std::unique_ptr<rpc::service>> bootstrap_service;
+          bootstrap_service.push_back(
+            std::make_unique<cluster::bootstrap_service>(
+              _scheduling_groups.cluster_sg(),
+              smp_service_groups.cluster_smp_sg(),
+              std::ref(storage)));
+          s.add_services(std::move(bootstrap_service));
+      })
+      .get();
+    _rpc.invoke_on_all(&rpc::rpc_server::start).get();
+    vlog(
+      _log.info,
+      "Started RPC server listening at {}",
+      config::node().rpc_server());
 }
 
 void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     wire_up_bootstrap_services();
     start_bootstrap_services();
 
-    // Begin the cluster discovery manager so we can determine our initial node
+    // Begin the cluster discovery manager so we can confirm our initial node
     // ID. A valid node ID is required before we can initialize the rest of our
     // subsystems.
     const auto& node_uuid = storage.local().node_uuid();
@@ -1433,12 +1444,20 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
           .invoke_on_all(
             [](features::feature_table& ft) { ft.testing_activate_all(); })
           .get();
+    } else {
+        // Only populate migrators in non-unit-test mode
+        _migrators.push_back(
+          std::make_unique<features::migrators::cloud_storage_config>(
+            *controller));
+        _migrators.push_back(
+          std::make_unique<features::migrators::group_metadata_migration>(
+            *controller, group_router));
     }
 
-    start_runtime_services(cd, app_signal);
+    start_runtime_services(cd);
 
     if (_proxy_config) {
-        _proxy.invoke_on_all(&pandaproxy::rest::proxy::start).get();
+        _proxy->start().get();
         vlog(
           _log.info,
           "Started Pandaproxy listening at {}",
@@ -1461,8 +1480,7 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     syschecks::systemd_notify_ready().get();
 }
 
-void application::start_runtime_services(
-  cluster::cluster_discovery& cd, ::stop_signal& app_signal) {
+void application::start_runtime_services(cluster::cluster_discovery& cd) {
     ssx::background = _feature_table.invoke_on_all(
       [this](features::feature_table& ft) -> ss::future<> {
           try {
@@ -1525,10 +1543,7 @@ void application::start_runtime_services(
           .get();
     }
     syschecks::systemd_message("Starting controller").get();
-    controller->start(cd.initial_seed_brokers_if_no_cluster().get()).get0();
-
-    kafka_group_migration = ss::make_lw_shared<kafka::group_metadata_migration>(
-      *controller, group_router);
+    controller->start(cd).get0();
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.
@@ -1598,6 +1613,12 @@ void application::start_runtime_services(
               _scheduling_groups.cluster_sg(),
               smp_service_groups.cluster_smp_sg(),
               std::ref(controller->get_partition_balancer())));
+
+          runtime_services.push_back(
+            std::make_unique<cluster::ephemeral_credential_service>(
+              _scheduling_groups.cluster_sg(),
+              smp_service_groups.cluster_smp_sg(),
+              std::ref(controller->get_ephemeral_credential_frontend())));
           s.add_services(std::move(runtime_services));
       })
       .get();
@@ -1617,7 +1638,6 @@ void application::start_runtime_services(
             [](archival::scheduler_service& svc) { return svc.start(); })
           .get();
     }
-
     quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();
 
     if (!config::node().admin().empty()) {
@@ -1630,7 +1650,9 @@ void application::start_runtime_services(
       .invoke_on_all(&archival::upload_controller::start)
       .get();
 
-    kafka_group_migration->start(app_signal.abort_source()).get();
+    for (const auto& m : _migrators) {
+        m->start(controller->get_abort_source().local());
+    }
 }
 
 /**

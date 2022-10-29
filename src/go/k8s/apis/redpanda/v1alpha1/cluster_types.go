@@ -11,6 +11,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"time"
 
@@ -153,6 +154,9 @@ type ClusterSpec struct {
 	DNSTrailingDotDisabled bool `json:"dnsTrailingDotDisabled,omitempty"`
 	// RestartConfig allows to control the behavior of the cluster when restarting
 	RestartConfig *RestartConfig `json:"restartConfig,omitempty"`
+
+	// If key is not provided in the SecretRef, Secret data should have key "license"
+	LicenseRef *SecretKeyRef `json:"licenseRef,omitempty"`
 }
 
 // RestartConfig contains strategies to configure how the cluster behaves when restarting, because of upgrades
@@ -647,9 +651,9 @@ type KafkaAPITLS struct {
 //
 // If Enabled is set to true, one-way TLS verification is enabled.
 // In that case, a key pair ('tls.crt', 'tls.key') and CA certificate 'ca.crt'
-// are generated and stored in a Secret with the same name and namespace as the
-// Redpanda cluster. 'ca.crt' must be used by a client as a truststore when
-// communicating with Redpanda.
+// are generated and stored in a Secret named '<redpanda-cluster-name>-admin-api-node
+// and namespace as the Redpanda cluster. 'ca.crt' must be used by a client as a
+// truststore when communicating with Redpanda.
 //
 // If RequireClientAuth is set to true, two-way TLS verification is enabled.
 // In that case, a client certificate is generated, which can be retrieved from
@@ -807,6 +811,15 @@ func (r *Cluster) KafkaTLSListeners() []ListenerWithName {
 	return res
 }
 
+// KafkaListener returns a KafkaAPI listener
+// It returns internal listener if available
+func (r *Cluster) KafkaListener() *KafkaAPI {
+	if l := r.InternalListener(); l != nil {
+		return l
+	}
+	return r.ExternalListener()
+}
+
 // AdminAPIInternal returns internal admin listener
 func (r *Cluster) AdminAPIInternal() *AdminAPI {
 	for _, el := range r.Spec.Configuration.AdminAPI {
@@ -836,6 +849,42 @@ func (r *Cluster) AdminAPITLS() *AdminAPI {
 		}
 	}
 	return nil
+}
+
+// AdminAPIListener returns a AdminAPI listener
+// It returns internal listener if available
+func (r *Cluster) AdminAPIListener() *AdminAPI {
+	if l := r.AdminAPIInternal(); l != nil {
+		return l
+	}
+	return r.AdminAPIExternal()
+}
+
+// AdminAPIURLs returns a list of AdminAPI URLs.
+func (r *Cluster) AdminAPIURLs() []string {
+	aa := r.AdminAPIListener()
+	if aa == nil {
+		return []string{}
+	}
+
+	var (
+		hosts = []string{}
+		urls  = []string{}
+	)
+	if !aa.External.Enabled {
+		for _, i := range r.Status.Nodes.Internal {
+			port := fmt.Sprintf("%d", aa.Port)
+			hosts = append(hosts, net.JoinHostPort(i, port))
+		}
+	} else {
+		hosts = r.Status.Nodes.ExternalAdmin
+	}
+
+	for _, host := range hosts {
+		u := url.URL{Scheme: aa.GetHTTPScheme(), Host: host}
+		urls = append(urls, u.String())
+	}
+	return urls
 }
 
 // PandaproxyAPIInternal returns internal pandaproxy listener
@@ -1003,6 +1052,13 @@ func (k KafkaAPI) GetExternal() *ExternalConnectivityConfig {
 	return &k.External
 }
 
+// IsMutualTLSEnabled returns true if API requires client aut
+//
+//nolint:gocritic // TODO KafkaAPI is now 81 bytes, consider a pointer
+func (k KafkaAPI) IsMutualTLSEnabled() bool {
+	return k.TLS.Enabled && k.TLS.RequireClientAuth
+}
+
 // Admin API
 
 // GetPort returns API port
@@ -1023,6 +1079,20 @@ func (a AdminAPI) GetTLS() *TLSConfig {
 // GetExternal returns API's ExternalConnectivityConfig
 func (a AdminAPI) GetExternal() *ExternalConnectivityConfig {
 	return &a.External
+}
+
+// GetHTTPScheme returns API HTTP scheme
+func (a AdminAPI) GetHTTPScheme() string {
+	scheme := "http" //nolint:goconst // no need to set as constant
+	if a.TLS.Enabled {
+		scheme = "https" //nolint:goconst // no need to set as constant
+	}
+	return scheme
+}
+
+// IsMutualTLSEnabled returns true if API requires client auth
+func (a AdminAPI) IsMutualTLSEnabled() bool {
+	return a.TLS.Enabled && a.TLS.RequireClientAuth
 }
 
 // SchemaRegistry API

@@ -298,11 +298,17 @@ class RedpandaInstaller:
         if version == RedpandaInstaller.HEAD:
             version = self._head_version
         # NOTE: the released versions are sorted highest first.
+        result = None
         for v in self._released_versions:
             if (v[0] == version[0]
                     and v[1] < version[1]) or (v[0] < version[0]):
-                return v
-        return None
+                result = v
+                break
+
+        self._redpanda.logger.info(
+            f"Selected prior feature version {result}, from my version {version}, from available versions {self._released_versions}"
+        )
+        return result
 
     def install(self, nodes, version):
         """
@@ -341,8 +347,29 @@ class RedpandaInstaller:
                 ssh_download_per_node[
                     node] = self._async_download_on_node_unlocked(
                         node, version)
-        self.wait_for_async_ssh(self._redpanda.logger, ssh_download_per_node,
-                                "Finished downloading binaries")
+
+        try:
+            self.wait_for_async_ssh(self._redpanda.logger,
+                                    ssh_download_per_node,
+                                    "Finished downloading binaries")
+        except Exception as e:
+            self._redpanda.logger.error(
+                f"Exception while downloading to {version_root}, cleaning up: {str(e)}"
+            )
+            # TODO: make failure handling more fine-grained. If deploying on
+            # dedicated nodes, we only need to clean up the node that failed.
+            for node in ssh_download_per_node:
+                ssh_iter = ssh_download_per_node[node]
+                if ssh_iter.has_next():
+                    # Drain the iterator to make sure we wait for on-going
+                    # downloads to finish before cleaning up.
+                    try:
+                        [l for l in ssh_iter]
+                    except:
+                        pass
+                # Be permissive so we can clean everything.
+                node.account.remove(version_root, allow_fail=True)
+            raise e
 
         # Regardless of whether we downloaded anything, adjust the
         # /opt/redpanda link to point to the appropriate version on all nodes.

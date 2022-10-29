@@ -8,6 +8,9 @@
 # by the Apache License, Version 2.0
 
 import os
+import time
+from typing import Optional
+
 from contextlib import contextmanager
 from requests.exceptions import HTTPError
 
@@ -15,7 +18,6 @@ from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.services.storage import Segment
 
 from ducktape.errors import TimeoutError
-import time
 
 
 class Scale:
@@ -211,7 +213,35 @@ def wait_for_removal_of_n_segments(redpanda, topic: str, partition_idx: int,
                err_msg="Segments were not removed from all nodes")
 
 
-def wait_for_segments_removal(redpanda, topic, partition_idx, count):
+def wait_for_local_storage_truncate(redpanda,
+                                    topic: str,
+                                    partition_idx: int,
+                                    target_bytes: int,
+                                    timeout_sec: Optional[int] = None):
+    """
+    For use in tiered storage tests: wait until the locally retained data
+    size for this partition is below a threshold on all nodes.
+    """
+    def is_truncated():
+        storage = redpanda.storage(sizes=True)
+        sizes = []
+        for node_partition in storage.partitions("kafka", topic):
+            total_size = sum(s.size for s in node_partition.segments.values())
+            redpanda.logger.debug(
+                f"  {topic}/{partition_idx} node {node_partition.node.name} local size {total_size} ({len(node_partition.segments)} segments)"
+            )
+            sizes.append(total_size)
+
+        return all(s <= target_bytes for s in sizes)
+
+    wait_until(is_truncated, timeout_sec=timeout_sec, backoff_sec=1)
+
+
+def wait_for_segments_removal(redpanda,
+                              topic,
+                              partition_idx,
+                              count,
+                              timeout_sec: Optional[int] = None):
     """
     Wait until only given number of segments will left in a partitions
     """
@@ -222,9 +252,12 @@ def wait_for_segments_removal(redpanda, topic, partition_idx, count):
             partitions.append(p <= count)
         return all(partitions)
 
+    if timeout_sec is None:
+        timeout_sec = 120
+
     try:
         wait_until(done,
-                   timeout_sec=120,
+                   timeout_sec=timeout_sec,
                    backoff_sec=5,
                    err_msg="Segments were not removed")
     except Exception as e:

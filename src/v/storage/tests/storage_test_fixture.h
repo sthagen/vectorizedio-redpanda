@@ -19,6 +19,7 @@
 #include "model/record_utils.h"
 #include "model/tests/random_batch.h"
 #include "random/generators.h"
+#include "reflection/adl.h"
 #include "seastarx.h"
 #include "storage/kvstore.h"
 #include "storage/log_manager.h"
@@ -238,8 +239,6 @@ public:
           storage::debug_sanitize_files::yes,
           ss::default_priority_class(),
           cache);
-
-        cfg.segment_size_jitter = storage::jitter_percents(0);
         return cfg;
     }
 

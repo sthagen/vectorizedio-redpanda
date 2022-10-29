@@ -10,6 +10,7 @@
 #include "cluster/controller.h"
 
 #include "cluster/bootstrap_backend.h"
+#include "cluster/cluster_discovery.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller_api.h"
@@ -17,6 +18,7 @@
 #include "cluster/controller_log_limiter.h"
 #include "cluster/controller_service.h"
 #include "cluster/data_policy_frontend.h"
+#include "cluster/ephemeral_credential_frontend.h"
 #include "cluster/feature_backend.h"
 #include "cluster/feature_manager.h"
 #include "cluster/fwd.h"
@@ -30,6 +32,7 @@
 #include "cluster/metadata_dissemination_service.h"
 #include "cluster/metrics_reporter.h"
 #include "cluster/partition_balancer_backend.h"
+#include "cluster/partition_balancer_state.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/partition_manager.h"
 #include "cluster/raft0_utils.h"
@@ -47,6 +50,9 @@
 #include "model/timeout_clock.h"
 #include "raft/fwd.h"
 #include "security/acl.h"
+#include "security/authorizer.h"
+#include "security/credential_store.h"
+#include "security/ephemeral_credential_store.h"
 #include "ssx/future-util.h"
 
 #include <seastar/core/thread.hh>
@@ -71,7 +77,11 @@ controller::controller(
   , _shard_table(st)
   , _storage(storage)
   , _storage_node(storage_node)
-  , _tp_updates_dispatcher(_partition_allocator, _tp_state, _partition_leaders)
+  , _tp_updates_dispatcher(
+      _partition_allocator,
+      _tp_state,
+      _partition_leaders,
+      _partition_balancer_state)
   , _security_manager(_credentials, _authorizer)
   , _data_policy_manager(data_policy_table)
   , _raft_manager(raft_manager)
@@ -92,17 +102,23 @@ ss::future<> controller::wire_up() {
             config::shard_local_cfg().enable_rack_awareness.bind());
       })
       .then([this] { return _credentials.start(); })
+      .then([this] { return _ephemeral_credentials.start(); })
       .then([this] {
           return _authorizer.start(
             []() { return config::shard_local_cfg().superusers.bind(); });
       })
       .then([this] { return _tp_state.start(); })
+      .then([this] {
+          return _partition_balancer_state.start_single(
+            std::ref(_tp_state),
+            std::ref(_members_table),
+            std::ref(_partition_allocator));
+      })
       .then([this] { _probe.start(); });
 }
 
-ss::future<>
-controller::start(std::vector<model::broker> initial_raft0_brokers) {
-    const bool local_node_is_seed_server = !initial_raft0_brokers.empty();
+ss::future<> controller::start(cluster_discovery& discovery) {
+    const auto initial_raft0_brokers = discovery.founding_brokers();
     std::vector<model::node_id> seed_nodes;
     seed_nodes.reserve(initial_raft0_brokers.size());
     std::transform(
@@ -218,6 +234,14 @@ controller::start(std::vector<model::broker> initial_raft0_brokers) {
             std::ref(_authorizer));
       })
       .then([this] {
+          return _ephemeral_credential_frontend.start(
+            self(),
+            std::ref(_credentials),
+            std::ref(_ephemeral_credentials),
+            std::ref(_feature_table),
+            std::ref(_connections));
+      })
+      .then([this] {
           return _data_policy_frontend.start(
             std::ref(_stm), std::ref(_feature_table), std::ref(_as));
       })
@@ -282,9 +306,7 @@ controller::start(std::vector<model::broker> initial_raft0_brokers) {
               return stm.wait(stm.bootstrap_last_applied(), model::no_timeout);
           });
       })
-      .then([this, local_node_is_seed_server] {
-          return cluster_creation_hook(local_node_is_seed_server);
-      })
+      .then([this, &discovery] { return cluster_creation_hook(discovery); })
       .then(
         [this] { return _backend.invoke_on_all(&controller_backend::start); })
       .then([this] {
@@ -394,9 +416,8 @@ controller::start(std::vector<model::broker> initial_raft0_brokers) {
           return _partition_balancer.start_single(
             _raft0,
             std::ref(_stm),
-            std::ref(_tp_state),
+            std::ref(_partition_balancer_state),
             std::ref(_hm_frontend),
-            std::ref(_members_table),
             std::ref(_partition_allocator),
             std::ref(_tp_frontend),
             config::shard_local_cfg().partition_autobalancing_mode.bind(),
@@ -451,6 +472,7 @@ ss::future<> controller::stop() {
           .then([this] { return _api.stop(); })
           .then([this] { return _backend.stop(); })
           .then([this] { return _tp_frontend.stop(); })
+          .then([this] { return _ephemeral_credential_frontend.stop(); })
           .then([this] { return _security_frontend.stop(); })
           .then([this] { return _data_policy_frontend.stop(); })
           .then([this] { return _members_frontend.stop(); })
@@ -459,10 +481,12 @@ ss::future<> controller::stop() {
           .then([this] { return _stm.stop(); })
           .then([this] { return _bootstrap_backend.stop(); })
           .then([this] { return _authorizer.stop(); })
+          .then([this] { return _ephemeral_credentials.stop(); })
           .then([this] { return _credentials.stop(); })
           .then([this] { return _tp_state.stop(); })
           .then([this] { return _members_manager.stop(); })
           .then([this] { return _drain_manager.stop(); })
+          .then([this] { return _partition_balancer_state.stop(); })
           .then([this] { return _partition_allocator.stop(); })
           .then([this] { return _partition_leaders.stop(); })
           .then([this] { return _members_table.stop(); })
@@ -513,15 +537,9 @@ ss::future<> controller::create_cluster() {
  * after it has been created, before anything else has been written
  * to it, and before we have started communicating with peers.
  */
-ss::future<>
-controller::cluster_creation_hook(const bool local_node_is_seed_server) {
-    if (_storage.local().get_cluster_uuid()) {
-        // Cluster already exists
-        co_return;
-    }
-
-    if (!local_node_is_seed_server) {
-        // We are not on a seed server / root node
+ss::future<> controller::cluster_creation_hook(cluster_discovery& discovery) {
+    auto is_cluster_founder = co_await discovery.is_cluster_founder();
+    if (!is_cluster_founder) {
         co_return;
     }
 

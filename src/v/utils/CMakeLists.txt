@@ -9,6 +9,8 @@ v_cc_library(
     base64.cc
     retry_chain_node.cc
     vint.cc
+    directory_walker.cc
+    uuid.cc
   DEPS
     Seastar::seastar
     Hdrhistogram::hdr_histogram

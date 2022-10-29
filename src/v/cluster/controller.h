@@ -17,8 +17,7 @@
 #include "cluster/scheduling/leader_balancer.h"
 #include "raft/fwd.h"
 #include "rpc/fwd.h"
-#include "security/authorizer.h"
-#include "security/credential_store.h"
+#include "security/fwd.h"
 #include "storage/api.h"
 #include "storage/fwd.h"
 
@@ -28,6 +27,9 @@
 #include <vector>
 
 namespace cluster {
+
+class cluster_discovery;
+
 class controller {
 public:
     controller(
@@ -63,6 +65,16 @@ public:
 
     ss::sharded<security::credential_store>& get_credential_store() {
         return _credentials;
+    }
+
+    ss::sharded<security::ephemeral_credential_store>&
+    get_ephemeral_credential_store() {
+        return _ephemeral_credentials;
+    }
+
+    ss::sharded<ephemeral_credential_frontend>&
+    get_ephemeral_credential_frontend() {
+        return _ephemeral_credential_frontend;
     }
 
     ss::sharded<security_frontend>& get_security_frontend() {
@@ -123,7 +135,7 @@ public:
      * \param initial_raft0_brokers Brokers to start raft0 with. Empty for
      *      non-seeds.
      */
-    ss::future<> start(std::vector<model::broker> initial_raft0_brokers);
+    ss::future<> start(cluster_discovery&);
 
     // prevents controller from accepting new requests
     ss::future<> shutdown_input();
@@ -138,7 +150,7 @@ private:
      */
     ss::future<> create_cluster();
 
-    ss::future<> cluster_creation_hook(bool local_node_is_seed_server);
+    ss::future<> cluster_creation_hook(cluster_discovery& discovery);
 
     config_manager::preload_result _config_preload;
 
@@ -146,6 +158,8 @@ private:
     ss::sharded<partition_allocator> _partition_allocator; // single instance
     ss::sharded<topic_table> _tp_state;                    // instance per core
     ss::sharded<members_table> _members_table;             // instance per core
+    ss::sharded<partition_balancer_state>
+      _partition_balancer_state; // single instance
     ss::sharded<partition_leaders_table>
       _partition_leaders;                            // instance per core
     ss::sharded<drain_manager> _drain_manager;       // instance per core
@@ -165,9 +179,11 @@ private:
     ss::sharded<storage::node_api>& _storage_node; // single instance
     topic_updates_dispatcher _tp_updates_dispatcher;
     ss::sharded<security::credential_store> _credentials;
+    ss::sharded<security::ephemeral_credential_store> _ephemeral_credentials;
     security_manager _security_manager;
     data_policy_manager _data_policy_manager;
     ss::sharded<security_frontend> _security_frontend;
+    ss::sharded<ephemeral_credential_frontend> _ephemeral_credential_frontend;
     ss::sharded<data_policy_frontend> _data_policy_frontend;
     ss::sharded<security::authorizer> _authorizer;
     ss::sharded<raft::group_manager>& _raft_manager;

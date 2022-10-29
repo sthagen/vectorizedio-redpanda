@@ -137,7 +137,7 @@ func (r *Reconciling) Do(
 	log logr.Logger,
 ) (ctrl.Result, error) {
 	// Ensure items in the store are updated
-	if err := r.Store.Sync(cluster); err != nil {
+	if err := r.Store.Sync(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync console store: %w", err)
 	}
 
@@ -172,7 +172,7 @@ func (r *Reconciling) Do(
 
 	applyResources := []resources.Resource{
 		consolepkg.NewKafkaSA(r.Client, r.Scheme, console, cluster, r.clusterDomain, r.AdminAPIClientFactory, log),
-		consolepkg.NewKafkaACL(r.Client, r.Scheme, console, cluster, r.KafkaAdminClientFactory, log),
+		consolepkg.NewKafkaACL(r.Client, r.Scheme, console, cluster, r.KafkaAdminClientFactory, r.Store, log),
 		configmapResource,
 		consolepkg.NewDeployment(r.Client, r.Scheme, console, cluster, r.Store, log),
 		consolepkg.NewService(r.Client, r.Scheme, console, r.clusterDomain, log),
@@ -220,7 +220,7 @@ func (r *Deleting) Do(
 ) (ctrl.Result, error) {
 	applyResources := []resources.ManagedResource{
 		consolepkg.NewKafkaSA(r.Client, r.Scheme, console, cluster, r.clusterDomain, r.AdminAPIClientFactory, log),
-		consolepkg.NewKafkaACL(r.Client, r.Scheme, console, cluster, r.KafkaAdminClientFactory, log),
+		consolepkg.NewKafkaACL(r.Client, r.Scheme, console, cluster, r.KafkaAdminClientFactory, r.Store, log),
 	}
 
 	for _, each := range applyResources {

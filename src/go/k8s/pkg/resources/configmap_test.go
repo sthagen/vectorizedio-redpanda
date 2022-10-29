@@ -12,6 +12,7 @@ package resources_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -102,9 +103,9 @@ func TestEnsureConfigMap_AdditionalConfig(t *testing.T) {
 	}{
 		{
 			name:                    "Primitive object in additional configuration",
-			additionalConfiguration: map[string]string{"redpanda.transactional_id_expiration_ms": "25920000000"},
+			additionalConfiguration: map[string]string{"redpanda.transactional_id_expiration_ms": "25920000000", "rpk.overprovisioned": "true"},
 			expectedStrings:         []string{"transactional_id_expiration_ms: 25920000000"},
-			expectedHash:            "13b7ea49c811062afe2a6d275604929e",
+			expectedHash:            "5a3cf863cd61e3cfda0c586fad11c13c",
 		},
 		{
 			name:                    "Complex struct in additional configuration",
@@ -114,7 +115,7 @@ func TestEnsureConfigMap_AdditionalConfig(t *testing.T) {
         - address: 0.0.0.0
           port: 8081
           name: external`},
-			expectedHash: "4b241955a317f47a6a06960a333ed661",
+			expectedHash: "24f0b08129b48a3c8f091f13b84e1f1d",
 		},
 		{
 			name: "shadow index cache directory",
@@ -122,7 +123,7 @@ func TestEnsureConfigMap_AdditionalConfig(t *testing.T) {
 				`cloud_storage_cache_directory: /var/lib/shadow-index-cache`,
 				`cloud_storage_cache_size: "10737418240"`,
 			},
-			expectedHash: "533227069ff8ee6791b874db60480b40",
+			expectedHash: "e3ab006a8c5db2957c16f982bc6db694",
 		},
 	}
 	for _, tc := range testcases {
@@ -157,6 +158,15 @@ func TestEnsureConfigMap_AdditionalConfig(t *testing.T) {
 			for _, es := range tc.expectedStrings {
 				require.True(t, strings.Contains(data, es), fmt.Sprintf("expecting %s but got %v", es, data))
 			}
+
+			fileName := strings.ReplaceAll("./testdata/"+tc.name+".golden", " ", "_")
+			if os.Getenv("OVERWRITE_GOLDEN_FILES") != "" {
+				err = os.WriteFile(fileName, []byte(data), 0o600)
+				require.NoError(t, err)
+			}
+			golden, err := os.ReadFile(fileName)
+			require.NoError(t, err)
+			require.Equal(t, string(golden), data)
 			hash, err := cfgRes.GetNodeConfigHash(context.TODO())
 			require.NoError(t, err)
 			require.Equal(t, tc.expectedHash, hash)

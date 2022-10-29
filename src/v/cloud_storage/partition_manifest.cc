@@ -12,6 +12,7 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "bytes/iobuf_ostreambuf.h"
+#include "bytes/iostream.h"
 #include "cloud_storage/logger.h"
 #include "cloud_storage/types.h"
 #include "hashing/xx.h"
@@ -299,6 +300,20 @@ partition_manifest::const_reverse_iterator partition_manifest::rend() const {
 }
 
 size_t partition_manifest::size() const { return _segments.size(); }
+
+uint64_t partition_manifest::cloud_log_size() const {
+    auto start_iter = find(_start_offset);
+
+    // No addresable segments
+    if (start_iter == end()) {
+        return 0;
+    }
+
+    return std::transform_reduce(
+      start_iter, end(), uint64_t{0}, std::plus{}, [](const auto& seg) {
+          return seg.second.size_bytes;
+      });
+}
 
 bool partition_manifest::contains(const partition_manifest::key& key) const {
     return _segments.contains(key);
@@ -958,6 +973,8 @@ ss::future<> partition_manifest::update(ss::input_stream<char> is) {
     } else {
         rapidjson::ParseErrorCode e = reader.GetParseErrorCode();
         size_t o = reader.GetErrorOffset();
+        vlog(
+          cst_log.debug, "Failed to parse manifest: {}", result.hexdump(2048));
         throw std::runtime_error(fmt_with_ctx(
           fmt::format,
           "Failed to parse topic manifest {}: {} at offset {}",
