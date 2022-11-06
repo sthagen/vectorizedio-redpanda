@@ -348,12 +348,23 @@ struct begin_tx_request : serde::envelope<begin_tx_request, serde::version<0>> {
     }
 };
 
-struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<0>> {
+struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<1>> {
     model::ntp ntp;
     model::term_id etag;
     tx_errc ec;
+    model::revision_id topic_revision = model::revision_id(-1);
 
     begin_tx_reply() noexcept = default;
+
+    begin_tx_reply(
+      model::ntp ntp,
+      model::term_id etag,
+      tx_errc ec,
+      model::revision_id topic_revision)
+      : ntp(std::move(ntp))
+      , etag(etag)
+      , ec(ec)
+      , topic_revision(topic_revision) {}
 
     begin_tx_reply(model::ntp ntp, model::term_id etag, tx_errc ec)
       : ntp(std::move(ntp))
@@ -369,7 +380,7 @@ struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<0>> {
 
     friend std::ostream& operator<<(std::ostream& o, const begin_tx_reply& r);
 
-    auto serde_fields() { return std::tie(ntp, etag, ec); }
+    auto serde_fields() { return std::tie(ntp, etag, ec, topic_revision); }
 };
 
 struct prepare_tx_request
@@ -1209,6 +1220,9 @@ using replication_factor
   = named_type<uint16_t, struct replication_factor_type_tag>;
 
 std::istream& operator>>(std::istream& i, replication_factor& cs);
+
+replication_factor
+parsing_replication_factor(const std::optional<ss::sstring>& value);
 
 // This class contains updates for topic properties which are replicates not by
 // topic_frontend

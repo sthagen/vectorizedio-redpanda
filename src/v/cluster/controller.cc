@@ -153,7 +153,8 @@ ss::future<> controller::start(cluster_discovery& discovery) {
           return _members_manager.local().validate_configuration_invariants();
       })
       .then([this] {
-          return _feature_backend.start_single(std::ref(_feature_table));
+          return _feature_backend.start_single(
+            std::ref(_feature_table), std::ref(_storage));
       })
       .then([this] {
           return _bootstrap_backend.start_single(
@@ -258,6 +259,7 @@ ss::future<> controller::start(cluster_discovery& discovery) {
             std::ref(_as),
             std::ref(_cloud_storage_api),
             std::ref(_feature_table),
+            std::ref(_members_table),
             ss::sharded_parameter([] {
                 return config::shard_local_cfg()
                   .storage_space_alert_free_threshold_percent.bind();
@@ -437,6 +439,14 @@ ss::future<> controller::start(cluster_discovery& discovery) {
             partition_balancer_backend::shard,
             &partition_balancer_backend::start);
       });
+}
+
+ss::future<> controller::set_ready() {
+    if (_is_ready) {
+        return ss::now();
+    }
+    _is_ready = true;
+    return _raft_manager.invoke_on_all(&raft::group_manager::set_ready);
 }
 
 ss::future<> controller::shutdown_input() {

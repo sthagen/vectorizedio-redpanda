@@ -102,12 +102,6 @@ CHAOS_LOG_ALLOW_LIST = [
     ),
 ]
 
-# Log errors that are expected in tests that change replication factor
-CHANGE_REPLICATION_FACTOR_ALLOW_LIST = [
-    re.compile(
-        "cluster - .*Unable to allocate topic with given replication factor"),
-]
-
 # Log errors emitted by refresh credentials system when cloud storage is enabled with IAM roles
 # without a corresponding mock service set up to return credentials
 IAM_ROLES_API_CALL_ALLOW_LIST = [
@@ -513,6 +507,10 @@ class RedpandaService(Service):
         "backtraces": {
             "path": BACKTRACE_CAPTURE,
             "collect_default": True
+        },
+        "data": {
+            "path": DATA_DIR,
+            "collect_default": False
         }
     }
 
@@ -532,12 +530,16 @@ class RedpandaService(Service):
                  security: SecurityConfig = SecurityConfig(),
                  node_ready_timeout_s=None,
                  superuser: Optional[SaslCredentials] = None,
-                 skip_if_no_redpanda_log: bool = False):
+                 skip_if_no_redpanda_log: bool = False,
+                 pp_keep_alive: Optional[int] = None,
+                 pp_cache_max_size: Optional[int] = None):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._extra_rp_conf = extra_rp_conf or dict()
         self._enable_pp = enable_pp
         self._enable_sr = enable_sr
+        self._pp_keep_alive = pp_keep_alive
+        self._pp_cache_max_size = pp_cache_max_size
         self._security = security
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
 
@@ -618,6 +620,8 @@ class RedpandaService(Service):
         # stash a copy here so that we can quickly look up e.g. addresses later.
         self._node_configs = {}
 
+        self._node_id_by_idx = {}
+
         self._seed_servers = [self.nodes[0]] if len(self.nodes) > 0 else []
 
     def set_seed_servers(self, node_list):
@@ -679,6 +683,9 @@ class RedpandaService(Service):
 
     def require_client_auth(self):
         return self._security.require_client_auth
+
+    def mark_data_dir_for_collection(self):
+        self.logs["data"]["collect_default"] = True
 
     @property
     def dedicated_nodes(self):
@@ -1151,7 +1158,7 @@ class RedpandaService(Service):
 
         for line in node.account.ssh_capture("ps aux"):
             self.logger.debug(line.strip())
-        for line in node.account.ssh_capture("netstat -ant"):
+        for line in node.account.ssh_capture("netstat -panelot"):
             self.logger.debug(line.strip())
 
     def start_service(self, node, start):
@@ -1267,21 +1274,24 @@ class RedpandaService(Service):
         patch_result = self._admin.patch_cluster_config(upsert=values)
         new_version = patch_result['config_version']
 
+        def is_ready():
+            status = self._admin.get_cluster_config_status(
+                node=self.controller())
+            ready = all([n['config_version'] >= new_version for n in status])
+
+            return ready, status
+
         # The version check is >= to permit other config writes to happen in
         # the background, including the write to cluster_id that happens
         # early in the cluster's lifetime
-        wait_until(
-            lambda: all([
-                n['config_version'] >= new_version for n in self._admin.
-                get_cluster_config_status(node=self.controller())
-            ]),
+        config_status = wait_until_result(
+            is_ready,
             timeout_sec=10,
             backoff_sec=0.5,
             err_msg=f"Config status versions did not converge on {new_version}"
         )
 
-        any_restarts = any(n['restart']
-                           for n in self._admin.get_cluster_config_status())
+        any_restarts = any(n['restart'] for n in config_status)
         if any_restarts and expect_restart:
             self.restart_nodes(self.nodes)
         elif any_restarts:
@@ -1730,6 +1740,9 @@ class RedpandaService(Service):
         # exercise code paths that deal with multiple listeners
         node_ip = socket.gethostbyname(node.account.hostname)
 
+        self.logger.info(
+            f"self.render: hasattr(self, 'template_env'): {hasattr(self, 'template_env')}"
+        )
         conf = self.render("redpanda.yaml",
                            node=node,
                            data_dir=RedpandaService.DATA_DIR,
@@ -1747,7 +1760,9 @@ class RedpandaService(Service):
                            endpoint_authn_method=self.endpoint_authn_method(),
                            pp_authn_method=self._security.pp_authn_method,
                            sr_authn_method=self._security.sr_authn_method,
-                           auto_auth=self._security.auto_auth)
+                           auto_auth=self._security.auto_auth,
+                           pp_keep_alive=self._pp_keep_alive,
+                           pp_cache_max_size=self._pp_cache_max_size)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1847,14 +1862,16 @@ class RedpandaService(Service):
                               override_cfg_params=None,
                               start_timeout=None,
                               stop_timeout=None,
-                              use_maintenance_mode=True):
+                              use_maintenance_mode=True,
+                              omit_seeds_on_idx_one=True):
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
         restarter = RollingRestarter(self)
         restarter.restart_nodes(nodes,
                                 override_cfg_params=override_cfg_params,
                                 start_timeout=start_timeout,
                                 stop_timeout=stop_timeout,
-                                use_maintenance_mode=use_maintenance_mode)
+                                use_maintenance_mode=use_maintenance_mode,
+                                omit_seeds_on_idx_one=omit_seeds_on_idx_one)
 
     def registered(self, node):
         """
@@ -1864,7 +1881,7 @@ class RedpandaService(Service):
         We first check the admin API to do a kafka-independent check, and then verify
         that kafka clients see the same thing.
         """
-        node_id = self.node_id(node)
+        node_id = self.node_id(node, force_refresh=True)
         self.logger.debug(
             f"registered: checking if broker {node_id} ({node.name}) is registered..."
         )
@@ -2209,7 +2226,18 @@ class RedpandaService(Service):
             shards_per_node[self.idx(node)] = num_shards
         return shards_per_node
 
-    def node_id(self, node):
+    def node_id(self, node, force_refresh=False, timeout_sec=30):
+        """
+        Returns the node ID of a given node. Uses a cached value unless
+        'force_refresh' is set to True.
+
+        NOTE: this is not thread-safe.
+        """
+        idx = self.idx(node)
+        if not force_refresh:
+            if idx in self._node_id_by_idx:
+                return self._node_id_by_idx[idx]
+
         def _try_get_node_id():
             try:
                 node_cfg = self._admin.get_node_config(node)
@@ -2219,9 +2247,11 @@ class RedpandaService(Service):
 
         node_id = wait_until_result(
             _try_get_node_id,
-            timeout_sec=30,
-            err_msg=f"couldn't reach admin endpoing for {node.account.hostname}"
+            timeout_sec=timeout_sec,
+            err_msg=f"couldn't reach admin endpoint for {node.account.hostname}"
         )
+        self.logger.info(f"Got node ID for {node.account.hostname}: {node_id}")
+        self._node_id_by_idx[idx] = node_id
         return node_id
 
     def healthy(self):

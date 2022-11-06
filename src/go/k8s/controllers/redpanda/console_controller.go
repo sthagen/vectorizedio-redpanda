@@ -19,12 +19,15 @@ import (
 	adminutils "github.com/redpanda-data/redpanda/src/go/k8s/pkg/admin"
 	consolepkg "github.com/redpanda-data/redpanda/src/go/k8s/pkg/console"
 	"github.com/redpanda-data/redpanda/src/go/k8s/pkg/resources"
+	"github.com/redpanda-data/redpanda/src/go/k8s/pkg/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -110,13 +113,14 @@ func (r *ConsoleReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
+	r.Log.V(debugLogLevel).Info("console", "observed generation", console.Status.ObservedGeneration, "generation", console.GetGeneration())
 	var s state
 	switch {
 	case console.GetDeletionTimestamp() != nil:
 		s = &Deleting{r}
 	case !console.GenerationMatchesObserved():
 		if err := r.handleSpecChange(ctx, console); err != nil {
-			return ctrl.Result{}, fmt.Errorf("handle spec change: %w", err)
+			return ctrl.Result{}, fmt.Errorf("handle spec change (lastObserved: %d, currentGeneration: %d): %w", console.Status.ObservedGeneration, console.GetGeneration(), err)
 		}
 		fallthrough
 	default:
@@ -199,6 +203,7 @@ func (r *Reconciling) Do(
 	}
 
 	if !console.GenerationMatchesObserved() {
+		r.Log.Info("observed generation updating", "observed generation", console.Status.ObservedGeneration, "generation", console.GetGeneration())
 		console.Status.ObservedGeneration = console.GetGeneration()
 		if err := r.Status().Update(ctx, console); err != nil {
 			return ctrl.Result{}, err
@@ -237,11 +242,13 @@ func (r *ConsoleReconciler) handleSpecChange(
 	ctx context.Context, console *redpandav1alpha1.Console,
 ) error {
 	if console.Status.ConfigMapRef != nil {
+		r.Log.V(debugLogLevel).Info("handle spec change", "config map name", console.Status.ConfigMapRef.Name, "config map namespace", console.Status.ConfigMapRef.Namespace)
 		// We are creating new ConfigMap for every spec change so Deployment can detect changes and redeploy Pods
 		// Unset Status.ConfigMapRef so we can delete the previous unused ConfigMap
+		previousConfigMapRef := fmt.Sprintf("%s/%s", console.Status.ConfigMapRef.Namespace, console.Status.ConfigMapRef.Name)
 		console.Status.ConfigMapRef = nil
 		if err := r.Status().Update(ctx, console); err != nil {
-			return err
+			return fmt.Errorf("removing config map ref from status (%s): %w", previousConfigMapRef, err)
 		}
 	}
 	return nil
@@ -253,8 +260,10 @@ func (r *ConsoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&redpandav1alpha1.Console{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&corev1.ConfigMap{}, builder.WithPredicates(utils.DeletePredicate{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&netv1.Ingress{}).
 		Complete(r)
 }
 

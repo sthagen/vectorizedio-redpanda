@@ -60,14 +60,6 @@ public:
       cache& cache,
       s3::bucket_name bucket,
       const partition_manifest& m,
-      const partition_manifest::key& name,
-      retry_chain_node& parent);
-
-    remote_segment(
-      remote& r,
-      cache& cache,
-      s3::bucket_name bucket,
-      const partition_manifest& m,
       model::offset base_offset,
       retry_chain_node& parent);
 
@@ -126,6 +118,10 @@ public:
     /// \param to end redpanda offset
     ss::future<std::vector<model::tx_range>>
     aborted_transactions(model::offset from, model::offset to);
+
+    const remote_segment_path& get_segment_path() const noexcept {
+        return _path;
+    }
 
 private:
     /// get a file offset for the corresponding kafka offset
@@ -210,7 +206,8 @@ public:
     remote_segment_batch_reader(
       ss::lw_shared_ptr<remote_segment>,
       const storage::log_reader_config& config,
-      partition_probe& probe) noexcept;
+      partition_probe& probe,
+      ssx::semaphore_units) noexcept;
 
     remote_segment_batch_reader(
       remote_segment_batch_reader&&) noexcept = delete;
@@ -263,6 +260,10 @@ private:
     size_t _bytes_consumed{0};
     ss::gate _gate;
     bool _stopped{false};
+
+    /// Units for limiting concurrently-instantiated readers, they belong
+    /// to materialized_segments.
+    ssx::semaphore_units _units;
 };
 
 } // namespace cloud_storage

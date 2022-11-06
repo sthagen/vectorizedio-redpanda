@@ -20,6 +20,9 @@
 #include "model/metadata.h"
 #include "seastarx.h"
 #include "storage/kvstore.h"
+#include "utils/directory_walker.h"
+
+#include <seastar/core/seastar.hh>
 
 #include <chrono>
 
@@ -79,6 +82,25 @@ cluster_discovery::brokers cluster_discovery::founding_brokers() const {
 ss::future<bool> cluster_discovery::is_cluster_founder() {
     if (_is_cluster_founder.has_value()) {
         co_return *_is_cluster_founder;
+    }
+    // If there's anything in the controller directory, assume this node has
+    // previously joined a cluster.
+    auto controller_ntp_cfg = storage::ntp_config(
+      model::controller_ntp, config::node().data_directory().as_sstring());
+    const auto controller_dir = controller_ntp_cfg.work_directory();
+    auto controller_dir_exists = co_await ss::file_exists(controller_dir);
+    if (controller_dir_exists) {
+        const auto controller_empty = co_await directory_walker::empty(
+          std::filesystem::path(controller_dir));
+        if (!controller_empty) {
+            vlog(
+              clusterlog.info,
+              "Controller directory {} not empty; assuming existing cluster "
+              "exists",
+              controller_dir);
+            _is_cluster_founder = false;
+            co_return *_is_cluster_founder;
+        }
     }
     if (config::node().empty_seed_starts_cluster()) {
         // When using root-driven bootstrap, only the node with the empty seed
@@ -286,18 +308,19 @@ ss::future<> cluster_discovery::discover_founding_brokers() {
         }
         replies.emplace(seed_server.addr, cluster_bootstrap_info_reply{});
     }
-    co_await ss::parallel_for_each(replies, [this](auto& iter) -> ss::future<> {
-        auto& [addr, reply] = iter;
-        reply = co_await request_cluster_bootstrap_info_single(addr);
-        if (reply.cluster_uuid.has_value()) {
-            vlog(
-              clusterlog.info,
-              "Cluster presence detected in other seed servers: {}",
-              *reply.cluster_uuid);
-            _is_cluster_founder = false;
-            co_return;
-        }
-    });
+    co_await ss::parallel_for_each(
+      replies, ss::coroutine::lambda([this](auto& iter) -> ss::future<> {
+          auto& [addr, reply] = iter;
+          reply = co_await request_cluster_bootstrap_info_single(addr);
+          if (reply.cluster_uuid.has_value()) {
+              vlog(
+                clusterlog.info,
+                "Cluster presence detected in other seed servers: {}",
+                *reply.cluster_uuid);
+              _is_cluster_founder = false;
+              co_return;
+          }
+      }));
     if (_is_cluster_founder.has_value()) {
         vassert(
           !*_is_cluster_founder,
@@ -370,9 +393,7 @@ ss::future<> cluster_discovery::discover_founding_brokers() {
     // The other seeds will likely mostly all have -1 as their node_id if their
     // node_id was not set explicitly. Have the returned seed broker node_id
     // populated with indices, relying on the fact that all seed broker's have
-    // identical configuration. Note that the order is preserved from
-    // seed_servers to seed_brokers, but the latter is missing one item for
-    // self.
+    // identical configuration.
     model::node_id::type idx = 0;
     absl::flat_hash_set<model::node_id> unique_node_ids;
     for (auto& broker : seed_brokers) {

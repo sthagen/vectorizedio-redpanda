@@ -971,14 +971,14 @@ configuration::configuration()
   , cloud_storage_enable_remote_read(
       *this,
       "cloud_storage_enable_remote_read",
-      "Enable remote read for all topics",
-      {.visibility = visibility::tunable},
+      "Default remote read config value for new topics",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       false)
   , cloud_storage_enable_remote_write(
       *this,
       "cloud_storage_enable_remote_write",
-      "Enable remote write for all topics",
-      {.visibility = visibility::tunable},
+      "Default remote write value for new topics",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       false)
   , cloud_storage_access_key(
       *this,
@@ -1118,6 +1118,12 @@ configuration::configuration()
       "Interval for cloud storage housekeeping tasks",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       5min)
+  , cloud_storage_enable_compacted_topic_reupload(
+      *this,
+      "cloud_storage_enable_compacted_topic_reupload",
+      "Enable re-uploading data for compacted topics",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , cloud_storage_upload_ctrl_update_interval_ms(
       *this,
       "cloud_storage_upload_ctrl_update_interval_ms",
@@ -1174,6 +1180,14 @@ configuration::configuration()
       "Timeout to check if cache eviction should be triggered",
       {.visibility = visibility::tunable},
       30s)
+  , cloud_storage_max_readers_per_shard(
+      *this,
+      "cloud_storage_max_readers_per_shard",
+      "Maximum concurrent readers of remote data per CPU core.  If unset, "
+      "value of `topic_partitions_per_shard` is used, i.e. one reader per "
+      "partition if the shard is at its maximum partition capacity.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt)
   , superusers(
       *this,
       "superusers",

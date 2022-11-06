@@ -18,6 +18,7 @@
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/health_monitor_types.h"
 #include "cluster/logger.h"
+#include "cluster/members_table.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/scheduling/constraints.h"
 #include "cluster/scheduling/partition_allocator.h"
@@ -63,6 +64,7 @@ topics_frontend::topics_frontend(
   ss::sharded<ss::abort_source>& as,
   ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::sharded<features::feature_table>& features,
+  ss::sharded<cluster::members_table>& members_table,
   config::binding<unsigned> hard_max_disk_usage_ratio)
   : _self(self)
   , _stm(s)
@@ -75,6 +77,7 @@ topics_frontend::topics_frontend(
   , _as(as)
   , _cloud_storage_api(cloud_storage_api)
   , _features(features)
+  , _members_table(members_table)
   , _hard_max_disk_usage_ratio(hard_max_disk_usage_ratio) {}
 
 static bool
@@ -1095,11 +1098,11 @@ ss::future<topics_frontend::capacity_info> topics_frontend::get_health_info(
         co_await ss::max_concurrent_for_each(
           std::move(node_report.topics),
           32,
-          [&info](const topic_status& status) -> ss::future<> {
+          [&info](const topic_status& status) {
               for (const auto& partition : status.partitions) {
                   info.ntp_sizes[partition.id] = partition.size_bytes;
               }
-              co_return;
+              return ss::now();
           });
     }
 
@@ -1141,6 +1144,17 @@ ss::future<std::error_code> topics_frontend::increase_replication_factor(
   cluster::replication_factor new_replication_factor,
   model::timeout_clock::time_point timeout) {
     std::vector<move_topic_replicas_data> new_assignments;
+
+    if (
+      static_cast<size_t>(new_replication_factor)
+      > _members_table.local().all_brokers_count()) {
+        vlog(
+          clusterlog.warn,
+          "New replication factor({}) is greater than number of brokers({})",
+          new_replication_factor,
+          _members_table.local().all_brokers_count());
+        co_return errc::topic_invalid_replication_factor;
+    }
 
     auto tp_metadata = _topics.local().get_topic_metadata(topic);
     if (!tp_metadata.has_value()) {
@@ -1261,13 +1275,13 @@ ss::future<std::error_code> topics_frontend::decrease_replication_factor(
       metadata_ref.get_assignments(),
       32,
       [&new_assignments, &error, topic, new_replication_factor](
-        partition_assignment& assignment) -> ss::future<> {
+        partition_assignment& assignment) {
           if (error) {
-              co_return;
+              return ss::now();
           }
           if (assignment.replicas.size() < new_replication_factor) {
               error = errc::topic_invalid_replication_factor;
-              co_return;
+              return ss::now();
           }
 
           new_assignments.emplace_back(move_topic_replicas_data());
@@ -1277,6 +1291,7 @@ ss::future<std::error_code> topics_frontend::decrease_replication_factor(
             assignment.replicas.begin(),
             new_replication_factor,
             new_assignments.back().replicas.begin());
+          return ss::now();
       });
 
     if (error) {

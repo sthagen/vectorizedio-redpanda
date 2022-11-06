@@ -5,17 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/cloudhut/common/rest"
 	"github.com/go-logr/logr"
 	"github.com/redpanda-data/console/backend/pkg/connect"
 	"github.com/redpanda-data/console/backend/pkg/kafka"
+	"github.com/redpanda-data/console/backend/pkg/proto"
 	"github.com/redpanda-data/console/backend/pkg/schema"
 	redpandav1alpha1 "github.com/redpanda-data/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
 	labels "github.com/redpanda-data/redpanda/src/go/k8s/pkg/labels"
+	"github.com/redpanda-data/redpanda/src/go/k8s/pkg/resources"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/api/admin"
 	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,8 +55,18 @@ func NewConfigMap(
 
 // Ensure implements Resource interface
 func (cm *ConfigMap) Ensure(ctx context.Context) error {
-	if cm.consoleobj.Status.ConfigMapRef != nil {
-		return nil
+	if ref := cm.consoleobj.Status.ConfigMapRef; ref != nil {
+		cm.log.V(debugLogLevel).Info("config map ref still exist", "config map name", cm.consoleobj.Status.ConfigMapRef.Name, "config map namespace", cm.consoleobj.Status.ConfigMapRef.Namespace)
+		// Check ConfigMap is present, in case it is manually deleted
+		err := cm.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &corev1.ConfigMap{})
+		if apierrors.IsNotFound(err) {
+			cm.consoleobj.Status.ConfigMapRef = nil
+			if updateErr := cm.Status().Update(ctx, cm.consoleobj); updateErr != nil {
+				return updateErr
+			}
+			return &resources.RequeueError{Msg: err.Error()}
+		}
+		return err
 	}
 
 	// If old ConfigMaps can't be deleted for any reason, it will not continue reconciliation
@@ -108,6 +122,7 @@ func (cm *ConfigMap) Ensure(ctx context.Context) error {
 	// Other Resources may set Console status if they are also watching GenerationMatchesObserved()
 	cm.consoleobj.Status.ConfigMapRef = &corev1.ObjectReference{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 
+	cm.log.Info("config map ref updated", "config map name", cm.consoleobj.Status.ConfigMapRef.Name, "config map namespace", cm.consoleobj.Status.ConfigMapRef.Namespace)
 	return nil
 }
 
@@ -439,6 +454,16 @@ func (cm *ConfigMap) genKafka(username, password string) kafka.Config {
 			}
 		}
 		schemaRegistry = schema.Config{Enabled: y, URLs: []string{cm.clusterobj.SchemaRegistryAPIURL()}, TLS: tls}
+
+		// Default protobuf values to enable decoding in SchemaRegistry
+		// REF https://app.zenhub.com/workspaces/cloud-62684e2c6635e100149514fd/issues/redpanda-data/cloud/2834
+		k.Protobuf = proto.Config{
+			Enabled: y,
+			SchemaRegistry: proto.SchemaRegistryConfig{
+				Enabled:         y,
+				RefreshInterval: time.Second * 10,
+			},
+		}
 	}
 	k.Schema = schemaRegistry
 
@@ -457,7 +482,7 @@ func (cm *ConfigMap) genKafka(username, password string) kafka.Config {
 	sasl := kafka.SASLConfig{Enabled: false}
 	// Set defaults because Console complains SASL mechanism is not set even if SASL is disabled
 	sasl.SetDefaults()
-	if yes := cm.clusterobj.Spec.EnableSASL; yes {
+	if yes := cm.clusterobj.IsSASLOnInternalEnabled(); yes {
 		sasl = kafka.SASLConfig{
 			Enabled:   yes,
 			Username:  username,
@@ -552,6 +577,7 @@ func (cm *ConfigMap) buildConfigCluster(
 // ConfigMaps are recreated upon Console update, old ones should be cleaned up
 func (cm *ConfigMap) DeleteUnused(ctx context.Context) error {
 	if ref := cm.consoleobj.Status.ConfigMapRef; ref != nil {
+		cm.log.Info("delete unused config map reference", "config map name", ref.Name, "config map namespace", ref.Namespace)
 		if err := cm.delete(ctx, ref.Name); err != nil {
 			return err
 		}

@@ -229,7 +229,7 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 					",",
 				),
 			)
-			proxyAPI, err := parseNamedAddresses(
+			proxyAPI, err := parseNamedAuthNAddresses(
 				proxyAddr,
 				config.DefaultProxyPort,
 			)
@@ -250,7 +250,7 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 					",",
 				),
 			)
-			schemaRegAPI, err := parseNamedAddresses(
+			schemaRegAPI, err := parseNamedAuthNAddresses(
 				schemaRegAddr,
 				config.DefaultSchemaRegPort,
 			)
@@ -312,7 +312,7 @@ func NewStartCommand(fs afero.Fs, launcher rp.Launcher) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if advProxyAPI != nil {
+			if len(advProxyAPI) > 0 {
 				if cfg.Pandaproxy == nil {
 					cfg.Pandaproxy = config.DevDefault().Pandaproxy
 				}
@@ -1042,6 +1042,7 @@ func setContainerModeCfgFields(cfg *config.Config) {
 	cfg.Redpanda.Other["group_topic_partitions"] = 3
 	cfg.Redpanda.Other["storage_min_free_bytes"] = 10485760
 	cfg.Redpanda.Other["topic_partitions_per_shard"] = 1000
+	cfg.Redpanda.Other["fetch_reads_debounce_timeout"] = 10
 }
 
 func getOrFindInstallDir(fs afero.Fs, installDir string) (string, error) {

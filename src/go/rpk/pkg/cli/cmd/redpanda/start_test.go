@@ -244,10 +244,11 @@ func TestStartCommand(t *testing.T) {
 			// We are adding now this cluster properties as default with
 			// redpanda.developer_mode: true.
 			c.Redpanda.Other = map[string]interface{}{
-				"auto_create_topics_enabled": true,
-				"group_topic_partitions":     3,
-				"storage_min_free_bytes":     10485760,
-				"topic_partitions_per_shard": 1000,
+				"auto_create_topics_enabled":   true,
+				"group_topic_partitions":       3,
+				"storage_min_free_bytes":       10485760,
+				"topic_partitions_per_shard":   1000,
+				"fetch_reads_debounce_timeout": 10,
 			}
 
 			conf, err := new(config.Params).Load(fs)
@@ -1128,6 +1129,85 @@ func TestStartCommand(t *testing.T) {
 			)
 		},
 	}, {
+		name: "it should leave cfg_file.pandaproxy untouched if no pandaproxy flags are passed",
+		args: []string{
+			"--install-dir", "/var/lib/redpanda",
+		},
+		before: func(fs afero.Fs) error {
+			cfg := config.DevDefault()
+			cfg.Pandaproxy = &config.Pandaproxy{
+				PandaproxyAPI: []config.NamedAuthNSocketAddress{
+					{Address: "127.0.0.1", Port: 8888, Name: "advertised"},
+				},
+				PandaproxyAPITLS: []config.ServerTLS{
+					{Name: "my-tls", KeyFile: "redpanda.key"},
+				},
+				AdvertisedPandaproxyAPI: []config.NamedSocketAddress{
+					{Address: "foo.com", Port: 8888, Name: "advertised"},
+				},
+				Other: map[string]interface{}{"foo": "bar"},
+			}
+			return cfg.Write(fs)
+		},
+		postCheck: func(fs afero.Fs, _ *redpanda.RedpandaArgs, st *testing.T) {
+			conf, err := new(config.Params).Load(fs)
+			require.NoError(st, err)
+			expectedPandaProxy := &config.Pandaproxy{
+				PandaproxyAPI: []config.NamedAuthNSocketAddress{
+					{Address: "127.0.0.1", Port: 8888, Name: "advertised"},
+				},
+				PandaproxyAPITLS: []config.ServerTLS{
+					{Name: "my-tls", KeyFile: "redpanda.key"},
+				},
+				AdvertisedPandaproxyAPI: []config.NamedSocketAddress{
+					{Address: "foo.com", Port: 8888, Name: "advertised"},
+				},
+				Other: map[string]interface{}{"foo": "bar"},
+			}
+			require.Exactly(st, conf.Pandaproxy, expectedPandaProxy)
+		},
+	}, {
+		name: "it should override cfg_file.pandaproxy.advertised_pandaproxy_api with the --advertise-pandaproxy-addr",
+		args: []string{
+			"--install-dir", "/var/lib/redpanda",
+			"--advertise-pandaproxy-addr", "changed://192.168.34.32:8083",
+		},
+		before: func(fs afero.Fs) error {
+			cfg := config.DevDefault()
+			cfg.Pandaproxy = &config.Pandaproxy{
+				PandaproxyAPI: []config.NamedAuthNSocketAddress{
+					{Address: "127.0.0.1", Port: 8888, Name: "advertised"},
+				},
+				PandaproxyAPITLS: []config.ServerTLS{
+					{Name: "my-tls", KeyFile: "redpanda.key"},
+				},
+				AdvertisedPandaproxyAPI: []config.NamedSocketAddress{
+					{Address: "foo.com", Port: 8888, Name: "advertised"},
+				},
+				Other: map[string]interface{}{"foo": "bar"},
+			}
+			return cfg.Write(fs)
+		},
+		postCheck: func(fs afero.Fs, _ *redpanda.RedpandaArgs, st *testing.T) {
+			conf, err := new(config.Params).Load(fs)
+			require.NoError(st, err)
+			// we compare the whole pandaproxy field to check we are not
+			// changing anything else.
+			expectedPandaProxy := &config.Pandaproxy{
+				PandaproxyAPI: []config.NamedAuthNSocketAddress{
+					{Address: "127.0.0.1", Port: 8888, Name: "advertised"},
+				},
+				PandaproxyAPITLS: []config.ServerTLS{
+					{Name: "my-tls", KeyFile: "redpanda.key"},
+				},
+				AdvertisedPandaproxyAPI: []config.NamedSocketAddress{
+					{Address: "192.168.34.32", Port: 8083, Name: "changed"},
+				},
+				Other: map[string]interface{}{"foo": "bar"},
+			}
+			require.Exactly(st, conf.Pandaproxy, expectedPandaProxy)
+		},
+	}, {
 		name: "it should parse the --advertise-pandaproxy-addr and persist it",
 		args: []string{
 			"--install-dir", "/var/lib/redpanda",
@@ -1404,10 +1484,11 @@ func TestStartCommand(t *testing.T) {
 			require.Nil(st, conf.Redpanda.ID)
 			require.Equal(st, true, conf.Redpanda.DeveloperMode)
 			expectedClusterFields := map[string]interface{}{
-				"auto_create_topics_enabled": true,
-				"group_topic_partitions":     3,
-				"storage_min_free_bytes":     10485760,
-				"topic_partitions_per_shard": 1000,
+				"auto_create_topics_enabled":   true,
+				"group_topic_partitions":       3,
+				"storage_min_free_bytes":       10485760,
+				"topic_partitions_per_shard":   1000,
+				"fetch_reads_debounce_timeout": 10,
 			}
 			require.Equal(st, expectedClusterFields, conf.Redpanda.Other)
 		},
@@ -1453,10 +1534,11 @@ func TestStartCommand(t *testing.T) {
 
 			// Config:
 			expectedClusterFields := map[string]interface{}{
-				"auto_create_topics_enabled": true,
-				"group_topic_partitions":     3,
-				"storage_min_free_bytes":     10485760,
-				"topic_partitions_per_shard": 1000,
+				"auto_create_topics_enabled":   true,
+				"group_topic_partitions":       3,
+				"storage_min_free_bytes":       10485760,
+				"topic_partitions_per_shard":   1000,
+				"fetch_reads_debounce_timeout": 10,
 			}
 			require.Nil(st, conf.Redpanda.ID)
 			require.Equal(st, true, conf.Redpanda.DeveloperMode)
@@ -1495,8 +1577,9 @@ func TestStartCommand(t *testing.T) {
 				"auto_create_topics_enabled": false,
 				"group_topic_partitions":     1,
 				// rest of --mode dev-container cfg fields
-				"storage_min_free_bytes":     10485760,
-				"topic_partitions_per_shard": 1000,
+				"storage_min_free_bytes":       10485760,
+				"topic_partitions_per_shard":   1000,
+				"fetch_reads_debounce_timeout": 10,
 			}
 			require.Exactly(st, expectedClusterFields, conf.Redpanda.Other)
 		},

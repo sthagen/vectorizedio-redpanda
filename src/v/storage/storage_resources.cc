@@ -183,10 +183,10 @@ bool storage_resources::offset_translator_take_bytes(
   int32_t bytes, ssx::semaphore_units& units) {
     vlog(
       stlog.trace,
-      "offset_translator_take_bytes {} (current {})",
+      "offset_translator_take_bytes {} += {} (current {})",
       units.count(),
       bytes,
-      _offset_translator_dirty_bytes.current());
+      _offset_translator_dirty_bytes.available_units());
 
     return filter_checkpoints(
       _offset_translator_dirty_bytes.take(bytes), units);
@@ -199,7 +199,7 @@ bool storage_resources::configuration_manager_take_bytes(
       "configuration_manager_take_bytes {} += {} (current {})",
       units.count(),
       bytes,
-      _configuration_manager_dirty_bytes.current());
+      _configuration_manager_dirty_bytes.available_units());
 
     return filter_checkpoints(
       _configuration_manager_dirty_bytes.take(bytes), units);
@@ -212,13 +212,13 @@ bool storage_resources::stm_take_bytes(
       "stm_take_bytes {} += {} (current {})",
       units.count(),
       bytes,
-      _stm_dirty_bytes.current());
+      _stm_dirty_bytes.available_units());
 
     return filter_checkpoints(_stm_dirty_bytes.take(bytes), units);
 }
 
 bool storage_resources::filter_checkpoints(
-  adjustable_allowance::take_result&& tr, ssx::semaphore_units& units) {
+  adjustable_semaphore::take_result&& tr, ssx::semaphore_units& units) {
     // Adopt units from the take_result into the caller's unit store
     if (units.count()) {
         units.adopt(std::move(tr.units));
@@ -229,7 +229,7 @@ bool storage_resources::filter_checkpoints(
     return tr.checkpoint_hint && (units.count() > _min_checkpoint_bytes);
 }
 
-adjustable_allowance::take_result
+adjustable_semaphore::take_result
 storage_resources::compaction_index_take_bytes(size_t bytes) {
     vlog(
       stlog.trace,

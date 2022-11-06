@@ -14,8 +14,11 @@
 #include "cloud_storage/base_manifest.h"
 #include "cloud_storage/types.h"
 #include "json/document.h"
+#include "model/metadata.h"
 #include "model/timestamp.h"
 #include "serde/serde.h"
+
+#include <deque>
 
 namespace cloud_storage {
 
@@ -74,23 +77,43 @@ class partition_manifest final : public base_manifest {
 public:
     using segment_meta = cloud_storage::segment_meta;
 
+    /// Compact representation of the segment_meta
+    /// that can be used to generate a segment path in S3
+    struct lw_segment_meta {
+        model::initial_revision_id ntp_revision;
+        model::offset base_offset;
+        model::offset committed_offset;
+        /// Archiver term, same as in segment_meta (can be set to -inf)
+        model::term_id archiver_term;
+        /// Term of the segment itself
+        model::term_id segment_term;
+        /// Size of the segment if segment_name_format::v2 is used,
+        /// or 0 otherwise. The sname_format field is not added explicitly
+        /// but its value is encoded using size-bytes field.
+        size_t size_bytes;
+
+        auto operator<=>(const lw_segment_meta&) const = default;
+
+        static lw_segment_meta convert(const segment_meta& m);
+        static segment_meta convert(const lw_segment_meta& m);
+    };
+
     /// Segment key in the maifest
-    using key = segment_name_components;
+    using key = model::offset;
     using value = segment_meta;
     using segment_map = absl::btree_map<key, value>;
-    using segment_multimap = absl::btree_multimap<key, value>;
+    using replaced_segments_list = std::vector<lw_segment_meta>;
     using const_iterator = segment_map::const_iterator;
     using const_reverse_iterator = segment_map::const_reverse_iterator;
 
     /// Generate segment name to use in the cloud
-    static segment_name
-    generate_remote_segment_name(const key& k, const value& val);
+    static segment_name generate_remote_segment_name(const value& val);
     /// Generate segment path to use in the cloud
-    static remote_segment_path generate_remote_segment_path(
-      const model::ntp& ntp, const key& k, const value& val);
+    static remote_segment_path
+    generate_remote_segment_path(const model::ntp& ntp, const value& val);
     /// Generate segment path to use locally
-    static local_segment_path generate_local_segment_path(
-      const model::ntp& ntp, const key& k, const value& val);
+    static local_segment_path
+    generate_local_segment_path(const model::ntp& ntp, const value& val);
 
     /// Create empty manifest that supposed to be updated later
     partition_manifest();
@@ -104,6 +127,7 @@ public:
       model::initial_revision_id rev,
       model::offset so,
       model::offset lo,
+      model::offset lco,
       model::offset insync,
       const std::vector<segment_t>& segments,
       const std::vector<segment_t>& replaced)
@@ -111,6 +135,7 @@ public:
       , _rev(rev)
       , _last_offset(lo)
       , _start_offset(so)
+      , _last_uploaded_compacted_offset(lco)
       , _insync_offset(insync) {
         for (auto nm : replaced) {
             auto key = parse_segment_name(nm.name);
@@ -119,7 +144,7 @@ public:
               "can't parse name of the replaced segment in the manifest '{}'",
               nm.name);
             nm.meta.segment_term = key->term;
-            _replaced.insert(std::make_pair(key.value(), nm.meta));
+            _replaced.push_back(lw_segment_meta::convert(nm.meta));
         }
         for (auto nm : segments) {
             auto maybe_key = parse_segment_name(nm.name);
@@ -128,7 +153,7 @@ public:
               "can't parse name of the segment in the manifest '{}'",
               nm.name);
             nm.meta.segment_term = maybe_key->term;
-            _segments.insert(std::make_pair(*maybe_key, nm.meta));
+            _segments.insert(std::make_pair(nm.meta.base_offset, nm.meta));
         }
     }
 
@@ -155,6 +180,9 @@ public:
     /// Get starting offset
     std::optional<model::offset> get_start_offset() const;
 
+    /// Get last uploaded compacted offset
+    model::offset get_last_uploaded_compacted_offset() const;
+
     /// Get revision
     model::initial_revision_id get_revision_id() const;
 
@@ -162,8 +190,7 @@ public:
     std::optional<std::reference_wrapper<const segment_meta>>
     timequery(model::timestamp t) const;
 
-    remote_segment_path
-    generate_segment_path(const key&, const segment_meta&) const;
+    remote_segment_path generate_segment_path(const segment_meta&) const;
 
     /// Return iterator to the begining(end) of the segments list
     const_iterator begin() const;
@@ -263,9 +290,10 @@ private:
     model::initial_revision_id _rev;
     segment_map _segments;
     /// Collection of replaced but not yet removed segments
-    segment_multimap _replaced;
+    replaced_segments_list _replaced;
     model::offset _last_offset;
     model::offset _start_offset;
+    model::offset _last_uploaded_compacted_offset;
     model::offset _insync_offset;
 };
 

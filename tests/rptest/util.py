@@ -8,16 +8,17 @@
 # by the Apache License, Version 2.0
 
 import os
+import pprint
 import time
+from contextlib import contextmanager
 from typing import Optional
 
-from contextlib import contextmanager
+from ducktape.errors import TimeoutError
+from ducktape.utils.util import wait_until
 from requests.exceptions import HTTPError
 
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.services.storage import Segment
-
-from ducktape.errors import TimeoutError
 
 
 class Scale:
@@ -50,31 +51,6 @@ class Scale:
     @property
     def release(self):
         return self._scale == Scale.RELEASE
-
-
-def wait_until(condition,
-               timeout_sec,
-               backoff_sec=.1,
-               err_msg="",
-               retry_on_exc=False):
-    start = time.time()
-    stop = start + timeout_sec
-    last_exception = None
-    while time.time() < stop:
-        try:
-            if condition():
-                return
-            else:
-                last_exception = None
-        except BaseException as e:
-            last_exception = e
-            if not retry_on_exc:
-                raise e
-        time.sleep(backoff_sec)
-
-    # it is safe to call Exception from None - will be just treated as a normal exception
-    raise TimeoutError(
-        err_msg() if callable(err_msg) else err_msg) from last_exception
 
 
 def wait_until_result(condition, *args, **kwargs):
@@ -170,6 +146,25 @@ def produce_until_segments(redpanda,
                err_msg="Segments were not created")
 
 
+def wait_until_segments(redpanda,
+                        topic,
+                        partition_idx,
+                        count,
+                        timeout_sec=180):
+    def done():
+        topic_partitions = segments_count(redpanda, topic, partition_idx)
+        redpanda.logger.debug(
+            f'wait_until_segments: '
+            f'segment count: {list(segments_count(redpanda, topic, partition_idx))}'
+        )
+        return all([p >= count for p in topic_partitions])
+
+    wait_until(done,
+               timeout_sec=timeout_sec,
+               backoff_sec=2,
+               err_msg=f"{count} segments were not created")
+
+
 def wait_for_removal_of_n_segments(redpanda, topic: str, partition_idx: int,
                                    n: int,
                                    original_snapshot: dict[str,
@@ -186,10 +181,11 @@ def wait_for_removal_of_n_segments(redpanda, topic: str, partition_idx: int,
     """
     def segments_removed():
         current_snapshot = redpanda.storage(all_nodes=True).segments_by_node(
-            "kafka", topic, 0)
+            "kafka", topic, partition_idx)
 
         redpanda.logger.debug(
-            f"Current segment snapshot for topic {topic}: {current_snapshot}")
+            f"Current segment snapshot for topic {topic}: {pprint.pformat(current_snapshot, indent=1)}"
+        )
 
         # Check how many of the original segments were removed
         # for each of the nodes in the provided snapshot.
@@ -226,7 +222,8 @@ def wait_for_local_storage_truncate(redpanda,
         storage = redpanda.storage(sizes=True)
         sizes = []
         for node_partition in storage.partitions("kafka", topic):
-            total_size = sum(s.size for s in node_partition.segments.values())
+            total_size = sum(s.size if s.size else 0
+                             for s in node_partition.segments.values())
             redpanda.logger.debug(
                 f"  {topic}/{partition_idx} node {node_partition.node.name} local size {total_size} ({len(node_partition.segments)} segments)"
             )

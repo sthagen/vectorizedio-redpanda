@@ -44,8 +44,10 @@ from rptest.utils.si_utils import (
     TRANSIENT_ERRORS,
     PathMatcher,
     BLOCK_SIZE,
-    S3View,
+    S3Snapshot,
 )
+
+CLOUD_STORAGE_SEGMENT_MAX_UPLOAD_INTERVAL_SEC = 10
 
 
 class BaseCase:
@@ -650,10 +652,11 @@ class FastCheck(BaseCase):
         for differences caused because configuration batches are not written to restored data.
         """
         non_data_batches_per_ntp = defaultdict(lambda: 0)
-        s3_view = S3View(expected_topics, self._s3, self._bucket, self.logger)
+        s3_snapshot = S3Snapshot(expected_topics, self._s3, self._bucket,
+                                 self.logger)
         segments = [
             item for item in self._s3.list_objects(self._bucket)
-            if s3_view.is_segment_part_of_a_manifest(item)
+            if s3_snapshot.is_segment_part_of_a_manifest(item)
         ]
         for seg in segments:
             components = parse_s3_segment_path(seg.Key)
@@ -942,11 +945,11 @@ class TopicRecoveryTest(RedpandaTest):
                  test_context: TestContext,
                  num_brokers: Optional[int] = None,
                  extra_rp_conf=dict()):
-        si_settings = SISettings(
-            cloud_storage_reconciliation_interval_ms=50,
-            cloud_storage_max_connections=5,
-            cloud_storage_segment_max_upload_interval_sec=10,
-            log_segment_size=default_log_segment_size)
+        si_settings = SISettings(cloud_storage_reconciliation_interval_ms=50,
+                                 cloud_storage_max_connections=5,
+                                 cloud_storage_segment_max_upload_interval_sec=
+                                 CLOUD_STORAGE_SEGMENT_MAX_UPLOAD_INTERVAL_SEC,
+                                 log_segment_size=default_log_segment_size)
 
         self.s3_bucket = si_settings.cloud_storage_bucket
 
@@ -1154,10 +1157,12 @@ class TopicRecoveryTest(RedpandaTest):
                 return False
             return True
 
-        wait_until(verify,
-                   timeout_sec=timeout.total_seconds(),
-                   backoff_sec=1,
-                   err_msg='objects not found in S3')
+        wait_until(
+            verify,
+            timeout_sec=timeout.total_seconds(),
+            # Upload should happen not more than in cloud_storage_segment_max_upload_interval_sec
+            backoff_sec=CLOUD_STORAGE_SEGMENT_MAX_UPLOAD_INTERVAL_SEC / 2,
+            err_msg='objects not found in S3')
 
     def _wait_for_topic(self,
                         recovered_topics,
