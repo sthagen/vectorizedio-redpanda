@@ -459,6 +459,8 @@ class RedpandaService(Service):
 
     RAISE_ON_ERRORS_KEY = "raise_on_error"
 
+    TRIM_LOGS_KEY = "trim_logs"
+
     LOG_LEVEL_KEY = "redpanda_log_level"
     DEFAULT_LOG_LEVEL = "info"
 
@@ -507,10 +509,6 @@ class RedpandaService(Service):
         "backtraces": {
             "path": BACKTRACE_CAPTURE,
             "collect_default": True
-        },
-        "data": {
-            "path": DATA_DIR,
-            "collect_default": False
         }
     }
 
@@ -589,6 +587,8 @@ class RedpandaService(Service):
 
         self._dedicated_nodes = self._context.globals.get(
             self.DEDICATED_NODE_KEY, False)
+
+        self._trim_logs = self._context.globals.get(self.TRIM_LOGS_KEY, True)
 
         if resource_settings is None:
             resource_settings = ResourceSettings()
@@ -684,9 +684,6 @@ class RedpandaService(Service):
     def require_client_auth(self):
         return self._security.require_client_auth
 
-    def mark_data_dir_for_collection(self):
-        self.logs["data"]["collect_default"] = True
-
     @property
     def dedicated_nodes(self):
         """
@@ -768,12 +765,12 @@ class RedpandaService(Service):
                 return int(line.split()[2])
         assert False, "couldn't parse df output"
 
-    def _for_nodes(self, nodes, cb: callable, *, parallel: bool):
+    def _for_nodes(self, nodes, cb: callable, *, parallel: bool) -> list:
         if not parallel:
             # Trivial case: just loop and call
             for n in nodes:
                 cb(n)
-            return
+            return list(map(cb, nodes))
 
         n_workers = len(nodes)
         if n_workers > 0:
@@ -781,7 +778,9 @@ class RedpandaService(Service):
                     max_workers=n_workers) as executor:
                 # The list() wrapper is to cause futures to be evaluated here+now
                 # (including throwing any exceptions) and not just spawned in background.
-                list(executor.map(cb, nodes))
+                return list(executor.map(cb, nodes))
+        else:
+            return []
 
     def _startup_poll_interval(self, first_start):
         """
@@ -960,6 +959,45 @@ class RedpandaService(Service):
             cmd = f"LLVM_PROFILE_FILE=\"{RedpandaService.COVERAGE_PROFRAW_CAPTURE}\" " + cmd
 
         node.account.ssh(cmd)
+
+    def all_up(self):
+        def check_node(node):
+            pids = self.pids(node)
+            if not pids:
+                self.logger.warn(f"No redpanda PIDs found on {node.name}")
+                return False
+
+            for p in pids:
+                if not node.account.exists(f"/proc/{p}"):
+                    self.logger.warn(f"PID {p} (node {node.name}) dead")
+                    return False
+
+            # fall through
+            return True
+
+        return all(self._for_nodes(self._started, check_node, parallel=True))
+
+    def wait_until(self, fn, timeout_sec, backoff_sec, err_msg=None):
+        """
+        Cluster-aware variant of wait_until, which will fail out
+        early if a node dies.
+
+        This is useful for long waits, which would otherwise not notice
+        a test failure until the end of the timeout, even if redpanda
+        already crashed.
+        """
+        def wrapped():
+            r = fn()
+            if not r:
+                # If we're going to wait + retry, check the cluster is
+                # up before doing so.
+                assert self.all_up()
+            return r
+
+        wait_until(wrapped,
+                   timeout_sec=timeout_sec,
+                   backoff_sec=backoff_sec,
+                   err_msg=err_msg)
 
     def signal_redpanda(self, node, signal=signal.SIGKILL, idempotent=False):
         """
@@ -1669,6 +1707,9 @@ class RedpandaService(Service):
             self._installer.reset_current_install([node])
 
     def trim_logs(self):
+        if not self._trim_logs:
+            return
+
         # Excessive logging may cause disks to fill up quickly.
         # Call this method to removes TRACE and DEBUG log lines from redpanda logs
         # Ensure this is only done on tests that have passed

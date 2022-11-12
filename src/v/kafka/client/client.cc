@@ -63,9 +63,9 @@ ss::future<> client::do_connect(net::unresolved_address addr) {
     return make_broker(unknown_node_id, addr, _config)
       .then([this](shared_broker_t broker) {
           return broker->dispatch(metadata_request{.list_all_topics = true})
-            .then([this, broker](metadata_response res) {
-                return apply(std::move(res));
-            });
+            .then(
+              [this](metadata_response res) { return apply(std::move(res)); })
+            .finally([broker]() {});
       });
 }
 
@@ -303,32 +303,57 @@ client::create_topic(kafka::creatable_topic req) {
 
 ss::future<list_offsets_response>
 client::list_offsets(model::topic_partition tp) {
-    using result = ss::future<list_offsets_response>;
-    return gated_retry_with_mitigation([this, _tp = std::move(tp)]() -> result {
-        auto me = this;
-        auto tp = _tp;
-        auto node_id = co_await me->_topic_cache.leader(tp);
-        auto broker = co_await me->_brokers.find(node_id);
-        auto res = co_await broker->dispatch(kafka::list_offsets_request{
-          .data = {.topics{
-            {{.name{tp.topic},
-              .partitions{
-                {{.partition_index{tp.partition}, .max_num_offsets = 1}}}}}}}});
-
-        const auto& topics = res.data.topics;
-        auto ec = error_code::none;
-        if (topics.size() != 1 || topics[0].partitions.size() != 1) {
-            co_return ss::coroutine::exception(std::make_exception_ptr(
-              broker_error(node_id, error_code::unknown_server_error)));
-        }
-        ec = topics[0].partitions[0].error_code;
-        if (ec != error_code::none) {
-            co_return ss::coroutine::exception(
-              std::make_exception_ptr(partition_error(tp, ec)));
-        }
-        co_return res;
-    });
+    return gated_retry_with_mitigation(
+      [this, tp{std::move(tp)}]() { return do_list_offsets(tp); });
 }
+
+ss::future<list_offsets_response>
+client::do_list_offsets(model::topic_partition tp) {
+    auto node_id = co_await _topic_cache.leader(tp);
+    auto broker = co_await _brokers.find(node_id);
+    auto res = co_await broker->dispatch(kafka::list_offsets_request{
+      .data = {.topics{
+        {{.name{tp.topic},
+          .partitions{
+            {{.partition_index{tp.partition}, .max_num_offsets = 1}}}}}}}});
+
+    const auto& topics = res.data.topics;
+    auto ec = error_code::none;
+    if (topics.size() != 1 || topics[0].partitions.size() != 1) {
+        co_return ss::coroutine::exception(std::make_exception_ptr(
+          broker_error(node_id, error_code::unknown_server_error)));
+    }
+    ec = topics[0].partitions[0].error_code;
+    if (ec != error_code::none) {
+        co_return ss::coroutine::exception(
+          std::make_exception_ptr(partition_error(tp, ec)));
+    }
+    co_return res;
+}
+
+namespace {
+ss::future<fetch_response> maybe_throw_exception(
+  shared_broker_t b, model::topic_partition tp, fetch_response res) {
+    if (res.data.error_code != error_code::none) {
+        return ss::make_exception_future<fetch_response>(
+          broker_error(b->id(), res.data.error_code));
+    }
+
+    const auto& topics = res.data.topics;
+    if (topics.size() != 1 || topics[0].partitions.size() != 1) {
+        return ss::make_exception_future<fetch_response>(
+          partition_error(tp, error_code::unknown_server_error));
+    }
+
+    const auto& part = topics[0].partitions[0];
+    if (part.error_code != error_code::none) {
+        return ss::make_exception_future<fetch_response>(
+          partition_error(tp, part.error_code));
+    }
+
+    return ss::make_ready_future<fetch_response>(std::move(res));
+}
+} // namespace
 
 ss::future<fetch_response> client::fetch_partition(
   model::topic_partition tp,
@@ -350,7 +375,11 @@ ss::future<fetch_response> client::fetch_partition(
                            return _brokers.find(leader);
                        })
                        .then([&tp, &build_request](shared_broker_t&& b) {
-                           return b->dispatch(build_request(tp));
+                           return b->dispatch(build_request(tp))
+                             .then([b, &tp](fetch_response res) {
+                                 return maybe_throw_exception(
+                                   b, tp, std::move(res));
+                             });
                        });
                  })
             .handle_exception([&tp](std::exception_ptr ex) {
@@ -498,6 +527,22 @@ ss::future<kafka::fetch_response> client::consumer_fetch(
               return c->fetch(
                 std::chrono::duration_cast<std::chrono::milliseconds>(timeout),
                 max_bytes);
+          })
+          .then([this](kafka::fetch_response res) {
+              bool has_error = std::any_of(
+                res.data.topics.begin(),
+                res.data.topics.end(),
+                [](auto const& topics) {
+                    return std::any_of(
+                      topics.partitions.begin(),
+                      topics.partitions.end(),
+                      [](const auto& p) {
+                          return p.error_code != error_code::none;
+                      });
+                });
+              return (has_error ? _wait_or_start_update_metadata() : ss::now())
+                .then(
+                  [res{std::move(res)}]() mutable { return std::move(res); });
           });
     });
 }

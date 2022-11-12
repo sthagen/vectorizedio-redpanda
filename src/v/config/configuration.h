@@ -232,6 +232,7 @@ struct configuration final : public config_store {
       cloud_storage_readreplica_manifest_sync_timeout_ms;
     property<std::chrono::milliseconds> cloud_storage_metadata_sync_timeout_ms;
     property<std::chrono::milliseconds> cloud_storage_housekeeping_interval_ms;
+    property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
     property<bool> cloud_storage_enable_compacted_topic_reupload;
 
     // Archival upload controller
@@ -251,6 +252,8 @@ struct configuration final : public config_store {
     property<size_t> cloud_storage_cache_size;
     property<std::chrono::milliseconds> cloud_storage_cache_check_interval_ms;
     property<std::optional<uint32_t>> cloud_storage_max_readers_per_shard;
+    property<std::optional<uint32_t>>
+      cloud_storage_max_materialized_segments_per_shard;
 
     one_or_many_property<ss::sstring> superusers;
 
@@ -295,6 +298,7 @@ struct configuration final : public config_store {
     bounded_property<unsigned> storage_space_alert_free_threshold_percent;
     bounded_property<size_t> storage_space_alert_free_threshold_bytes;
     bounded_property<size_t> storage_min_free_bytes;
+    property<bool> storage_strict_data_init;
     // metrics reporter
     property<bool> enable_metrics_reporter;
     property<std::chrono::milliseconds> metrics_reporter_tick_interval;

@@ -119,6 +119,8 @@ public:
 
     ss::sharded<ss::abort_source>& get_abort_source() { return _as; }
 
+    ss::sharded<storage::api>& get_storage() { return _storage; }
+
     bool is_raft0_leader() const {
         vassert(
           ss::this_shard_id() == ss::shard_id(0),
@@ -153,7 +155,7 @@ private:
      * Create a \c bootstrap_cluster_cmd, replicate-and-wait it to the current
      * quorum, retry infinitely if replicate-and-wait fails.
      */
-    ss::future<> create_cluster();
+    ss::future<> create_cluster(bootstrap_cluster_cmd_data cmd_data);
 
     ss::future<> cluster_creation_hook(cluster_discovery& discovery);
 

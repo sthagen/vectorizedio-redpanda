@@ -154,6 +154,7 @@ public:
         bool match(abort_index idx) {
             return idx.first == first && idx.last == last;
         }
+        friend std::ostream& operator<<(std::ostream&, const abort_snapshot&);
     };
 
     static constexpr int8_t prepare_control_record_version{0};
@@ -553,6 +554,10 @@ private:
           features::feature::transaction_ga);
     }
 
+    // Defines the commit offset range for the stm bootstrap.
+    // Set on first apply upcall and used to identify if the
+    // stm is still replaying the log.
+    std::optional<model::offset> _bootstrap_committed_offset;
     ss::basic_rwlock<> _state_lock;
     bool _is_abort_idx_reduction_requested{false};
     absl::flat_hash_map<model::producer_id, ss::lw_shared_ptr<mutex>> _tx_locks;

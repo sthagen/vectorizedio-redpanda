@@ -102,6 +102,8 @@ group::group(
   , _ctx_txlog(cluster::txlog, *this)
   , _md_serializer(std::move(serializer))
   , _enable_group_metrics(group_metrics)
+  , _abort_interval_ms(config::shard_local_cfg()
+                         .abort_timed_out_transactions_interval_ms.value())
   , _tx_frontend(tx_frontend)
   , _feature_table(feature_table) {
     _state = md.members.empty() ? group_state::empty : group_state::stable;
@@ -2717,11 +2719,17 @@ ss::future<error_code> group::remove() {
               "Replicated group delete record {} at offset {}",
               _id,
               result.value().last_offset);
+        } else if (result.error() == raft::errc::shutting_down) {
+            vlog(
+              klog.debug,
+              "Cannot replicate group {} delete records due to shutdown",
+              _id);
         } else {
             vlog(
               klog.error,
-              "Error occured replicating group {} delete records {}",
+              "Error occured replicating group {} delete records {} ({})",
               _id,
+              result.error().message(),
               result.error());
         }
     } catch (const std::exception& e) {

@@ -13,10 +13,11 @@
 
 #include "config/config_store.h"
 #include "config/rest_authn_endpoint.h"
+#include "hashing/jump_consistent_hash.h"
+#include "hashing/xx.h"
 #include "kafka/client/client.h"
 #include "pandaproxy/json/types.h"
 #include "pandaproxy/kafka_client_cache.h"
-#include "pandaproxy/sharded_client_cache.h"
 #include "pandaproxy/types.h"
 #include "redpanda/request_auth.h"
 #include "seastarx.h"
@@ -38,6 +39,11 @@
 #include <type_traits>
 
 namespace pandaproxy {
+
+inline ss::shard_id user_shard(const ss::sstring& name) {
+    auto hash = xxhash_64(name.data(), name.length());
+    return jump_consistent_hash(hash, ss::smp::count);
+}
 
 namespace impl {
 
@@ -132,8 +138,14 @@ private:
 
 template<typename service_t>
 class ctx_server : public server {
+    using base = server;
+
 public:
-    using server::server;
+    using reply_t = base::reply_t;
+    using function_handler
+      = ss::noncopyable_function<ss::future<reply_t>(request_t, reply_t)>;
+
+    using base::server;
 
     struct context_t : server::context_t {
         service_t& service;
@@ -182,8 +194,14 @@ public:
 
         template<std::invocable<kafka_client_cache&> Func>
         auto dispatch(Func&& func) {
-            return service().client_cache().invoke_on_cache(
-              user, std::forward<Func>(func));
+            // Access the cache on the appropriate shard.
+            return service().client_cache().invoke_on(
+              user_shard(user.name),
+              ss::smp_submit_to_options{context().smp_sg},
+              [func{std::forward<Func>(func)}](
+                kafka_client_cache& cache) mutable {
+                  return std::invoke(std::move(func), cache);
+              });
         }
 
         template<std::invocable<kafka::client::client&> Func>
@@ -196,9 +214,8 @@ public:
             case config::rest_authn_method::http_basic: {
                 return dispatch([this, func{std::forward<Func>(func)}](
                                   kafka_client_cache& cache) mutable {
-                    auto client = cache.fetch_or_insert(user, authn_method);
-                    return std::invoke(std::forward<Func>(func), *client)
-                      .finally([client] {});
+                    return cache.with_client_for(
+                      user, authn_method, std::forward<Func>(func));
                 });
             }
             }
@@ -214,9 +231,8 @@ public:
             case config::rest_authn_method::http_basic: {
                 return dispatch([this, func{std::forward<Func>(func)}](
                                   kafka_client_cache& cache) mutable {
-                    auto client = cache.fetch_or_insert(user, authn_method);
-                    return std::invoke(std::forward<Func>(func), *client)
-                      .finally([client] {});
+                    return cache.with_client_for(
+                      user, authn_method, std::forward<Func>(func));
                 });
             }
             }
@@ -245,6 +261,10 @@ public:
                   auth_result.get_username(), auth_result.get_password()};
             }
         }
+
+        using reply_t = typename base::reply_t;
+        using function_handler
+          = ss::noncopyable_function<ss::future<reply_t>(request_t, reply_t)>;
 
         credential_t user;
         config::rest_authn_method authn_method;

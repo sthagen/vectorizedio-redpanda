@@ -9,10 +9,11 @@
 import os
 import random
 
-from ducktape.mark import ok_to_fail
+from ducktape.mark import ok_to_fail, parametrize
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
 
+from rptest.utils.mode_checks import skip_debug_mode
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
@@ -29,6 +30,7 @@ from rptest.util import (
     wait_for_removal_of_n_segments,
 )
 from rptest.utils.si_utils import S3Snapshot
+from rptest.utils.mode_checks import skip_debug_mode
 
 
 class EndToEndShadowIndexingBase(EndToEndTest):
@@ -127,7 +129,7 @@ class EndToEndShadowIndexingTestCompactedTopic(EndToEndShadowIndexingBase):
         cleanup_policy="compact,delete",
         segment_bytes=EndToEndShadowIndexingBase.segment_size // 2), )
 
-    @ok_to_fail
+    @skip_debug_mode
     @cluster(num_nodes=5)
     def test_write(self):
         # Set compaction interval high at first, so we can get enough segments in log
@@ -270,24 +272,24 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
         # Topic creation happens here
         super().setUp()
 
+    @cluster(num_nodes=8)
+    @parametrize(short_retention=False)
+    @parametrize(short_retention=True)
+    @skip_debug_mode
+    def test_create_or_delete_topics_while_busy(self, short_retention):
+        """
+        :param short_retention: whether to run with a very short retention globally, or just
+               a short target for local retention (see issue #7092)
+        """
         # Remote write/read and retention set at topic level
         rpk = RpkTool(self.redpanda)
         rpk.alter_topic_config(self.topic, 'redpanda.remote.write', 'true')
         rpk.alter_topic_config(self.topic, 'redpanda.remote.read', 'true')
-        rpk.alter_topic_config(self.topic, 'retention.bytes',
-                               str(self.segment_size))
 
-    @cluster(num_nodes=8)
-    def test_create_or_delete_topics_while_busy(self):
-        self.logger.info(f"Environment: {os.environ}")
-        if self.debug_mode:
-            # Trigger node allocation to avoid test failure on asking for
-            # more nodes than it used.
-            _ = self.preallocated_nodes
-
-            self.logger.info(
-                "Skipping test in debug mode (requires release build)")
-            return
+        rpk.alter_topic_config(
+            self.topic, 'retention.bytes'
+            if short_retention else 'retention.local.target.bytes',
+            str(self.segment_size))
 
         # 100k messages of size 2**18
         # is ~24GB of data. 500k messages
@@ -341,10 +343,10 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
 
         # The wait condition will also apply some changes
         # such as topic creation and deletion
-        wait_until(create_or_delete_until_producer_fin,
-                   timeout_sec=timeout,
-                   backoff_sec=0.5,
-                   err_msg='Producer did not finish')
+        self.redpanda.wait_until(create_or_delete_until_producer_fin,
+                                 timeout_sec=timeout,
+                                 backoff_sec=0.5,
+                                 err_msg='Producer did not finish')
 
         producer.wait()
         rand_consumer.wait()

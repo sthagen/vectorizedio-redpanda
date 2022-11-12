@@ -146,7 +146,7 @@ public:
     ///
     /// \param lso_override last stable offset override
     /// \return future that returns number of uploaded/failed segments
-    ss::future<batch_result> upload_next_candidates(
+    virtual ss::future<batch_result> upload_next_candidates(
       std::optional<model::offset> last_stable_offset_override = std::nullopt);
 
     ss::future<cloud_storage::download_result> sync_manifest();
@@ -169,6 +169,8 @@ public:
     /// segments that are below the current start offset and segments
     /// that have been replaced with their compacted equivalent.
     ss::future<> garbage_collect();
+
+    virtual ~ntp_archiver() = default;
 
 private:
     /// Information about started upload
@@ -279,6 +281,8 @@ private:
     ss::future<cloud_storage::upload_result>
     delete_segment(const remote_segment_path& path);
 
+    void update_probe();
+
     bool upload_loop_can_continue() const;
     bool sync_manifest_loop_can_continue() const;
     bool housekeeping_can_continue() const;
@@ -288,7 +292,9 @@ private:
     remote_segment_path
     segment_path_for_candidate(const upload_candidate& candidate);
 
-    ntp_level_probe _probe;
+    /// Method to use with lazy_abort_source
+    bool archiver_lost_leadership(cloud_storage::lazy_abort_source& las);
+
     model::ntp _ntp;
     model::initial_revision_id _rev;
     cluster::partition_manager& _partition_manager;
@@ -308,6 +314,7 @@ private:
     ss::lowres_clock::duration _upload_loop_initial_backoff;
     ss::lowres_clock::duration _upload_loop_max_backoff;
     config::binding<std::chrono::milliseconds> _sync_manifest_timeout;
+    config::binding<size_t> _max_segments_pending_deletion;
     simple_time_jitter<ss::lowres_clock> _backoff_jitter{100ms};
     size_t _concurrency{4};
     ss::lowres_clock::time_point _last_upload_time;
@@ -317,6 +324,9 @@ private:
     config::binding<std::chrono::milliseconds> _housekeeping_interval;
     simple_time_jitter<ss::lowres_clock> _housekeeping_jitter;
     ss::lowres_clock::time_point _next_housekeeping;
+
+    per_ntp_metrics_disabled _ntp_metrics_disabled;
+    std::optional<ntp_level_probe> _probe{std::nullopt};
 
     loop_state _upload_loop_state{loop_state::initial};
     loop_state _sync_manifest_loop_state{loop_state::initial};

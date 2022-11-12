@@ -54,8 +54,13 @@ using namespace std::chrono_literals;
 
 static constexpr size_t max_consume_size = 128_KiB;
 
+// These timeout/backoff settings are for S3 requests
 static ss::lowres_clock::duration cache_hydration_timeout = 60s;
 static ss::lowres_clock::duration cache_hydration_backoff = 250ms;
+
+// This backoff is for failure of the local cache to retain recently
+// promoted data (i.e. highly stressed cache)
+static ss::lowres_clock::duration cache_thrash_backoff = 5000ms;
 
 download_exception::download_exception(
   download_result r, std::filesystem::path p)
@@ -108,7 +113,8 @@ remote_segment::remote_segment(
   , _ntp(m.get_ntp())
   , _rtc(&parent)
   , _ctxlog(cst_log, _rtc, generate_log_prefix(m, key))
-  , _wait_list(expiry_handler_impl) {
+  , _wait_list(expiry_handler_impl)
+  , _cache_backoff_jitter(cache_thrash_backoff) {
     auto meta = m.get(key);
     vassert(meta, "Can't find segment metadata in manifest, key: {}", key);
 
@@ -239,58 +245,66 @@ remote_segment::maybe_get_offsets(kafka::offset kafka_offset) {
     return pos;
 }
 
-ss::future<> remote_segment::do_hydrate_segment() {
-    auto callback = [this](
-                      uint64_t size_bytes,
-                      ss::input_stream<char> s) -> ss::future<uint64_t> {
-        offset_index tmpidx(
-          get_base_rp_offset(),
-          get_base_kafka_offset(),
-          0,
-          remote_segment_sampling_step_bytes);
-        auto [sparse, sput] = input_stream_fanout<2>(std::move(s), 1);
-        auto parser = make_remote_segment_index_builder(
-          std::move(sparse),
-          tmpidx,
-          _base_offset_delta,
-          remote_segment_sampling_step_bytes);
-        auto fparse = parser->consume().finally(
-          [parser] { return parser->close(); });
-        auto fput = _cache.put(_path, sput).finally([sref = std::ref(sput)] {
-            return sref.get().close();
-        });
-        auto [rparse, rput] = co_await ss::when_all(
-          std::move(fparse), std::move(fput));
-        bool index_prepared = true;
-        if (rparse.failed()) {
-            auto parse_exception = rparse.get_exception();
-            vlog(
-              _ctxlog.warn,
-              "Failed to build a remote_segment index, error: {}",
-              parse_exception);
-            index_prepared = false;
-        }
-        if (rput.failed()) {
-            auto put_exception = rput.get_exception();
-            vlog(
-              _ctxlog.warn,
-              "Failed to write a segment file to cache, error: {}",
-              put_exception);
-            std::rethrow_exception(put_exception);
-        }
-        if (index_prepared) {
-            auto index_stream = make_iobuf_input_stream(tmpidx.to_iobuf());
-            co_await _cache.put(_path().native() + ".index", index_stream);
-            _index = std::move(tmpidx);
-        }
-        co_return size_bytes;
-    };
+/**
+ * Called by do_hydrate_segment on the stream the S3 remote creates for
+ * a GET response: pass the dat through into the cache.
+ */
+ss::future<uint64_t> remote_segment::do_hydrate_segment_inner(
+  uint64_t size_bytes, ss::input_stream<char> s) {
+    offset_index tmpidx(
+      get_base_rp_offset(),
+      get_base_kafka_offset(),
+      0,
+      remote_segment_sampling_step_bytes);
+    auto [sparse, sput] = input_stream_fanout<2>(std::move(s), 1);
+    auto parser = make_remote_segment_index_builder(
+      std::move(sparse),
+      tmpidx,
+      _base_offset_delta,
+      remote_segment_sampling_step_bytes);
+    auto fparse = parser->consume().finally(
+      [parser] { return parser->close(); });
+    auto fput = _cache.put(_path, sput).finally([sref = std::ref(sput)] {
+        return sref.get().close();
+    });
+    auto [rparse, rput] = co_await ss::when_all(
+      std::move(fparse), std::move(fput));
+    bool index_prepared = true;
+    if (rparse.failed()) {
+        auto parse_exception = rparse.get_exception();
+        vlog(
+          _ctxlog.warn,
+          "Failed to build a remote_segment index, error: {}",
+          parse_exception);
+        index_prepared = false;
+    }
+    if (rput.failed()) {
+        auto put_exception = rput.get_exception();
+        vlog(
+          _ctxlog.warn,
+          "Failed to write a segment file to cache, error: {}",
+          put_exception);
+        std::rethrow_exception(put_exception);
+    }
+    if (index_prepared) {
+        auto index_stream = make_iobuf_input_stream(tmpidx.to_iobuf());
+        co_await _cache.put(_path().native() + ".index", index_stream);
+        _index = std::move(tmpidx);
+    }
+    co_return size_bytes;
+}
 
+ss::future<> remote_segment::do_hydrate_segment() {
     retry_chain_node local_rtc(
       cache_hydration_timeout, cache_hydration_backoff, &_rtc);
 
     auto res = co_await _api.download_segment(
-      _bucket, _path, callback, local_rtc);
+      _bucket,
+      _path,
+      [this](uint64_t size_bytes, ss::input_stream<char> s) {
+          return do_hydrate_segment_inner(size_bytes, std::move(s));
+      },
+      local_rtc);
 
     if (res != download_result::success) {
         vlog(
@@ -350,6 +364,16 @@ ss::future<bool> remote_segment::do_materialize_segment() {
           "re-hydrated, {} waiter are pending",
           _path,
           _wait_list.size());
+
+        // If we got here, the cache is in a stressed state: it has
+        // evicted an object that we probably only just promoted.  We can
+        // live-lock if many readers are all trying to promote their objects
+        // concurrently and none of them is getting all their objects in
+        // the cache at the same time: reduce chance of this by backing off.
+        // TODO: this should be a sleep_abortable, but remote_segment does not
+        // have an abort source.
+        co_await ss::sleep(_cache_backoff_jitter.next_duration());
+
         co_return false;
     }
     _data_file = maybe_file->body;
@@ -513,6 +537,13 @@ combine_statuses(cache_element_status segment, cache_element_status tx_range) {
 
 ss::future<> remote_segment::run_hydrate_bg() {
     ss::gate::holder guard(_gate);
+
+    // Track whether we have seen our objects in the cache during the loop
+    // below, so that we can detect regression: one object falling out the
+    // cache while the other is read.  We will back off on regression.
+    bool segment_was_cached = false;
+    bool txrange_was_cached = false;
+
     try {
         while (!_gate.is_closed()) {
             co_await _bg_cvar.wait(
@@ -532,7 +563,24 @@ ss::future<> remote_segment::run_hydrate_bg() {
                 // cache can't delete it until we close it.
                 auto tx_path = generate_remote_tx_path(_path);
                 auto segment_status = co_await _cache.is_cached(_path);
+                segment_was_cached |= segment_status
+                                      != cache_element_status::not_available;
                 auto txrange_status = co_await _cache.is_cached(tx_path);
+                txrange_was_cached |= txrange_status
+                                      != cache_element_status::not_available;
+
+                if (
+                  (txrange_status == cache_element_status::not_available
+                   && txrange_was_cached)
+                  || (segment_status == cache_element_status::not_available && segment_was_cached)) {
+                    vlog(
+                      _ctxlog.warn,
+                      "Cache thrashing detected while downloading segment {}, "
+                      "backing off",
+                      _path);
+                    co_await ss::sleep(_cache_backoff_jitter.next_duration());
+                }
+
                 auto status = combine_statuses(segment_status, txrange_status);
                 switch (status) {
                 case segment_txrange_status::in_progress:
@@ -608,7 +656,11 @@ ss::future<> remote_segment::run_hydrate_bg() {
             }
         }
     } catch (const ss::broken_condition_variable&) {
-        vlog(_ctxlog.debug, "Hydraton loop is stopped");
+        vlog(_ctxlog.debug, "Hydration loop shut down");
+    } catch (const ss::abort_requested_exception&) {
+        vlog(_ctxlog.debug, "Hydration loop shut down");
+    } catch (const ss::gate_closed_exception&) {
+        vlog(_ctxlog.debug, "Hydration loop shut down");
     } catch (...) {
         vlog(
           _ctxlog.error,

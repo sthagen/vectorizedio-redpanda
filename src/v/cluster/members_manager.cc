@@ -39,6 +39,8 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/smp.hh>
 
+#include <fmt/ranges.h>
+
 #include <chrono>
 #include <system_error>
 namespace cluster {
@@ -288,7 +290,7 @@ members_manager::apply_update(model::record_batch b) {
                                      : fmt::to_string(*requested_node_id);
           vlog(
             clusterlog.info,
-            "Applying registration of UUID {} with {}",
+            "Applying registration of node UUID {} with {}",
             node_uuid,
             node_id_str);
           if (requested_node_id) {
@@ -297,7 +299,7 @@ members_manager::apply_update(model::record_batch b) {
               }
               vlog(
                 clusterlog.warn,
-                "Couldn't register UUID {}, node ID {} already taken",
+                "Couldn't register node UUID {}, node ID {} already taken",
                 node_uuid,
                 requested_node_id);
               return ss::make_ready_future<std::error_code>(
@@ -352,6 +354,14 @@ model::node_id members_manager::get_node_id(const model::node_uuid& node_uuid) {
       it != _id_by_uuid.end(),
       "Node registration must be completed before calling");
     return it->second;
+}
+
+void members_manager::apply_initial_node_uuid_map(uuid_map_t id_by_uuid) {
+    vassert(_id_by_uuid.empty(), "will not overwrite existing data");
+    if (!id_by_uuid.empty()) {
+        vlog(clusterlog.debug, "Initial node UUID map: {}", id_by_uuid);
+    }
+    _id_by_uuid = std::move(id_by_uuid);
 }
 
 template<typename Cmd>
@@ -597,7 +607,7 @@ ss::future<result<join_node_reply>> members_manager::replicate_new_node_uuid(
                                       : "no node ID";
     vlog(
       clusterlog.debug,
-      "Replicating registration of UUID {} with {}",
+      "Replicating registration of node UUID {} with {}",
       node_uuid,
       node_id_str);
     // Otherwise, replicate a request to register the UUID.
@@ -609,7 +619,7 @@ ss::future<result<join_node_reply>> members_manager::replicate_new_node_uuid(
       model::timeout_clock::now() + 30s);
     vlog(
       clusterlog.debug,
-      "Registration replication completed for UUID '{}': {}",
+      "Registration replication completed for node UUID '{}': {}",
       node_uuid,
       errc);
     if (errc != errc::success) {
@@ -619,7 +629,7 @@ ss::future<result<join_node_reply>> members_manager::replicate_new_node_uuid(
     if (node_id && assigned_node_id != *node_id) {
         vlog(
           clusterlog.warn,
-          "Node registration for UUID {} as {} completed but already already "
+          "Node registration for node UUID {} as {} completed but already "
           "assigned as {}",
           node_uuid,
           *node_id,
@@ -661,7 +671,8 @@ members_manager::handle_join_request(join_node_request const req) {
       && req.node_uuid.size() != model::node_uuid::type::length) {
         vlog(
           clusterlog.warn,
-          "Invalid join request, expected UUID or empty; got {}-byte value",
+          "Invalid join request, expected node UUID or empty; got {}-byte "
+          "value",
           req.node_uuid.size());
         co_return errc::invalid_request;
     }

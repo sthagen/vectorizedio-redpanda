@@ -44,6 +44,7 @@ topic_table::transform_topics(Func&& f) const {
 
 ss::future<std::error_code>
 topic_table::apply(create_topic_cmd cmd, model::offset offset) {
+    _last_applied_revision_id = model::revision_id(offset);
     if (_topics.contains(cmd.key)) {
         // topic already exists
         return ss::make_ready_future<std::error_code>(
@@ -62,6 +63,7 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
     for (auto& pas : md.get_assignments()) {
         auto ntp = model::ntp(cmd.key.ns, cmd.key.tp, pas.id);
         for (auto& r : pas.replicas) {
+            _partition_count++;
             md.replica_revisions[pas.id][r.node_id] = model::revision_id(
               offset);
         }
@@ -93,6 +95,7 @@ ss::future<> topic_table::stop() {
 
 ss::future<std::error_code>
 topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
+    _last_applied_revision_id = model::revision_id(offset);
     auto delete_type = delta::op_type::del;
     if (auto tp = _topics.find(cmd.value); tp != _topics.end()) {
         if (!tp->second.is_topic_replicable()) {
@@ -120,6 +123,7 @@ topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
         }
 
         for (auto& p_as : tp->second.get_assignments()) {
+            _partition_count--;
             auto ntp = model::ntp(cmd.key.ns, cmd.key.tp, p_as.id);
             _updates_in_progress.erase(ntp);
             _pending_deltas.emplace_back(
@@ -132,10 +136,12 @@ topic_table::apply(delete_topic_cmd cmd, model::offset offset) {
 
         return ss::make_ready_future<std::error_code>(errc::success);
     }
+
     return ss::make_ready_future<std::error_code>(errc::topic_not_exists);
 }
 ss::future<std::error_code>
 topic_table::apply(create_partition_cmd cmd, model::offset offset) {
+    _last_applied_revision_id = model::revision_id(offset);
     auto tp = _topics.find(cmd.key);
     if (tp == _topics.end() || !tp->second.is_topic_replicable()) {
         co_return errc::topic_not_exists;
@@ -148,6 +154,7 @@ topic_table::apply(create_partition_cmd cmd, model::offset offset) {
       = cmd.value.cfg.new_total_partition_count;
     // add assignments of newly created partitions
     for (auto& p_as : cmd.value.assignments) {
+        _partition_count++;
         p_as.id += model::partition_id(prev_partition_count);
         tp->second.get_assignments().emplace(p_as);
         // propagate deltas
@@ -164,13 +171,13 @@ topic_table::apply(create_partition_cmd cmd, model::offset offset) {
           std::nullopt,
           tp->second.replica_revisions[p_as.id]);
     }
-
     notify_waiters();
     co_return errc::success;
 }
 
 ss::future<std::error_code>
 topic_table::apply(move_partition_replicas_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     auto tp = _topics.find(model::topic_namespace_view(cmd.key));
     if (tp == _topics.end()) {
         return ss::make_ready_future<std::error_code>(errc::topic_not_exists);
@@ -194,7 +201,6 @@ topic_table::apply(move_partition_replicas_cmd cmd, model::offset o) {
 
     change_partition_replicas(
       cmd.key, cmd.value, tp->second, *current_assignment_it, o);
-
     notify_waiters();
 
     return ss::make_ready_future<std::error_code>(errc::success);
@@ -202,6 +208,7 @@ topic_table::apply(move_partition_replicas_cmd cmd, model::offset o) {
 
 ss::future<std::error_code>
 topic_table::apply(finish_moving_partition_replicas_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     auto tp = _topics.find(model::topic_namespace_view(cmd.key));
     if (tp == _topics.end()) {
         return ss::make_ready_future<std::error_code>(errc::topic_not_exists);
@@ -268,6 +275,7 @@ topic_table::apply(finish_moving_partition_replicas_cmd cmd, model::offset o) {
 
 ss::future<std::error_code>
 topic_table::apply(cancel_moving_partition_replicas_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     vlog(
       clusterlog.trace,
       "applying cancel moving partition replicas command ntp: {}, "
@@ -388,6 +396,7 @@ topic_table::apply(cancel_moving_partition_replicas_cmd cmd, model::offset o) {
 
 ss::future<std::error_code>
 topic_table::apply(move_topic_replicas_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     auto tp = _topics.find(model::topic_namespace_view(cmd.key));
     if (tp == _topics.end()) {
         co_return errc::topic_not_exists;
@@ -530,6 +539,7 @@ void incremental_update(
 
 ss::future<std::error_code>
 topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     auto tp = _topics.find(cmd.key);
     if (tp == _topics.end() || !tp->second.is_topic_replicable()) {
         co_return make_error_code(errc::topic_not_exists);
@@ -585,6 +595,7 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
 
 ss::future<std::error_code>
 topic_table::apply(create_non_replicable_topic_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
     const model::topic_namespace& source = cmd.key.source;
     const model::topic_namespace& new_non_rep_topic = cmd.key.name;
     if (_topics.contains(new_non_rep_topic)) {

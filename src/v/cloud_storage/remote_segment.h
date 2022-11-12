@@ -139,6 +139,11 @@ private:
     /// Actually hydrate the segment. The method downloads the segment file
     /// to the cache dir and updates the segment index.
     ss::future<> do_hydrate_segment();
+
+    /// Helper for do_hydrate_segment
+    ss::future<uint64_t>
+      do_hydrate_segment_inner(uint64_t, ss::input_stream<char>);
+
     /// Hydrate tx manifest. Method downloads the manifest file to the cache
     /// dir.
     ss::future<> do_hydrate_txrange();
@@ -178,6 +183,9 @@ private:
 
     using tx_range_vec = fragmented_vector<model::tx_range>;
     std::optional<tx_range_vec> _tx_range;
+
+    // For backing off on apparent thrash/saturation of the local cache
+    simple_time_jitter<ss::lowres_clock> _cache_backoff_jitter;
 };
 
 class remote_segment_batch_consumer;

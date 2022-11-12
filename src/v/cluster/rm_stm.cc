@@ -24,6 +24,7 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/loop.hh>
 
 #include <filesystem>
 #include <optional>
@@ -305,6 +306,13 @@ ss::future<checked<model::term_id, tx_errc>> rm_stm::do_begin_tx(
   model::producer_identity pid,
   model::tx_seq tx_seq,
   std::chrono::milliseconds transaction_timeout_ms) {
+    vlog(
+      _ctx_log.trace,
+      "begin tx pid: {}, tx sequence: {}, timeout: {} ms",
+      pid,
+      tx_seq,
+      transaction_timeout_ms / std::chrono::milliseconds(1));
+
     if (!check_tx_permitted()) {
         co_return tx_errc::request_rejected;
     }
@@ -621,6 +629,7 @@ ss::future<tx_errc> rm_stm::do_commit_tx(
   model::producer_identity pid,
   model::tx_seq tx_seq,
   model::timeout_clock::duration timeout) {
+    vlog(_ctx_log.trace, "commit tx pid: {}, tx sequence: {}", pid, tx_seq);
     if (!check_tx_permitted()) {
         co_return tx_errc::request_rejected;
     }
@@ -859,6 +868,7 @@ ss::future<tx_errc> rm_stm::do_abort_tx(
   model::producer_identity pid,
   std::optional<model::tx_seq> tx_seq,
   model::timeout_clock::duration timeout) {
+    vlog(_ctx_log.debug, "abort tx pid: {}, tx sequence: {}", pid, tx_seq);
     if (!check_tx_permitted()) {
         co_return tx_errc::request_rejected;
     }
@@ -1625,8 +1635,31 @@ ss::future<result<kafka_result>> rm_stm::replicate_msg(
 }
 
 model::offset rm_stm::last_stable_offset() {
-    auto first_tx_start = model::offset::max();
+    // There are two main scenarios we deal with here.
+    // 1. stm is still bootstrapping
+    // 2. stm is past bootstrapping.
+    //
+    // We distinguish between (1) and (2) based on the offset
+    // we save during first apply (_bootstrap_committed_offset).
 
+    // We always want to return only the `applied` state as it
+    // contains aborted transactions metadata that is consumed by
+    // the client to distinguish aborted data batches.
+    //
+    // We optimize for the case where there are no inflight transactional
+    // batches to return the high water mark.
+    if (unlikely(!_bootstrap_committed_offset)) {
+        return model::offset::min();
+    }
+
+    auto last_applied = last_applied_offset();
+    auto next_to_apply = model::next_offset(last_applied);
+    if (last_applied < _bootstrap_committed_offset.value()) {
+        return next_to_apply;
+    }
+
+    // Check for any in-flight transactions.
+    auto first_tx_start = model::offset::max();
     if (_is_tx_enabled) {
         if (!_log_state.ongoing_set.empty()) {
             first_tx_start = *_log_state.ongoing_set.begin();
@@ -1646,9 +1679,12 @@ model::offset rm_stm::last_stable_offset() {
 
     auto last_visible_index = _c->last_visible_index();
     if (first_tx_start <= last_visible_index) {
-        return first_tx_start;
+        // There are in flight transactions < high water mark that may
+        // not be applied yet. We still need to consider only applied
+        // transactions.
+        return std::min(first_tx_start, next_to_apply);
     }
-
+    // no inflight transactions.
     return model::next_offset(last_visible_index);
 }
 
@@ -2060,6 +2096,9 @@ void rm_stm::apply_fence(model::record_batch&& b) {
 }
 
 ss::future<> rm_stm::apply(model::record_batch b) {
+    if (unlikely(!_bootstrap_committed_offset)) {
+        _bootstrap_committed_offset = _c->committed_offset();
+    }
     auto last_offset = b.last_offset();
 
     const auto& hdr = b.header();
@@ -2401,6 +2440,8 @@ ss::future<> rm_stm::offload_aborted_txns() {
     _log_state.aborted = snapshot.aborted;
 }
 
+// DO NOT coroutinize this method as it may cause issues on ARM:
+// https://github.com/redpanda-data/redpanda/issues/6768
 ss::future<stm_snapshot> rm_stm::take_snapshot() {
     auto start_offset = _raft->start_offset();
 
@@ -2425,15 +2466,18 @@ ss::future<stm_snapshot> rm_stm::take_snapshot() {
       "Removing abort indexes {} with offset < {}",
       expired_abort_indexes.size(),
       start_offset);
-
-    for (const auto& idx : expired_abort_indexes) {
-        auto filename = abort_idx_name(idx.first, idx.last);
-        vlog(
-          _ctx_log.debug,
-          "removing aborted transactions {} snapshot file",
-          filename);
-        co_await _abort_snapshot_mgr.remove_snapshot(filename);
-    }
+    auto f = ss::do_with(
+      std::move(expired_abort_indexes), [this](std::vector<abort_index>& idxs) {
+          return ss::parallel_for_each(
+            idxs.begin(), idxs.end(), [this](const abort_index& idx) {
+                auto f_name = abort_idx_name(idx.first, idx.last);
+                vlog(
+                  _ctx_log.debug,
+                  "removing aborted transactions {} snapshot file",
+                  f_name);
+                return _abort_snapshot_mgr.remove_snapshot(std::move(f_name));
+            });
+      });
 
     std::vector<tx_range> aborted;
     aborted.reserve(_log_state.aborted.size());
@@ -2445,15 +2489,18 @@ ss::future<stm_snapshot> rm_stm::take_snapshot() {
     _log_state.aborted = std::move(aborted);
 
     if (_log_state.aborted.size() > _abort_index_segment_size) {
-        co_await _state_lock.hold_write_lock().then(
-          [this](ss::basic_rwlock<>::holder unit) {
-              // software engineer be careful and do not cause a deadlock.
-              // take_snapshot is invoked under the persisted_stm::_op_lock
-              // and here here we take write lock (_state_lock). most rm_stm
-              // operations require its read lock. however they don't depend
-              // of _op_lock so things are safe now
-              return offload_aborted_txns().finally([u = std::move(unit)] {});
-          });
+        f = f.then([this] {
+            return _state_lock.hold_write_lock().then(
+              [this](ss::basic_rwlock<>::holder unit) {
+                  // software engineer be careful and do not cause a deadlock.
+                  // take_snapshot is invoked under the persisted_stm::_op_lock
+                  // and here here we take write lock (_state_lock). most rm_stm
+                  // operations require its read lock. however they don't depend
+                  // of _op_lock so things are safe now
+                  return offload_aborted_txns().finally(
+                    [u = std::move(unit)] {});
+              });
+        });
     }
 
     iobuf tx_ss_buf;
@@ -2517,17 +2564,19 @@ ss::future<stm_snapshot> rm_stm::take_snapshot() {
     } else {
         vassert(false, "unsupported tx_snapshot version {}", version);
     }
-
-    co_return stm_snapshot::create(
-      version, _insync_offset, std::move(tx_ss_buf));
+    return f.then([this, version, tx_ss_buf = std::move(tx_ss_buf)]() mutable {
+        return stm_snapshot::create(
+          version, _insync_offset, std::move(tx_ss_buf));
+    });
 }
 
 ss::future<> rm_stm::save_abort_snapshot(abort_snapshot snapshot) {
+    auto filename = abort_idx_name(snapshot.first, snapshot.last);
+    vlog(_ctx_log.debug, "saving abort snapshot {} at {}", snapshot, filename);
     iobuf snapshot_data;
     reflection::adl<abort_snapshot>{}.to(snapshot_data, snapshot);
     int32_t snapshot_size = snapshot_data.size_bytes();
 
-    auto filename = abort_idx_name(snapshot.first, snapshot.last);
     auto writer = co_await _abort_snapshot_mgr.start_snapshot(filename);
 
     iobuf metadata_buf;
@@ -2604,5 +2653,13 @@ ss::future<> rm_stm::handle_eviction() {
           return ss::now();
       });
 }
-
+std::ostream& operator<<(std::ostream& o, const rm_stm::abort_snapshot& as) {
+    fmt::print(
+      o,
+      "{{first: {}, last: {}, aborted tx count: {}}}",
+      as.first,
+      as.last,
+      as.aborted.size());
+    return o;
+}
 } // namespace cluster

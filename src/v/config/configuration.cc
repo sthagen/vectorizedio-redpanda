@@ -1118,6 +1118,15 @@ configuration::configuration()
       "Interval for cloud storage housekeeping tasks",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       5min)
+  , cloud_storage_max_segments_pending_deletion_per_partition(
+      *this,
+      "cloud_storage_max_segments_pending_deletion_per_partition",
+      "The per-partition limit for the number of segments pending deletion "
+      "from the cloud. Segments can be deleted due to retention or compaction. "
+      "If this limit is breached and deletion fails, then segments will be "
+      "orphaned in the cloud and will have to be removed manually",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      5000)
   , cloud_storage_enable_compacted_topic_reupload(
       *this,
       "cloud_storage_enable_compacted_topic_reupload",
@@ -1186,6 +1195,13 @@ configuration::configuration()
       "Maximum concurrent readers of remote data per CPU core.  If unset, "
       "value of `topic_partitions_per_shard` is used, i.e. one reader per "
       "partition if the shard is at its maximum partition capacity.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt)
+  , cloud_storage_max_materialized_segments_per_shard(
+      *this,
+      "cloud_storage_max_materialized_segments_per_shard",
+      "Maximum concurrent readers of remote data per CPU core.  If unset, "
+      "value of `topic_partitions_per_shard` multiplied by 2 is used.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt)
   , superusers(
@@ -1399,6 +1415,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       5_GiB,
       {.min = 10_MiB})
+  , storage_strict_data_init(
+      *this,
+      "storage_strict_data_init",
+      "Requires that an empty file named `.redpanda_data_dir` be present in "
+      "the data directory. Redpanda will refuse to start if it is not found.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false)
   , enable_metrics_reporter(
       *this,
       "enable_metrics_reporter",

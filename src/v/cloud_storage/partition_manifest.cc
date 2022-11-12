@@ -278,6 +278,11 @@ partition_manifest::generate_segment_path(const segment_meta& meta) const {
       _ntp, meta.ntp_revision, name, meta.archiver_term);
 }
 
+remote_segment_path
+partition_manifest::generate_segment_path(const lw_segment_meta& meta) const {
+    return generate_segment_path(lw_segment_meta::convert(meta));
+}
+
 segment_name partition_manifest::generate_remote_segment_name(
   const partition_manifest::value& val) {
     switch (val.sname_format) {
@@ -309,6 +314,15 @@ local_segment_path partition_manifest::generate_local_segment_path(
       val.base_offset, val.segment_term);
     return local_segment_path(
       fmt::format("{}_{}/{}", ntp.path(), val.ntp_revision, name()));
+}
+
+partition_manifest::const_iterator
+partition_manifest::first_addressable_segment() const {
+    if (_start_offset == model::offset{}) {
+        return end();
+    }
+
+    return _segments.find(_start_offset);
 }
 
 partition_manifest::const_iterator partition_manifest::begin() const {
@@ -381,6 +395,11 @@ bool partition_manifest::advance_start_offset(model::offset new_start_offset) {
     return false;
 }
 
+std::vector<partition_manifest::lw_segment_meta>
+partition_manifest::lw_replaced_segments() const {
+    return _replaced;
+}
+
 std::vector<segment_meta> partition_manifest::replaced_segments() const {
     std::vector<segment_meta> res;
     res.reserve(_replaced.size());
@@ -388,6 +407,10 @@ std::vector<segment_meta> partition_manifest::replaced_segments() const {
         res.push_back(lw_segment_meta::convert(s));
     }
     return res;
+}
+
+size_t partition_manifest::replaced_segments_count() const {
+    return _replaced.size();
 }
 
 void partition_manifest::move_aligned_offset_range(

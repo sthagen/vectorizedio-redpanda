@@ -331,7 +331,9 @@ const (
 	enterpriseGoogleSAMountName = "enterprise-google-sa"
 	enterpriseGoogleSAMountPath = "/etc/console/enterprise/google"
 
-	prometheusBasicAuthPassowrdEnvVar = "CLOUD_PROMETHEUSENDPOINT_BASICAUTH_PASSWORD"
+	prometheusBasicAuthPasswordEnvVar     = "CLOUD_PROMETHEUSENDPOINT_BASICAUTH_PASSWORD"
+	kafkaSASLBasicAuthPasswordEnvVar      = "KAFKA_SASL_PASSWORD"           //nolint:gosec // not a secret
+	schemaRegistryBasicAuthPasswordEnvVar = "KAFKA_SCHEMAREGISTRY_PASSWORD" //nolint:gosec // not a secret
 )
 
 func (d *Deployment) getVolumes(ss map[string]string) []corev1.Volume {
@@ -502,17 +504,42 @@ func (d *Deployment) getContainers(ss map[string]string) []corev1.Container {
 	}
 }
 
-func (d *Deployment) genEnvVars() []corev1.EnvVar {
-	if d.consoleobj.Spec.Cloud == nil ||
-		d.consoleobj.Spec.Cloud.PrometheusEndpoint == nil ||
-		!d.consoleobj.Spec.Cloud.PrometheusEndpoint.Enabled {
-		return []corev1.EnvVar{}
+func (d *Deployment) genEnvVars() (envars []corev1.EnvVar) {
+	if d.clusterobj.IsSASLOnInternalEnabled() {
+		envars = append(envars, corev1.EnvVar{
+			Name: kafkaSASLBasicAuthPasswordEnvVar,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					Key: corev1.BasicAuthPasswordKey,
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: KafkaSASecretKey(d.consoleobj).Name,
+					},
+				},
+			},
+		})
 	}
-	// the webhook enforces that the secret is in the same namespace as console
-	passwordRef := d.consoleobj.Spec.Cloud.PrometheusEndpoint.BasicAuth.PasswordRef
-	return []corev1.EnvVar{
-		{
-			Name: prometheusBasicAuthPassowrdEnvVar,
+
+	if d.clusterobj.IsSchemaRegistryAuthHTTPBasic() {
+		envars = append(envars, corev1.EnvVar{
+			Name: schemaRegistryBasicAuthPasswordEnvVar,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					Key: corev1.BasicAuthPasswordKey,
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: KafkaSASecretKey(d.consoleobj).Name,
+					},
+				},
+			},
+		})
+	}
+
+	if d.consoleobj.Spec.Cloud != nil &&
+		d.consoleobj.Spec.Cloud.PrometheusEndpoint != nil &&
+		d.consoleobj.Spec.Cloud.PrometheusEndpoint.Enabled {
+		// the webhook enforces that the secret is in the same namespace as console
+		passwordRef := d.consoleobj.Spec.Cloud.PrometheusEndpoint.BasicAuth.PasswordRef
+		envars = append(envars, corev1.EnvVar{
+			Name: prometheusBasicAuthPasswordEnvVar,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					Key: passwordRef.Key,
@@ -521,6 +548,8 @@ func (d *Deployment) genEnvVars() []corev1.EnvVar {
 					},
 				},
 			},
-		},
+		})
 	}
+
+	return envars
 }

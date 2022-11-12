@@ -26,6 +26,7 @@
 #include "test_utils/http_imposter.h"
 
 #include <seastar/core/io_priority_class.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/noncopyable_function.hh>
 
@@ -266,6 +267,8 @@ FIXTURE_TEST(test_snapshot_loading, archival_metadata_stm_base_fixture) {
 
 FIXTURE_TEST(
   test_archival_stm_segment_truncate, archival_metadata_stm_fixture) {
+    using lw_segment_meta = cloud_storage::partition_manifest::lw_segment_meta;
+
     wait_for_confirmed_leader();
     auto& ntp_cfg = _raft->log_config();
     std::vector<cloud_storage::segment_meta> m;
@@ -311,7 +314,7 @@ FIXTURE_TEST(
     auto name = cloud_storage::generate_local_segment_name(
       backlog[0].base_offset, backlog[0].segment_term);
     BOOST_REQUIRE(pm.get(name) != nullptr);
-    BOOST_REQUIRE(backlog[0] == *pm.get(name));
+    BOOST_REQUIRE(backlog[0] == lw_segment_meta::convert(*pm.get(name)));
 
     // Truncate the STM, next segment should be added to the backlog
     archival_stm->truncate(model::offset(200), ss::lowres_clock::now() + 10s)
@@ -324,7 +327,7 @@ FIXTURE_TEST(
         auto name = cloud_storage::generate_local_segment_name(
           it.base_offset, it.segment_term);
         BOOST_REQUIRE(pm.get(name) != nullptr);
-        BOOST_REQUIRE(it == *pm.get(name));
+        BOOST_REQUIRE(it == lw_segment_meta::convert(*pm.get(name)));
     }
 }
 
@@ -452,4 +455,35 @@ FIXTURE_TEST(
     BOOST_REQUIRE(archival_stm.manifest() == m);
 
     archival_stm.stop().get();
+}
+
+FIXTURE_TEST(test_archival_stm_batching, archival_metadata_stm_fixture) {
+    wait_for_confirmed_leader();
+    std::vector<cloud_storage::segment_meta> m;
+    m.push_back(segment_meta{
+      .base_offset = model::offset(0),
+      .committed_offset = model::offset(999),
+      .archiver_term = model::term_id(1),
+      .segment_term = model::term_id(1)});
+    m.push_back(segment_meta{
+      .base_offset = model::offset(1000),
+      .committed_offset = model::offset(1999),
+      .archiver_term = model::term_id(1),
+      .segment_term = model::term_id(1)});
+    m.push_back(segment_meta{
+      .base_offset = model::offset(0),
+      .committed_offset = model::offset(999),
+      .archiver_term = model::term_id(2),
+      .segment_term = model::term_id(1)});
+    // Replicate add_segment_cmd command that adds segment with offset 0
+    auto batcher = archival_stm->batch_start(ss::lowres_clock::now() + 10s);
+    batcher.add_segments(m);
+    batcher.cleanup_metadata();
+    batcher.replicate().get();
+    BOOST_REQUIRE(archival_stm->manifest().size() == 2);
+    BOOST_REQUIRE(archival_stm->get_start_offset() == model::offset(0));
+    BOOST_REQUIRE(archival_stm->manifest().replaced_segments().size() == 0);
+    BOOST_REQUIRE(
+      archival_stm->manifest().begin()->second.archiver_term
+      == model::term_id(2));
 }

@@ -87,7 +87,7 @@ RUN mkdir -p "/opt/kafka-2.3.1" && chmod a+rw /opt/kafka-2.3.1 && curl -s "$KAFK
     mkdir -p "/opt/kafka-3.0.0" && chmod a+rw /opt/kafka-3.0.0 && curl -s "$KAFKA_MIRROR/kafka_2.12-3.0.0.tgz" | tar xz --strip-components=1 -C "/opt/kafka-3.0.0" && \
     ln -s /opt/kafka-3.0.0 /opt/kafka-dev && \
     mkdir /opt/librdkafka && \
-    curl -SL "https://github.com/edenhill/librdkafka/archive/v1.8.0.tar.gz" | tar -xz --strip-components=1 -C /opt/librdkafka && \
+    curl -SL "https://github.com/edenhill/librdkafka/archive/v1.9.2.tar.gz" | tar -xz --strip-components=1 -C /opt/librdkafka && \
     cd /opt/librdkafka && \
     ./configure && \
     make -j$(nproc) && \
@@ -120,7 +120,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     export PATH="/root/.cargo/bin:${PATH}" && \
     git clone https://github.com/redpanda-data/client-swarm.git && \
     cd client-swarm && \
-    git reset --hard 28790f8 && \
+    git reset --hard a03a8ae && \
     cargo build --release && \
     cp target/release/client-swarm /usr/local/bin && \
     cd .. && rm -rf client-swarm && rm -rf /root/.cargo
@@ -146,7 +146,7 @@ RUN go install github.com/twmb/kcl@v0.8.0 && \
 
 # Install the kgo-verifier tool
 RUN git -C /opt clone https://github.com/redpanda-data/kgo-verifier.git && \
-    cd /opt/kgo-verifier && git reset --hard cf552ccba1c6a68f53b51bbdbbcdb50c4e2c8cfe && \
+    cd /opt/kgo-verifier && git reset --hard 98f1f57dab8bb8abe615f733a0ea307026ce13a5 && \
     go mod tidy && make
 
 # Expose port 8080 for any http examples within clients

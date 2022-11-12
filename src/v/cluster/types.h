@@ -1221,8 +1221,7 @@ using replication_factor
 
 std::istream& operator>>(std::istream& i, replication_factor& cs);
 
-replication_factor
-parsing_replication_factor(const std::optional<ss::sstring>& value);
+replication_factor parsing_replication_factor(const ss::sstring& value);
 
 // This class contains updates for topic properties which are replicates not by
 // topic_frontend
@@ -2036,10 +2035,13 @@ struct bootstrap_cluster_cmd_data
       const bootstrap_cluster_cmd_data&, const bootstrap_cluster_cmd_data&)
       = default;
 
-    auto serde_fields() { return std::tie(uuid, bootstrap_user_cred); }
+    auto serde_fields() {
+        return std::tie(uuid, bootstrap_user_cred, node_ids_by_uuid);
+    }
 
     model::cluster_uuid uuid;
     std::optional<user_and_credential> bootstrap_user_cred;
+    absl::flat_hash_map<model::node_uuid, model::node_id> node_ids_by_uuid;
 };
 
 enum class reconciliation_status : int8_t {

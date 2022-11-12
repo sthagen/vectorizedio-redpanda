@@ -64,6 +64,8 @@ struct cluster_bootstrap_info_reply;
 class cluster_discovery {
 public:
     using brokers = std::vector<model::broker>;
+    using node_ids_by_uuid
+      = absl::flat_hash_map<model::node_uuid, model::node_id>;
 
     cluster_discovery(
       const model::node_uuid& node_uuid, storage::api&, ss::abort_source&);
@@ -85,12 +87,10 @@ public:
     //
     // If this node is a cluster founder, returns all seed servers, after
     // making sure that all founders are configured with identical seed servers
-    // list.
+    // list. In case of root-driven bootstrap, that reflects to a list of just
+    // the root broker.
     //
     // If this node is not a cluster founder, returns an empty list.
-    //
-    // In case of root-driven bootstrap, that reflects to a list of just the
-    // root broker.
     brokers founding_brokers() const;
 
     // A cluster founder is a node that is configured as a seed server, and
@@ -103,23 +103,32 @@ public:
     // will be set with an ID agreed upon by all seeds.
     ss::future<bool> is_cluster_founder();
 
+    // Returns node_uuid to node_id map built during cluster discovery.
+    // Non-const to allow moving the contents away, since it is supposed to be
+    // a single use call.
+    //
+    // \pre is_cluster_founder() future has been completed
+    // \pre get_node_ids_by_uuid() has never been called
+    node_ids_by_uuid& get_node_ids_by_uuid();
+
 private:
-    // Sends requests to each seed server to register the local node UUID until
-    // one succeeds. Upon success, sets `node_id` to the assigned node ID and
-    // returns true.
+    // Sends requests to each seed server to register the local node UUID
+    // until one succeeds. Upon success, sets `node_id` to the assigned node
+    // ID and returns true.
     ss::future<bool> dispatch_node_uuid_registration_to_seeds(model::node_id&);
 
     // Requests `cluster_bootstrap_info` from the given address, returning
     // early with a bogus result if it's already been determined if this node
     // is a cluster founder.
     ss::future<cluster_bootstrap_info_reply>
-    request_cluster_bootstrap_info_single(const net::unresolved_address&) const;
+      request_cluster_bootstrap_info_single(net::unresolved_address) const;
 
     // Initializes founder state (whether a cluster already exists, whether
     // this node is a founder, etc). Requests cluster_bootstrap_info from all
     // seeds to determine whether the local node is a cluster founder, and if
-    // so, populates `_founding_brokers`. Validates that all seeds are
-    // consistent with one another and agree on the set of founding brokers.
+    // so, populates `_founding_brokers` and `_node_ids_by_uuid`. Validates that
+    // all seeds are consistent with one another and agree on the set of
+    // founding brokers.
     //
     // Sets `_is_cluster_founder` upon completion.
     ss::future<> discover_founding_brokers();
@@ -132,6 +141,7 @@ private:
     storage::api& _storage;
     ss::abort_source& _as;
     brokers _founding_brokers;
+    node_ids_by_uuid _node_ids_by_uuid;
 };
 
 } // namespace cluster

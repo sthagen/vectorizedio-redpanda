@@ -8,12 +8,9 @@
 # by the Apache License, Version 2.0
 
 import os
-import json
 import threading
 import requests
-from enum import Enum
 
-from rptest.services.redpanda import RedpandaService
 from ducktape.services.service import Service
 from ducktape.utils.util import wait_until
 from ducktape.cluster.remoteaccount import RemoteCommandError
@@ -21,7 +18,6 @@ from ducktape.cluster.remoteaccount import RemoteCommandError
 # Install location, specified by Dockerfile or AMI
 TESTS_DIR = os.path.join("/opt", "kgo-verifier")
 
-# TODO: need to update terraform to open a range of ports
 REMOTE_PORT_BASE = 8080
 
 
@@ -163,10 +159,10 @@ class KgoVerifierService(Service):
         # Let the worker fall through to the end of its current iteration
         self.logger.debug(
             f"wait_node {self.who_am_i()}: waiting for worker to complete")
-        wait_until(lambda: self._status.active is False or self._status_thread.
-                   errored,
-                   timeout_sec=timeout_sec,
-                   backoff_sec=5)
+        self._redpanda.wait_until(lambda: self._status.active is False or self.
+                                  _status_thread.errored,
+                                  timeout_sec=timeout_sec,
+                                  backoff_sec=5)
         self._status_thread.raise_on_error()
 
         # Read final status
@@ -507,7 +503,8 @@ class ProduceStatus:
                  bad_offsets=0,
                  restarts=0,
                  latency=None,
-                 active=False):
+                 active=False,
+                 failed_transactions=0):
         self.sent = sent
         self.acked = acked
         self.bad_offsets = bad_offsets
@@ -516,10 +513,11 @@ class ProduceStatus:
             latency = {'p50': 0, 'p90': 0, 'p99': 0}
         self.latency = latency
         self.active = active
+        self.failed_transactions = failed_transactions
 
     def __str__(self):
         l = self.latency
-        return f"ProduceStatus<{self.sent} {self.acked} {self.bad_offsets} {self.restarts} {l['p50']}/{l['p90']}/{l['p99']}>"
+        return f"ProduceStatus<{self.sent} {self.acked} {self.bad_offsets} {self.restarts} {self.failed_transactions} {l['p50']}/{l['p90']}/{l['p99']}>"
 
 
 class KgoVerifierProducer(KgoVerifierService):
@@ -532,7 +530,10 @@ class KgoVerifierProducer(KgoVerifierService):
                  custom_node=None,
                  batch_max_bytes=None,
                  debug_logs=False,
-                 fake_timestamp_ms=None):
+                 fake_timestamp_ms=None,
+                 use_transactions=False,
+                 transaction_abort_rate=None,
+                 msgs_per_transaction=None):
         super(KgoVerifierProducer,
               self).__init__(context, redpanda, topic, msg_size, custom_node,
                              debug_logs)
@@ -540,6 +541,9 @@ class KgoVerifierProducer(KgoVerifierService):
         self._status = ProduceStatus()
         self._batch_max_bytes = batch_max_bytes
         self._fake_timestamp_ms = fake_timestamp_ms
+        self._use_transactions = use_transactions
+        self._transaction_abort_rate = transaction_abort_rate
+        self._msgs_per_transaction = msgs_per_transaction
 
     @property
     def produce_status(self):
@@ -550,16 +554,16 @@ class KgoVerifierProducer(KgoVerifierService):
             return True
 
         self.logger.debug(f"{self.who_am_i()} wait: awaiting message count")
-        wait_until(lambda: self._status_thread.errored or self._status.acked >=
-                   self._msg_count,
-                   timeout_sec=timeout_sec,
-                   backoff_sec=self._status_thread.INTERVAL)
+        self._redpanda.wait_until(lambda: self._status_thread.errored or self.
+                                  _status.acked >= self._msg_count,
+                                  timeout_sec=timeout_sec,
+                                  backoff_sec=self._status_thread.INTERVAL)
         self._status_thread.raise_on_error()
 
         return super().wait_node(node, timeout_sec=timeout_sec)
 
     def wait_for_acks(self, count, timeout_sec, backoff_sec):
-        wait_until(
+        self._redpanda.wait_until(
             lambda: self._status_thread.errored or self._status.acked >= count,
             timeout_sec=timeout_sec,
             backoff_sec=backoff_sec)
@@ -567,11 +571,11 @@ class KgoVerifierProducer(KgoVerifierService):
 
     def wait_for_offset_map(self):
         # Producer worker aims to checkpoint every 5 seconds, so we should see this promptly.
-        wait_until(lambda: self._status_thread.errored or all(
+        self._redpanda.wait_until(lambda: self._status_thread.errored or all(
             node.account.exists(f"valid_offsets_{self._topic}.json")
             for node in self.nodes),
-                   timeout_sec=15,
-                   backoff_sec=1)
+                                  timeout_sec=15,
+                                  backoff_sec=1)
         self._status_thread.raise_on_error()
 
     def is_complete(self):
@@ -588,6 +592,15 @@ class KgoVerifierProducer(KgoVerifierService):
 
         if self._fake_timestamp_ms is not None:
             cmd = cmd + f' --fake-timestamp-ms {self._fake_timestamp_ms}'
+
+        if self._use_transactions:
+            cmd = cmd + f' --use-transactions'
+
+            if self._msgs_per_transaction is not None:
+                cmd = cmd + f' --msgs-per-transaction {self._msgs_per_transaction}'
+
+            if self._transaction_abort_rate is not None:
+                cmd = cmd + f' --transaction-abort-rate {self._transaction_abort_rate}'
 
         self.spawn(cmd, node)
 

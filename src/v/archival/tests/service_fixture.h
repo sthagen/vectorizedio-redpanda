@@ -61,7 +61,16 @@ static constexpr std::string_view error_payload
     <RequestId>requestid</RequestId>
 </Error>)xml";
 
-}
+static constexpr std::string_view forbidden_payload
+  = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+    <Code>AccessDenied</Code>
+    <Message>Access Denied</Message>
+    <Resource>resource</Resource>
+    <RequestId>requestid</RequestId>
+</Error>)xml";
+
+} // namespace archival_tests
 
 /// This utility can be used to match content of the log
 /// with manifest and request content. It's also can be
@@ -140,6 +149,7 @@ public:
     void delete_topic(model::ns ns, model::topic topic);
     void wait_for_topic_deletion(const model::ntp& ntp);
     void add_topic_with_random_data(const model::ntp& ntp, int num_batches);
+    void wait_for_lso(const model::ntp&);
     /// Provides access point for segment_matcher CRTP template
     storage::api& get_local_storage_api();
     /// Get archival scheduler service
@@ -208,6 +218,14 @@ struct log_spec {
 storage::disk_log_builder make_log_builder(std::string_view data_path);
 
 void populate_log(storage::disk_log_builder& b, const log_spec& spec);
+
+ss::future<archival::ntp_archiver::batch_result> upload_next_with_retries(
+  archival::ntp_archiver&, std::optional<model::offset> lso = std::nullopt);
+
+void upload_and_verify(
+  archival::ntp_archiver&,
+  archival::ntp_archiver::batch_result,
+  std::optional<model::offset> lso = std::nullopt);
 
 /// Creates num_batches with a single record each, used to fit segments close to
 /// each other without gaps.

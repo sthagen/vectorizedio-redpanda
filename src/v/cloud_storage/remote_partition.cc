@@ -497,7 +497,13 @@ const model::ntp& remote_partition::get_ntp() const {
 }
 
 bool remote_partition::is_data_available() const {
-    return _manifest.size() > 0;
+    // Only advertize data if we have segments _and_ our start offset
+    // corresponds to some data (not if our start_offset points off
+    // the end of the manifest, as a result of a truncation where we
+    // have not yet cleaned out the segments.
+    return _manifest.size() > 0
+           && _manifest.find(_manifest.get_start_offset().value())
+                != _manifest.end();
 }
 
 // returns term last kafka offset
@@ -583,6 +589,14 @@ ss::future<> remote_partition::stop() {
         vlog(_ctxlog.debug, "remote partition stop {}", it->first);
         co_await std::visit([](auto&& st) { return st->stop(); }, it->second);
     }
+
+    // We may have some segment or reader objects enqueued for stop in
+    // the shared eviction queue: must flush it, or they can outlive
+    // us and trigger assertion in retry_chain_node destructor.
+    // This waits for all evictions, not just ours, but that's okay because
+    // stopping readers is fast, the queue is not usually long, and destroying
+    // partitions is relatively infrequent.
+    co_await materialized().flush_evicted();
 }
 
 void remote_partition::maybe_sync_with_manifest() {

@@ -172,6 +172,15 @@ void application::shutdown() {
         raft_group_manager.invoke_on_all(&raft::group_manager::stop_heartbeats)
           .get();
     }
+
+    // Stop any I/O to object store: this will cause any readers in flight
+    // to abort and enables partition shutdown to proceed reliably.
+    if (cloud_storage_api.local_is_initialized()) {
+        cloud_storage_api
+          .invoke_on_all(&cloud_storage::remote::shutdown_connections)
+          .get();
+    }
+
     // Stop all partitions before destructing the subsystems (transaction
     // coordinator, etc). This interrupts ongoing replication requests,
     // allowing higher level state machines to shutdown cleanly.
@@ -569,6 +578,21 @@ void application::check_environment() {
     storage::directories::initialize(
       config::node().data_directory().as_sstring())
       .get();
+
+    if (config::shard_local_cfg().storage_strict_data_init()) {
+        // Look for the special file that indicates a user intends
+        // for the found data directory to be the one we use.
+        auto strict_data_dir_file
+          = config::node().strict_data_dir_file_path().string();
+        auto file_exists = ss::file_exists(strict_data_dir_file).get();
+
+        if (!file_exists) {
+            throw std::invalid_argument(ssx::sformat(
+              "Data directory not in expected state: {} not found, is the "
+              "expected filesystem mounted?",
+              strict_data_dir_file));
+        }
+    }
 }
 
 static admin_server_cfg
@@ -756,6 +780,7 @@ void application::wire_up_runtime_services(model::node_id node_id) {
 
 void application::wire_up_redpanda_services(model::node_id node_id) {
     ss::smp::invoke_on_all([] {
+        resources::available_memory::local().register_metrics();
         return storage::internal::chunks().start();
     }).get();
 
@@ -951,17 +976,6 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           std::ref(archival_scheduler),
           make_upload_controller_config(_scheduling_groups.archival_upload()))
           .get();
-
-        // In order to stop segment uploads and downloads we need
-        // to close conneciton so active uploads and downloads will be
-        // stopped.
-        _deferred.emplace_back([this] {
-            if (cloud_storage_api.local_is_initialized()) {
-                cloud_storage_api
-                  .invoke_on_all(&cloud_storage::remote::shutdown_connections)
-                  .get();
-            }
-        });
     }
 
     // group membership
@@ -1498,27 +1512,30 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
 
 void application::start_runtime_services(cluster::cluster_discovery& cd) {
     ssx::background = feature_table.invoke_on_all(
-      [this](features::feature_table& ft) -> ss::future<> {
-          try {
-              co_await ft.await_feature(features::feature::rpc_v2_by_default);
-              if (ss::this_shard_id() == 0) {
-                  vlog(_log.info, "Activating RPC protocol v2");
-              }
-              _connection_cache.local().set_default_transport_version(
-                rpc::transport_version::v2);
-          } catch (ss::abort_requested_exception&) {
-              // Shutting down
-              co_return;
-          } catch (...) {
-              // Should never happen, abort is the only exception that
-              // await_feature can throw, other than perhaps bad_alloc.
-              vlog(
-                _log.error,
-                "Unexpected error awaiting RPCv2 feature: {} {}",
-                std::current_exception(),
-                ss::current_backtrace());
-              co_return;
-          }
+      [this](features::feature_table& ft) {
+          return ft.await_feature(features::feature::rpc_v2_by_default)
+            .then([this] {
+                if (ss::this_shard_id() == 0) {
+                    vlog(_log.info, "Activating RPC protocol v2");
+                }
+                _connection_cache.local().set_default_transport_version(
+                  rpc::transport_version::v2);
+            })
+            .handle_exception([this](const std::exception_ptr& e) {
+                try {
+                    std::rethrow_exception(e);
+                } catch (ss::abort_requested_exception&) {
+                    // Shutting down
+                } catch (...) {
+                    // Should never happen, abort is the only exception that
+                    // await_feature can throw, other than perhaps bad_alloc.
+                    vlog(
+                      _log.error,
+                      "Unexpected error awaiting RPCv2 feature: {} {}",
+                      std::current_exception(),
+                      ss::current_backtrace());
+                }
+            });
       });
 
     // single instance

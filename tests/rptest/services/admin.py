@@ -17,6 +17,7 @@ from requests.packages.urllib3.util.retry import Retry
 from ducktape.cluster.cluster import ClusterNode
 from typing import Optional, Callable, NamedTuple
 from rptest.util import wait_until_result
+from requests.exceptions import HTTPError
 
 DEFAULT_TIMEOUT = 30
 
@@ -662,7 +663,7 @@ class Admin:
         Looks up current ntp leader and transfer leadership to target node,
         this operations is NOP when current leader is the same as target.
         If user pass None for target this function will choose next replica for new leader.
-        If leadership transfer was performed this function return True
+        Returns true if leadership was transferred to the target node.
         """
         def _get_details():
             p = self.get_partitions(topic=topic,
@@ -685,7 +686,7 @@ class Admin:
 
         if target_id is not None:
             if leader_id == target_id:
-                return False
+                return True
             path = f"raft/{details['raft_group_id']}/transfer_leadership?target={target_id}"
         else:
             path = f"raft/{details['raft_group_id']}/transfer_leadership"
@@ -757,3 +758,13 @@ class Admin:
     def get_peer_status(self, node, peer_id):
         return self._request("GET", f"debug/peer_status/{peer_id}",
                              node=node).json()
+
+    def get_cluster_uuid(self, node):
+        try:
+            r = self._request("GET", "cluster/uuid", node=node)
+        except HTTPError as ex:
+            if ex.response.status_code == 404:
+                return
+            raise
+        if len(r.text) > 0:
+            return r.json()["cluster_uuid"]

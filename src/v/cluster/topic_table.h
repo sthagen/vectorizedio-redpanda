@@ -367,6 +367,12 @@ public:
 
     std::vector<model::ntp> all_updates_in_progress() const;
 
+    model::revision_id last_applied_revision() const {
+        return _last_applied_revision_id;
+    }
+
+    size_t partition_count() const { return _partition_count; }
+
 private:
     friend topic_table_probe;
 
@@ -394,8 +400,10 @@ private:
 
     underlying_t _topics;
     hierarchy_t _topics_hierarchy;
+    size_t _partition_count{0};
 
     updates_t _updates_in_progress;
+    model::revision_id _last_applied_revision_id;
 
     std::vector<delta> _pending_deltas;
     std::vector<std::unique_ptr<waiter>> _waiters;
