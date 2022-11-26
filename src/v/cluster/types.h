@@ -42,7 +42,6 @@
 
 namespace cluster {
 using consensus_ptr = ss::lw_shared_ptr<raft::consensus>;
-using broker_ptr = ss::lw_shared_ptr<model::broker>;
 
 // A cluster version is a logical protocol version describing the content
 // of the raft0 on disk structures, and available features.  These are
@@ -52,7 +51,10 @@ using cluster_version = named_type<int64_t, struct cluster_version_tag>;
 constexpr cluster_version invalid_version = cluster_version{-1};
 
 struct allocate_id_request
-  : serde::envelope<allocate_id_request, serde::version<0>> {
+  : serde::envelope<
+      allocate_id_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::timeout_clock::duration timeout;
 
     allocate_id_request() noexcept = default;
@@ -74,7 +76,8 @@ struct allocate_id_request
 };
 
 struct allocate_id_reply
-  : serde::envelope<allocate_id_reply, serde::version<0>> {
+  : serde::
+      envelope<allocate_id_reply, serde::version<0>, serde::compat_version<0>> {
     int64_t id;
     errc ec;
 
@@ -171,7 +174,8 @@ enum class partition_removal_mode : uint8_t {
 };
 
 struct try_abort_request
-  : serde::envelope<try_abort_request, serde::version<0>> {
+  : serde::
+      envelope<try_abort_request, serde::version<0>, serde::compat_version<0>> {
     model::partition_id tm;
     model::producer_identity pid;
     model::tx_seq tx_seq;
@@ -198,7 +202,9 @@ struct try_abort_request
     auto serde_fields() { return std::tie(tm, pid, tx_seq, timeout); }
 };
 
-struct try_abort_reply : serde::envelope<try_abort_reply, serde::version<0>> {
+struct try_abort_reply
+  : serde::
+      envelope<try_abort_reply, serde::version<0>, serde::compat_version<0>> {
     using committed_type = ss::bool_class<struct committed_type_tag>;
     using aborted_type = ss::bool_class<struct aborted_type_tag>;
 
@@ -233,7 +239,10 @@ struct try_abort_reply : serde::envelope<try_abort_reply, serde::version<0>> {
 };
 
 struct init_tm_tx_request
-  : serde::envelope<init_tm_tx_request, serde::version<0>> {
+  : serde::envelope<
+      init_tm_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     kafka::transactional_id tx_id;
     std::chrono::milliseconds transaction_timeout_ms;
     model::timeout_clock::duration timeout;
@@ -259,7 +268,9 @@ struct init_tm_tx_request
     }
 };
 
-struct init_tm_tx_reply : serde::envelope<init_tm_tx_reply, serde::version<0>> {
+struct init_tm_tx_reply
+  : serde::
+      envelope<init_tm_tx_reply, serde::version<0>, serde::compat_version<0>> {
     // partition_not_exists, not_leader, topic_not_exists
     model::producer_identity pid;
     tx_errc ec;
@@ -320,7 +331,9 @@ struct end_tx_request {
 struct end_tx_reply {
     tx_errc error_code{};
 };
-struct begin_tx_request : serde::envelope<begin_tx_request, serde::version<0>> {
+struct begin_tx_request
+  : serde::
+      envelope<begin_tx_request, serde::version<0>, serde::compat_version<0>> {
     model::ntp ntp;
     model::producer_identity pid;
     model::tx_seq tx_seq;
@@ -348,7 +361,9 @@ struct begin_tx_request : serde::envelope<begin_tx_request, serde::version<0>> {
     }
 };
 
-struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<1>> {
+struct begin_tx_reply
+  : serde::
+      envelope<begin_tx_reply, serde::version<1>, serde::compat_version<0>> {
     model::ntp ntp;
     model::term_id etag;
     tx_errc ec;
@@ -384,7 +399,10 @@ struct begin_tx_reply : serde::envelope<begin_tx_reply, serde::version<1>> {
 };
 
 struct prepare_tx_request
-  : serde::envelope<prepare_tx_request, serde::version<0>> {
+  : serde::envelope<
+      prepare_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     model::term_id etag;
     model::partition_id tm;
@@ -419,7 +437,9 @@ struct prepare_tx_request
     }
 };
 
-struct prepare_tx_reply : serde::envelope<prepare_tx_reply, serde::version<0>> {
+struct prepare_tx_reply
+  : serde::
+      envelope<prepare_tx_reply, serde::version<0>, serde::compat_version<0>> {
     tx_errc ec;
 
     prepare_tx_reply() noexcept = default;
@@ -436,7 +456,8 @@ struct prepare_tx_reply : serde::envelope<prepare_tx_reply, serde::version<0>> {
 };
 
 struct commit_tx_request
-  : serde::envelope<commit_tx_request, serde::version<0>> {
+  : serde::
+      envelope<commit_tx_request, serde::version<0>, serde::compat_version<0>> {
     model::ntp ntp;
     model::producer_identity pid;
     model::tx_seq tx_seq;
@@ -463,7 +484,9 @@ struct commit_tx_request
     operator<<(std::ostream& o, const commit_tx_request& r);
 };
 
-struct commit_tx_reply : serde::envelope<commit_tx_reply, serde::version<0>> {
+struct commit_tx_reply
+  : serde::
+      envelope<commit_tx_reply, serde::version<0>, serde::compat_version<0>> {
     tx_errc ec;
 
     commit_tx_reply() noexcept = default;
@@ -479,7 +502,9 @@ struct commit_tx_reply : serde::envelope<commit_tx_reply, serde::version<0>> {
     friend std::ostream& operator<<(std::ostream& o, const commit_tx_reply& r);
 };
 
-struct abort_tx_request : serde::envelope<abort_tx_request, serde::version<0>> {
+struct abort_tx_request
+  : serde::
+      envelope<abort_tx_request, serde::version<0>, serde::compat_version<0>> {
     model::ntp ntp;
     model::producer_identity pid;
     model::tx_seq tx_seq;
@@ -505,7 +530,9 @@ struct abort_tx_request : serde::envelope<abort_tx_request, serde::version<0>> {
     friend std::ostream& operator<<(std::ostream& o, const abort_tx_request& r);
 };
 
-struct abort_tx_reply : serde::envelope<abort_tx_reply, serde::version<0>> {
+struct abort_tx_reply
+  : serde::
+      envelope<abort_tx_reply, serde::version<0>, serde::compat_version<0>> {
     tx_errc ec;
 
     abort_tx_reply() noexcept = default;
@@ -522,7 +549,10 @@ struct abort_tx_reply : serde::envelope<abort_tx_reply, serde::version<0>> {
 };
 
 struct begin_group_tx_request
-  : serde::envelope<begin_group_tx_request, serde::version<0>> {
+  : serde::envelope<
+      begin_group_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     kafka::group_id group_id;
     model::producer_identity pid;
@@ -568,7 +598,10 @@ struct begin_group_tx_request
 };
 
 struct begin_group_tx_reply
-  : serde::envelope<begin_group_tx_reply, serde::version<0>> {
+  : serde::envelope<
+      begin_group_tx_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::term_id etag;
     tx_errc ec;
 
@@ -592,7 +625,10 @@ struct begin_group_tx_reply
 };
 
 struct prepare_group_tx_request
-  : serde::envelope<prepare_group_tx_request, serde::version<0>> {
+  : serde::envelope<
+      prepare_group_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     kafka::group_id group_id;
     model::term_id etag;
@@ -642,7 +678,10 @@ struct prepare_group_tx_request
 };
 
 struct prepare_group_tx_reply
-  : serde::envelope<prepare_group_tx_reply, serde::version<0>> {
+  : serde::envelope<
+      prepare_group_tx_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     tx_errc ec;
 
     prepare_group_tx_reply() noexcept = default;
@@ -661,7 +700,10 @@ struct prepare_group_tx_reply
 };
 
 struct commit_group_tx_request
-  : serde::envelope<commit_group_tx_request, serde::version<0>> {
+  : serde::envelope<
+      commit_group_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     model::producer_identity pid;
     model::tx_seq tx_seq;
@@ -707,7 +749,10 @@ struct commit_group_tx_request
 };
 
 struct commit_group_tx_reply
-  : serde::envelope<commit_group_tx_reply, serde::version<0>> {
+  : serde::envelope<
+      commit_group_tx_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     tx_errc ec;
 
     commit_group_tx_reply() noexcept = default;
@@ -726,7 +771,10 @@ struct commit_group_tx_reply
 };
 
 struct abort_group_tx_request
-  : serde::envelope<abort_group_tx_request, serde::version<0>> {
+  : serde::envelope<
+      abort_group_tx_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     kafka::group_id group_id;
     model::producer_identity pid;
@@ -772,7 +820,10 @@ struct abort_group_tx_request
 };
 
 struct abort_group_tx_reply
-  : serde::envelope<abort_group_tx_reply, serde::version<0>> {
+  : serde::envelope<
+      abort_group_tx_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     tx_errc ec;
 
     abort_group_tx_reply() noexcept = default;
@@ -795,7 +846,8 @@ struct abort_group_tx_reply
 /// - Always specifies node_id
 /// (remove this RPC two versions after join_node_request was
 ///  added to replace it)
-struct join_request : serde::envelope<join_request, serde::version<0>> {
+struct join_request
+  : serde::envelope<join_request, serde::version<0>, serde::compat_version<0>> {
     join_request() noexcept = default;
 
     explicit join_request(model::broker b)
@@ -813,7 +865,8 @@ struct join_request : serde::envelope<join_request, serde::version<0>> {
     auto serde_fields() { return std::tie(node); }
 };
 
-struct join_reply : serde::envelope<join_reply, serde::version<0>> {
+struct join_reply
+  : serde::envelope<join_reply, serde::version<0>, serde::compat_version<0>> {
     bool success;
 
     join_reply() noexcept = default;
@@ -837,7 +890,8 @@ struct join_reply : serde::envelope<join_reply, serde::version<0>> {
 ///   node_id (https://github.com/redpanda-data/redpanda/issues/2793)
 ///   in future.
 struct join_node_request
-  : serde::envelope<join_node_request, serde::version<0>> {
+  : serde::
+      envelope<join_node_request, serde::version<0>, serde::compat_version<0>> {
     join_node_request() noexcept = default;
 
     explicit join_node_request(
@@ -876,7 +930,9 @@ struct join_node_request
     auto serde_fields() { return std::tie(logical_version, node_uuid, node); }
 };
 
-struct join_node_reply : serde::envelope<join_node_reply, serde::version<0>> {
+struct join_node_reply
+  : serde::
+      envelope<join_node_reply, serde::version<0>, serde::compat_version<0>> {
     bool success{false};
     model::node_id id{model::unassigned_node_id};
 
@@ -898,7 +954,10 @@ struct join_node_reply : serde::envelope<join_node_reply, serde::version<0>> {
 };
 
 struct configuration_update_request
-  : serde::envelope<configuration_update_request, serde::version<0>> {
+  : serde::envelope<
+      configuration_update_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     configuration_update_request() noexcept = default;
     explicit configuration_update_request(model::broker b, model::node_id tid)
       : node(std::move(b))
@@ -918,7 +977,10 @@ struct configuration_update_request
 };
 
 struct configuration_update_reply
-  : serde::envelope<configuration_update_reply, serde::version<0>> {
+  : serde::envelope<
+      configuration_update_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     configuration_update_reply() noexcept = default;
     explicit configuration_update_reply(bool success)
       : success(success) {}
@@ -938,7 +1000,10 @@ struct configuration_update_reply
 /// Partition assignment describes an assignment of all replicas for single NTP.
 /// The replicas are hold in vector of broker_shard.
 struct partition_assignment
-  : serde::envelope<partition_assignment, serde::version<0>> {
+  : serde::envelope<
+      partition_assignment,
+      serde::version<0>,
+      serde::compat_version<0>> {
     partition_assignment() noexcept = default;
     partition_assignment(
       raft::group_id group,
@@ -967,7 +1032,10 @@ struct partition_assignment
 };
 
 struct remote_topic_properties
-  : serde::envelope<remote_topic_properties, serde::version<0>> {
+  : serde::envelope<
+      remote_topic_properties,
+      serde::version<0>,
+      serde::compat_version<0>> {
     remote_topic_properties() = default;
     remote_topic_properties(
       model::initial_revision_id remote_revision,
@@ -1105,7 +1173,10 @@ incremental_update_operation_as_string(incremental_update_operation op) {
 
 template<typename T>
 struct property_update
-  : serde::envelope<property_update<T>, serde::version<0>> {
+  : serde::envelope<
+      property_update<T>,
+      serde::version<0>,
+      serde::compat_version<0>> {
     property_update() = default;
     property_update(T v, incremental_update_operation op)
       : value(std::move(v))
@@ -1132,7 +1203,10 @@ struct property_update
 
 template<typename T>
 struct property_update<tristate<T>>
-  : serde::envelope<property_update<tristate<T>>, serde::version<0>> {
+  : serde::envelope<
+      property_update<tristate<T>>,
+      serde::version<0>,
+      serde::compat_version<0>> {
     property_update()
       : value(std::nullopt){};
 
@@ -1226,7 +1300,10 @@ replication_factor parsing_replication_factor(const ss::sstring& value);
 // This class contains updates for topic properties which are replicates not by
 // topic_frontend
 struct incremental_topic_custom_updates
-  : serde::envelope<incremental_topic_custom_updates, serde::version<1>> {
+  : serde::envelope<
+      incremental_topic_custom_updates,
+      serde::version<1>,
+      serde::compat_version<0>> {
     // Data-policy property is replicated by data_policy_frontend and handled by
     // data_policy_manager.
     property_update<std::optional<v8_engine::data_policy>> data_policy;
@@ -1248,7 +1325,10 @@ struct incremental_topic_custom_updates
  * Struct representing single topic properties update
  */
 struct topic_properties_update
-  : serde::envelope<topic_properties_update, serde::version<0>> {
+  : serde::envelope<
+      topic_properties_update,
+      serde::version<0>,
+      serde::compat_version<0>> {
     // We need version to indetify request with custom_properties
     static constexpr int32_t version = -1;
     topic_properties_update() noexcept = default;
@@ -1389,7 +1469,10 @@ struct custom_assignable_topic_configuration {
 };
 
 struct create_partitions_configuration
-  : serde::envelope<create_partitions_configuration, serde::version<0>> {
+  : serde::envelope<
+      create_partitions_configuration,
+      serde::version<0>,
+      serde::compat_version<0>> {
     using custom_assignment = std::vector<model::node_id>;
 
     create_partitions_configuration() = default;
@@ -1417,7 +1500,10 @@ struct create_partitions_configuration
 };
 
 struct topic_configuration_assignment
-  : serde::envelope<topic_configuration_assignment, serde::version<0>> {
+  : serde::envelope<
+      topic_configuration_assignment,
+      serde::version<0>,
+      serde::compat_version<0>> {
     topic_configuration_assignment() = default;
 
     topic_configuration_assignment(
@@ -1439,8 +1525,10 @@ struct topic_configuration_assignment
 };
 
 struct create_partitions_configuration_assignment
-  : serde::
-      envelope<create_partitions_configuration_assignment, serde::version<0>> {
+  : serde::envelope<
+      create_partitions_configuration_assignment,
+      serde::version<0>,
+      serde::compat_version<0>> {
     create_partitions_configuration_assignment() = default;
     create_partitions_configuration_assignment(
       create_partitions_configuration cfg,
@@ -1462,7 +1550,8 @@ struct create_partitions_configuration_assignment
       = default;
 };
 
-struct topic_result : serde::envelope<topic_result, serde::version<0>> {
+struct topic_result
+  : serde::envelope<topic_result, serde::version<0>, serde::compat_version<0>> {
     topic_result() noexcept = default;
     explicit topic_result(model::topic_namespace t, errc ec = errc::success)
       : tp_ns(std::move(t))
@@ -1478,7 +1567,10 @@ struct topic_result : serde::envelope<topic_result, serde::version<0>> {
 };
 
 struct create_topics_request
-  : serde::envelope<create_topics_request, serde::version<0>> {
+  : serde::envelope<
+      create_topics_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<topic_configuration> topics;
     model::timeout_clock::duration timeout;
 
@@ -1493,7 +1585,10 @@ struct create_topics_request
 };
 
 struct create_topics_reply
-  : serde::envelope<create_topics_reply, serde::version<0>> {
+  : serde::envelope<
+      create_topics_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<topic_result> results;
     std::vector<model::topic_metadata> metadata;
     std::vector<topic_configuration> configs;
@@ -1517,7 +1612,10 @@ struct create_topics_reply
 };
 
 struct finish_partition_update_request
-  : serde::envelope<finish_partition_update_request, serde::version<0>> {
+  : serde::envelope<
+      finish_partition_update_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::ntp ntp;
     std::vector<model::broker_shard> new_replica_set;
 
@@ -1533,7 +1631,10 @@ struct finish_partition_update_request
 };
 
 struct finish_partition_update_reply
-  : serde::envelope<finish_partition_update_reply, serde::version<0>> {
+  : serde::envelope<
+      finish_partition_update_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     cluster::errc result;
 
     friend bool operator==(
@@ -1548,7 +1649,10 @@ struct finish_partition_update_reply
 };
 
 struct update_topic_properties_request
-  : serde::envelope<update_topic_properties_request, serde::version<0>> {
+  : serde::envelope<
+      update_topic_properties_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<topic_properties_update> updates;
 
     friend std::ostream&
@@ -1563,7 +1667,10 @@ struct update_topic_properties_request
 };
 
 struct update_topic_properties_reply
-  : serde::envelope<update_topic_properties_reply, serde::version<0>> {
+  : serde::envelope<
+      update_topic_properties_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<topic_result> results;
 
     friend std::ostream&
@@ -1575,17 +1682,6 @@ struct update_topic_properties_reply
       = default;
 
     auto serde_fields() { return std::tie(results); }
-};
-
-template<typename T>
-struct patch {
-    std::vector<T> additions;
-    std::vector<T> deletions;
-    std::vector<T> updates;
-
-    bool empty() const {
-        return additions.empty() && deletions.empty() && updates.empty();
-    }
 };
 
 // generic type used for various registration handles such as in ntp_callbacks.h
@@ -1673,7 +1769,10 @@ struct topic_table_delta {
 };
 
 struct create_acls_cmd_data
-  : serde::envelope<create_acls_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      create_acls_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     std::vector<security::acl_binding> bindings;
 
@@ -1691,7 +1790,10 @@ struct create_acls_cmd_data
 };
 
 struct create_acls_request
-  : serde::envelope<create_acls_request, serde::version<0>> {
+  : serde::envelope<
+      create_acls_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     create_acls_cmd_data data;
     model::timeout_clock::duration timeout;
 
@@ -1715,7 +1817,8 @@ struct create_acls_request
 };
 
 struct create_acls_reply
-  : serde::envelope<create_acls_reply, serde::version<0>> {
+  : serde::
+      envelope<create_acls_reply, serde::version<0>, serde::compat_version<0>> {
     std::vector<errc> results;
 
     friend bool operator==(const create_acls_reply&, const create_acls_reply&)
@@ -1731,7 +1834,10 @@ struct create_acls_reply
 };
 
 struct delete_acls_cmd_data
-  : serde::envelope<delete_acls_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      delete_acls_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     std::vector<security::acl_binding_filter> filters;
 
@@ -1750,7 +1856,10 @@ struct delete_acls_cmd_data
 
 // result for a single filter
 struct delete_acls_result
-  : serde::envelope<delete_acls_result, serde::version<0>> {
+  : serde::envelope<
+      delete_acls_result,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
     std::vector<security::acl_binding> bindings;
 
@@ -1767,7 +1876,10 @@ struct delete_acls_result
 };
 
 struct delete_acls_request
-  : serde::envelope<delete_acls_request, serde::version<0>> {
+  : serde::envelope<
+      delete_acls_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     delete_acls_cmd_data data;
     model::timeout_clock::duration timeout;
 
@@ -1791,7 +1903,8 @@ struct delete_acls_request
 };
 
 struct delete_acls_reply
-  : serde::envelope<delete_acls_reply, serde::version<0>> {
+  : serde::
+      envelope<delete_acls_reply, serde::version<0>, serde::compat_version<0>> {
     std::vector<delete_acls_result> results;
 
     friend bool operator==(const delete_acls_reply&, const delete_acls_reply&)
@@ -1807,7 +1920,8 @@ struct delete_acls_reply
 };
 
 struct backend_operation
-  : serde::envelope<backend_operation, serde::version<0>> {
+  : serde::
+      envelope<backend_operation, serde::version<0>, serde::compat_version<0>> {
     ss::shard_id source_shard;
     partition_assignment p_as;
     topic_table_delta::op_type type;
@@ -1820,7 +1934,10 @@ struct backend_operation
 };
 
 struct create_data_policy_cmd_data
-  : serde::envelope<create_data_policy_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      create_data_policy_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1; // In future dp will be vector
 
     auto serde_fields() { return std::tie(dp); }
@@ -1833,7 +1950,10 @@ struct create_data_policy_cmd_data
 };
 
 struct non_replicable_topic
-  : serde::envelope<non_replicable_topic, serde::version<0>> {
+  : serde::envelope<
+      non_replicable_topic,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     model::topic_namespace source;
     model::topic_namespace name;
@@ -1850,7 +1970,9 @@ struct non_replicable_topic
 using config_version = named_type<int64_t, struct config_version_type>;
 constexpr config_version config_version_unset = config_version{-1};
 
-struct config_status : serde::envelope<config_status, serde::version<0>> {
+struct config_status
+  : serde::
+      envelope<config_status, serde::version<0>, serde::compat_version<0>> {
     model::node_id node;
     config_version version{config_version_unset};
     bool restart{false};
@@ -1866,7 +1988,10 @@ struct config_status : serde::envelope<config_status, serde::version<0>> {
 };
 
 struct cluster_property_kv
-  : serde::envelope<cluster_property_kv, serde::version<0>> {
+  : serde::envelope<
+      cluster_property_kv,
+      serde::version<0>,
+      serde::compat_version<0>> {
     cluster_property_kv() = default;
     cluster_property_kv(ss::sstring k, ss::sstring v)
       : key(std::move(k))
@@ -1884,7 +2009,10 @@ struct cluster_property_kv
 };
 
 struct cluster_config_delta_cmd_data
-  : serde::envelope<cluster_config_delta_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      cluster_config_delta_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 0;
     std::vector<cluster_property_kv> upsert;
     std::vector<ss::sstring> remove;
@@ -1901,7 +2029,10 @@ struct cluster_config_delta_cmd_data
 };
 
 struct cluster_config_status_cmd_data
-  : serde::envelope<cluster_config_status_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      cluster_config_status_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 0;
 
     friend bool operator==(
@@ -1915,7 +2046,10 @@ struct cluster_config_status_cmd_data
 };
 
 struct feature_update_action
-  : serde::envelope<feature_update_action, serde::version<0>> {
+  : serde::envelope<
+      feature_update_action,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     enum class action_t : std::uint16_t {
         // Notify when a feature is done with preparing phase
@@ -1943,7 +2077,10 @@ struct feature_update_action
 };
 
 struct feature_update_cmd_data
-  : serde::envelope<feature_update_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      feature_update_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     // To avoid ambiguity on 'versions' here: `current_version`
     // is the encoding version of the struct, subsequent version
     // fields are the payload.
@@ -1965,8 +2102,10 @@ struct feature_update_cmd_data
 using force_abort_update = ss::bool_class<struct force_abort_update_tag>;
 
 struct cancel_moving_partition_replicas_cmd_data
-  : serde::
-      envelope<cancel_moving_partition_replicas_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      cancel_moving_partition_replicas_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     cancel_moving_partition_replicas_cmd_data() = default;
     explicit cancel_moving_partition_replicas_cmd_data(force_abort_update force)
       : force(force) {}
@@ -1976,7 +2115,10 @@ struct cancel_moving_partition_replicas_cmd_data
 };
 
 struct move_topic_replicas_data
-  : serde::envelope<move_topic_replicas_data, serde::version<0>> {
+  : serde::envelope<
+      move_topic_replicas_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     move_topic_replicas_data() noexcept = default;
     explicit move_topic_replicas_data(
       model::partition_id partition, std::vector<model::broker_shard> replicas)
@@ -1993,7 +2135,10 @@ struct move_topic_replicas_data
 };
 
 struct feature_update_license_update_cmd_data
-  : serde::envelope<feature_update_license_update_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      feature_update_license_update_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     using rpc_adl_exempt = std::true_type;
 
     // Struct encoding version
@@ -2008,7 +2153,10 @@ struct feature_update_license_update_cmd_data
 };
 
 struct user_and_credential
-  : serde::envelope<user_and_credential, serde::version<0>> {
+  : serde::envelope<
+      user_and_credential,
+      serde::version<0>,
+      serde::compat_version<0>> {
     using rpc_adl_exempt = std::true_type;
     static constexpr int8_t current_version = 0;
 
@@ -2028,7 +2176,10 @@ struct user_and_credential
 };
 
 struct bootstrap_cluster_cmd_data
-  : serde::envelope<bootstrap_cluster_cmd_data, serde::version<0>> {
+  : serde::envelope<
+      bootstrap_cluster_cmd_data,
+      serde::version<0>,
+      serde::compat_version<0>> {
     using rpc_adl_exempt = std::true_type;
 
     friend bool operator==(
@@ -2052,7 +2203,10 @@ enum class reconciliation_status : int8_t {
 std::ostream& operator<<(std::ostream&, const reconciliation_status&);
 
 class ntp_reconciliation_state
-  : public serde::envelope<ntp_reconciliation_state, serde::version<0>> {
+  : public serde::envelope<
+      ntp_reconciliation_state,
+      serde::version<0>,
+      serde::compat_version<0>> {
 public:
     ntp_reconciliation_state() noexcept = default;
 
@@ -2097,7 +2251,10 @@ private:
 };
 
 struct reconciliation_state_request
-  : serde::envelope<reconciliation_state_request, serde::version<0>> {
+  : serde::envelope<
+      reconciliation_state_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<model::ntp> ntps;
 
     friend bool operator==(
@@ -2114,7 +2271,10 @@ struct reconciliation_state_request
 };
 
 struct reconciliation_state_reply
-  : serde::envelope<reconciliation_state_reply, serde::version<0>> {
+  : serde::envelope<
+      reconciliation_state_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<ntp_reconciliation_state> results;
 
     friend bool operator==(
@@ -2131,7 +2291,10 @@ struct reconciliation_state_reply
 };
 
 struct decommission_node_request
-  : serde::envelope<decommission_node_request, serde::version<0>> {
+  : serde::envelope<
+      decommission_node_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::node_id id;
 
     friend bool operator==(
@@ -2148,7 +2311,10 @@ struct decommission_node_request
 };
 
 struct decommission_node_reply
-  : serde::envelope<decommission_node_reply, serde::version<0>> {
+  : serde::envelope<
+      decommission_node_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
 
     friend bool
@@ -2165,7 +2331,10 @@ struct decommission_node_reply
 };
 
 struct recommission_node_request
-  : serde::envelope<recommission_node_request, serde::version<0>> {
+  : serde::envelope<
+      recommission_node_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::node_id id;
 
     friend bool operator==(
@@ -2182,7 +2351,10 @@ struct recommission_node_request
 };
 
 struct recommission_node_reply
-  : serde::envelope<recommission_node_reply, serde::version<0>> {
+  : serde::envelope<
+      recommission_node_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
 
     friend bool
@@ -2199,7 +2371,10 @@ struct recommission_node_reply
 };
 
 struct finish_reallocation_request
-  : serde::envelope<finish_reallocation_request, serde::version<0>> {
+  : serde::envelope<
+      finish_reallocation_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::node_id id;
 
     friend bool operator==(
@@ -2216,7 +2391,10 @@ struct finish_reallocation_request
 };
 
 struct finish_reallocation_reply
-  : serde::envelope<finish_reallocation_reply, serde::version<0>> {
+  : serde::envelope<
+      finish_reallocation_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
 
     friend bool operator==(
@@ -2233,7 +2411,10 @@ struct finish_reallocation_reply
 };
 
 struct set_maintenance_mode_request
-  : serde::envelope<set_maintenance_mode_request, serde::version<0>> {
+  : serde::envelope<
+      set_maintenance_mode_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     model::node_id id;
     bool enabled;
@@ -2252,7 +2433,10 @@ struct set_maintenance_mode_request
 };
 
 struct set_maintenance_mode_reply
-  : serde::envelope<set_maintenance_mode_reply, serde::version<0>> {
+  : serde::envelope<
+      set_maintenance_mode_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     errc error;
 
@@ -2270,7 +2454,10 @@ struct set_maintenance_mode_reply
 };
 
 struct config_status_request
-  : serde::envelope<config_status_request, serde::version<0>> {
+  : serde::envelope<
+      config_status_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     config_status status;
 
     friend std::ostream&
@@ -2284,7 +2471,10 @@ struct config_status_request
 };
 
 struct config_status_reply
-  : serde::envelope<config_status_reply, serde::version<0>> {
+  : serde::envelope<
+      config_status_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
 
     friend std::ostream& operator<<(std::ostream&, const config_status_reply&);
@@ -2297,7 +2487,10 @@ struct config_status_reply
 };
 
 struct feature_action_request
-  : serde::envelope<feature_action_request, serde::version<0>> {
+  : serde::envelope<
+      feature_action_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     feature_update_action action;
 
     friend bool
@@ -2311,7 +2504,10 @@ struct feature_action_request
 };
 
 struct feature_action_response
-  : serde::envelope<feature_action_response, serde::version<0>> {
+  : serde::envelope<
+      feature_action_response,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
 
     friend bool
@@ -2328,7 +2524,10 @@ using feature_barrier_tag
   = named_type<ss::sstring, struct feature_barrier_tag_type>;
 
 struct feature_barrier_request
-  : serde::envelope<feature_barrier_request, serde::version<0>> {
+  : serde::envelope<
+      feature_barrier_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     feature_barrier_tag tag; // Each cooperative barrier must use a unique tag
     model::node_id peer;
@@ -2345,7 +2544,10 @@ struct feature_barrier_request
 };
 
 struct feature_barrier_response
-  : serde::envelope<feature_barrier_response, serde::version<0>> {
+  : serde::envelope<
+      feature_barrier_response,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     bool entered;  // Has the respondent entered?
     bool complete; // Has the respondent exited?
@@ -2361,7 +2563,10 @@ struct feature_barrier_response
 };
 
 struct create_non_replicable_topics_request
-  : serde::envelope<create_non_replicable_topics_request, serde::version<0>> {
+  : serde::envelope<
+      create_non_replicable_topics_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     std::vector<non_replicable_topic> topics;
     model::timeout_clock::duration timeout;
@@ -2378,7 +2583,10 @@ struct create_non_replicable_topics_request
 };
 
 struct create_non_replicable_topics_reply
-  : serde::envelope<create_non_replicable_topics_reply, serde::version<0>> {
+  : serde::envelope<
+      create_non_replicable_topics_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     static constexpr int8_t current_version = 1;
     std::vector<topic_result> results;
 
@@ -2394,7 +2602,10 @@ struct create_non_replicable_topics_reply
 };
 
 struct config_update_request final
-  : serde::envelope<config_update_request, serde::version<0>> {
+  : serde::envelope<
+      config_update_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     std::vector<cluster_property_kv> upsert;
     std::vector<ss::sstring> remove;
 
@@ -2409,7 +2620,10 @@ struct config_update_request final
 };
 
 struct config_update_reply
-  : serde::envelope<config_update_reply, serde::version<0>> {
+  : serde::envelope<
+      config_update_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     errc error;
     cluster::config_version latest_version{config_version_unset};
 
@@ -2422,7 +2636,9 @@ struct config_update_reply
     auto serde_fields() { return std::tie(error, latest_version); }
 };
 
-struct hello_request final : serde::envelope<hello_request, serde::version<0>> {
+struct hello_request final
+  : serde::
+      envelope<hello_request, serde::version<0>, serde::compat_version<0>> {
     model::node_id peer;
 
     // milliseconds since epoch
@@ -2436,7 +2652,8 @@ struct hello_request final : serde::envelope<hello_request, serde::version<0>> {
     friend std::ostream& operator<<(std::ostream&, const hello_request&);
 };
 
-struct hello_reply : serde::envelope<hello_reply, serde::version<0>> {
+struct hello_reply
+  : serde::envelope<hello_reply, serde::version<0>, serde::compat_version<0>> {
     errc error;
 
     friend bool operator==(const hello_reply&, const hello_reply&) = default;
@@ -2516,7 +2733,10 @@ private:
 };
 
 struct move_cancellation_result
-  : serde::envelope<move_cancellation_result, serde::version<0>> {
+  : serde::envelope<
+      move_cancellation_result,
+      serde::version<0>,
+      serde::compat_version<0>> {
     move_cancellation_result() = default;
 
     move_cancellation_result(model::ntp ntp, cluster::errc ec)
@@ -2540,7 +2760,10 @@ enum class partition_move_direction { to_node, from_node, all };
 std::ostream& operator<<(std::ostream&, const partition_move_direction&);
 
 struct cancel_all_partition_movements_request
-  : serde::envelope<cancel_all_partition_movements_request, serde::version<0>> {
+  : serde::envelope<
+      cancel_all_partition_movements_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     cancel_all_partition_movements_request() = default;
 
     auto serde_fields() { return std::tie(); }
@@ -2557,8 +2780,10 @@ struct cancel_all_partition_movements_request
     }
 };
 struct cancel_node_partition_movements_request
-  : serde::
-      envelope<cancel_node_partition_movements_request, serde::version<0>> {
+  : serde::envelope<
+      cancel_node_partition_movements_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
     model::node_id node_id;
     partition_move_direction direction;
 
@@ -2574,7 +2799,10 @@ struct cancel_node_partition_movements_request
 };
 
 struct cancel_partition_movements_reply
-  : serde::envelope<cancel_partition_movements_reply, serde::version<0>> {
+  : serde::envelope<
+      cancel_partition_movements_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
     friend bool operator==(
       const cancel_partition_movements_reply&,
       const cancel_partition_movements_reply&)
@@ -2587,6 +2815,56 @@ struct cancel_partition_movements_reply
 
     errc general_error;
     std::vector<move_cancellation_result> partition_results;
+};
+
+/**
+ * Broker state transitions are coordinated centrally as opposite to
+ * configuration which change is requested by the described node itself. Broker
+ * state represents centrally managed node properties. The difference between
+ * broker state and configuration is that the configuration change is made on
+ * the node while state changes are managed by the cluster controller.
+ */
+class broker_state
+  : public serde::
+      envelope<broker_state, serde::version<0>, serde::compat_version<0>> {
+public:
+    model::membership_state get_membership_state() const {
+        return _membership_state;
+    }
+    void set_membership_state(model::membership_state st) {
+        _membership_state = st;
+    }
+
+    model::maintenance_state get_maintenance_state() const {
+        return _maintenance_state;
+    }
+    void set_maintenance_state(model::maintenance_state st) {
+        _maintenance_state = st;
+    }
+    friend bool operator==(const broker_state&, const broker_state&) = default;
+
+    friend std::ostream& operator<<(std::ostream&, const broker_state&);
+
+    auto serde_fields() {
+        return std::tie(_membership_state, _maintenance_state);
+    }
+
+private:
+    model::membership_state _membership_state = model::membership_state::active;
+    model::maintenance_state _maintenance_state
+      = model::maintenance_state::inactive;
+};
+
+/**
+ * Node metadata describes a cluster node with its state and configuration
+ */
+struct node_metadata {
+    model::broker broker;
+    broker_state state;
+
+    friend bool operator==(const node_metadata&, const node_metadata&)
+      = default;
+    friend std::ostream& operator<<(std::ostream&, const node_metadata&);
 };
 
 /*

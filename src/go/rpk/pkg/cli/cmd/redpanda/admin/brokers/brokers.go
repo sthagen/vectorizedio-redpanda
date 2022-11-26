@@ -105,6 +105,17 @@ leader handles the request.
 			cl, err := admin.NewClient(fs, cfg)
 			out.MaybeDie(err, "unable to initialize admin client: %v", err)
 
+			b, err := cl.Broker(cmd.Context(), broker)
+			out.MaybeDie(err, "unable to initialize admin client: %v", err)
+
+			// Old brokers (< v22.1) don't have maintenance mode, so we must
+			// check if b.Maintenance is not nil.
+			if b.Maintenance != nil && b.Maintenance.Draining {
+				out.Die(`Node cannot be decommissioned while it is in maintenance mode.
+Take the node out of maintenance mode first by running: 
+    rpk cluster maintenance disable %v`, broker)
+			}
+
 			err = cl.DecommissionBroker(cmd.Context(), broker)
 			out.MaybeDie(err, "unable to decommission broker: %v", err)
 

@@ -264,7 +264,6 @@ class SISettings:
             cloud_storage_access_key: str = 'panda-user',
             cloud_storage_secret_key: str = 'panda-secret',
             cloud_storage_region: str = 'panda-region',
-            cloud_storage_bucket: Optional[str] = None,
             cloud_storage_api_endpoint: str = 'minio-s3',
             cloud_storage_api_endpoint_port: int = 9000,
             cloud_storage_cache_size: int = 160 * 1000000,
@@ -282,7 +281,7 @@ class SISettings:
         self.cloud_storage_access_key = cloud_storage_access_key
         self.cloud_storage_secret_key = cloud_storage_secret_key
         self.cloud_storage_region = cloud_storage_region
-        self.cloud_storage_bucket = f'panda-bucket-{uuid.uuid1()}' if cloud_storage_bucket is None else cloud_storage_bucket
+        self.cloud_storage_bucket = f'panda-bucket-{uuid.uuid1()}'
         self.cloud_storage_api_endpoint = cloud_storage_api_endpoint
         self.cloud_storage_api_endpoint_port = cloud_storage_api_endpoint_port
         self.cloud_storage_cache_size = cloud_storage_cache_size
@@ -1159,12 +1158,16 @@ class RedpandaService(Service):
         if not expect_fail:
             self._started.append(node)
 
-    def start_node_with_rpk(self, node, additional_args=""):
+    def start_node_with_rpk(self, node, additional_args="", clean_node=True):
         """
         Start a single instance of redpanda using rpk. similar to start_node, 
         this function will not return until redpanda appears to have started 
         successfully.
         """
+        if clean_node:
+            self.clean_node(node, preserve_current_install=True)
+        else:
+            self.logger.debug("%s: skip cleaning node" % self.who_am_i(node))
         node.account.mkdirs(RedpandaService.DATA_DIR)
         node.account.mkdirs(os.path.dirname(RedpandaService.NODE_CONFIG_FILE))
 
@@ -1622,8 +1625,13 @@ class RedpandaService(Service):
         if not os.path.isdir(service_dir):
             mkdir_p(service_dir)
 
-        rpk = RpkTool(self)
-        rpk.cluster_config_export(cluster_config_filename, True)
+        try:
+            rpk = RpkTool(self)
+            rpk.cluster_config_export(cluster_config_filename, True)
+        except Exception as e:
+            # Configuration is optional: if redpanda has e.g. crashed, you
+            # will not be able to get it from the admin API
+            self.logger.info(f"{self.who_am_i()}: error getting config: {e}")
 
         self.logger.info("%s: stopping service" % self.who_am_i())
 
@@ -1756,6 +1764,10 @@ class RedpandaService(Service):
     def started_nodes(self):
         return self._started
 
+    def render(self, path, **kwargs):
+        with self.config_file_lock:
+            return super(RedpandaService, self).render(path, **kwargs)
+
     def write_node_conf_file(self,
                              node,
                              override_cfg_params=None,
@@ -1781,9 +1793,6 @@ class RedpandaService(Service):
         # exercise code paths that deal with multiple listeners
         node_ip = socket.gethostbyname(node.account.hostname)
 
-        self.logger.info(
-            f"self.render: hasattr(self, 'template_env'): {hasattr(self, 'template_env')}"
-        )
         conf = self.render("redpanda.yaml",
                            node=node,
                            data_dir=RedpandaService.DATA_DIR,
@@ -1842,8 +1851,10 @@ class RedpandaService(Service):
     def write_bootstrap_cluster_config(self):
         conf = copy.deepcopy(self.CLUSTER_CONFIG_DEFAULTS)
 
-        if self._installer.installed_version != RedpandaInstaller.HEAD:
-            # If we're running an older version, exclude some newer configs
+        cur_ver = self._installer.installed_version
+        if cur_ver != RedpandaInstaller.HEAD and cur_ver < (22, 2, 7):
+            # this configuration property was introduced in 22.2, ensure
+            # it doesn't appear in older configurations
             del conf['log_segment_size_jitter_percent']
 
         if self._extra_rp_conf:

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM ubuntu:jammy
+FROM ubuntu:kinetic-20220830
 
 ENV TZ="UTC" \
     DEBIAN_FRONTEND=noninteractive
@@ -44,8 +44,8 @@ RUN mvn clean package --batch-mode --file /opt/redpanda-tests/java/e2e-verifiers
 # - install distro-packaged depedencies
 # - allow user env variables in ssh sessions
 # - install dependencies of 'rpk debug' system scan
-RUN apt update && \
-    apt install -y \
+RUN apt-get update && \
+    apt-get install -qq \
       bind9-utils \
       bind9-dnsutils \
       bsdmainutils \
@@ -64,7 +64,7 @@ RUN apt update && \
       nodejs \
       npm \
       openssh-server \
-      netcat \
+      netcat-openbsd \
       sudo \
       python3-pip && \
     rm -rf /var/lib/apt/lists/* && \
@@ -146,7 +146,7 @@ RUN go install github.com/twmb/kcl@v0.8.0 && \
 
 # Install the kgo-verifier tool
 RUN git -C /opt clone https://github.com/redpanda-data/kgo-verifier.git && \
-    cd /opt/kgo-verifier && git reset --hard 98f1f57dab8bb8abe615f733a0ea307026ce13a5 && \
+    cd /opt/kgo-verifier && git reset --hard 3c01706276bb08bed90839d38c5f1e95437d8e78 && \
     go mod tidy && make
 
 # Expose port 8080 for any http examples within clients

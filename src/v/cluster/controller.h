@@ -120,6 +120,9 @@ public:
     ss::sharded<ss::abort_source>& get_abort_source() { return _as; }
 
     ss::sharded<storage::api>& get_storage() { return _storage; }
+    ss::sharded<members_backend>& get_members_backend() {
+        return _members_backend;
+    }
 
     bool is_raft0_leader() const {
         vassert(
@@ -158,6 +161,9 @@ private:
     ss::future<> create_cluster(bootstrap_cluster_cmd_data cmd_data);
 
     ss::future<> cluster_creation_hook(cluster_discovery& discovery);
+
+    // Checks configuration invariants stored in kvstore
+    ss::future<> validate_configuration_invariants();
 
     config_manager::preload_result _config_preload;
 

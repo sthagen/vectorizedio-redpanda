@@ -12,42 +12,30 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "cloud_storage/logger.h"
+#include "cloud_storage/topic_manifest.h"
 #include "cloud_storage/types.h"
-#include "config/configuration.h"
 #include "hashing/xx.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
-#include "model/record.h"
 #include "model/record_batch_types.h"
 #include "model/timestamp.h"
-#include "s3/client.h"
-#include "s3/error.h"
-#include "storage/log_reader.h"
-#include "storage/logger.h"
 #include "storage/ntp_config.h"
 #include "storage/parser.h"
-#include "storage/segment_appender_utils.h"
 #include "utils/gate_guard.h"
 
 #include <seastar/core/abort_source.hh>
-#include <seastar/core/coroutine.hh>
 #include <seastar/core/file-types.hh>
-#include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/gate.hh>
-#include <seastar/core/iostream-impl.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/seastar.hh>
-#include <seastar/core/smp.hh>
 #include <seastar/core/temporary_buffer.hh>
-#include <seastar/core/thread.hh>
 #include <seastar/util/log.hh>
 
 #include <absl/container/btree_map.h>
 #include <boost/algorithm/string/detail/sequence.hpp>
-#include <boost/lexical_cast.hpp>
 
 #include <chrono>
 #include <exception>
@@ -234,14 +222,12 @@ get_retention_policy(const storage::ntp_config::default_overrides& prop) {
     return std::monostate();
 }
 
-ss::future<partition_downloader::offset_map_t>
-partition_downloader::build_offset_map(const recovery_material& mat) {
-    offset_map_t offset_map;
-    const auto& manifest = mat.partition_manifest;
+static auto build_offset_map(const partition_manifest& manifest) {
+    absl::btree_map<model::offset, segment_meta> offset_map;
     for (const auto& segm : manifest) {
         offset_map.insert_or_assign(segm.second.base_offset, segm.second);
     }
-    co_return std::move(offset_map);
+    return offset_map;
 }
 
 // entry point for the whole thing
@@ -256,7 +242,6 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
       _ntpc.get_revision(),
       retention);
     auto mat = co_await find_recovery_material(manifest_key);
-    auto offset_map = co_await build_offset_map(mat);
     if (cst_log.is_enabled(ss::log_level::debug)) {
         std::stringstream ostr;
         mat.partition_manifest.serialize(ostr);
@@ -271,7 +256,10 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
         static constexpr auto one_week = one_day * 7;
         vlog(_ctxlog.info, "Default retention parameters are used.");
         part = co_await download_log_with_capped_time(
-          offset_map, mat.partition_manifest, prefix, one_week);
+          build_offset_map(mat.partition_manifest),
+          mat.partition_manifest,
+          prefix,
+          one_week);
     } else if (std::holds_alternative<size_bound_deletion_parameters>(
                  retention)) {
         auto r = std::get<size_bound_deletion_parameters>(retention);
@@ -280,7 +268,10 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
           "Size bound retention is used. Size limit: {} bytes.",
           r.retention_bytes);
         part = co_await download_log_with_capped_size(
-          offset_map, mat.partition_manifest, prefix, r.retention_bytes);
+          build_offset_map(mat.partition_manifest),
+          mat.partition_manifest,
+          prefix,
+          r.retention_bytes);
     } else if (std::holds_alternative<time_bound_deletion_parameters>(
                  retention)) {
         auto r = std::get<time_bound_deletion_parameters>(retention);
@@ -289,7 +280,10 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
           "Time bound retention is used. Time limit: {}ms.",
           r.retention_duration.count());
         part = co_await download_log_with_capped_time(
-          offset_map, mat.partition_manifest, prefix, r.retention_duration);
+          build_offset_map(mat.partition_manifest),
+          mat.partition_manifest,
+          prefix,
+          r.retention_duration);
     }
     // Move parts to final destinations
     co_await move_parts(part);
@@ -340,7 +334,7 @@ void partition_downloader::update_downloaded_offsets(
 
 ss::future<partition_downloader::download_part>
 partition_downloader::download_log_with_capped_size(
-  const offset_map_t& offset_map,
+  offset_map_t offset_map,
   const partition_manifest& manifest,
   const std::filesystem::path& prefix,
   size_t max_size) {
@@ -363,6 +357,9 @@ partition_downloader::download_log_with_capped_size(
     size_t total_size = 0;
     auto data_found = false;
 
+    // operating on iterators across suspension points is a potentially unsafe
+    // pattern. here the usage is safe since the backing data structure is local
+    // to this coroutine
     co_await ss::do_until(
       [&] {
           return offset_segment_it == offset_end
@@ -413,7 +410,7 @@ partition_downloader::download_log_with_capped_size(
 
 ss::future<partition_downloader::download_part>
 partition_downloader::download_log_with_capped_time(
-  const offset_map_t& offset_map,
+  offset_map_t offset_map,
   const partition_manifest& manifest,
   const std::filesystem::path& prefix,
   model::timestamp_clock::duration retention_time) {

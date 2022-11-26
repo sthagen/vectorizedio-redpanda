@@ -9,15 +9,17 @@
 import os
 import random
 
+from ducktape.errors import TimeoutError
 from ducktape.mark import ok_to_fail, parametrize
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
 
+from rptest.services.admin import Admin
 from rptest.utils.mode_checks import skip_debug_mode
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
-from rptest.services.action_injector import random_process_kills
+from rptest.services.action_injector import ActionConfig, random_process_kills
 from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import KgoVerifierProducer, KgoVerifierRandomConsumer
 from rptest.services.redpanda import RedpandaService, CHAOS_LOG_ALLOW_LIST
@@ -129,15 +131,12 @@ class EndToEndShadowIndexingTestCompactedTopic(EndToEndShadowIndexingBase):
         cleanup_policy="compact,delete",
         segment_bytes=EndToEndShadowIndexingBase.segment_size // 2), )
 
-    @skip_debug_mode
-    @cluster(num_nodes=5)
-    def test_write(self):
+    def _prime_compacted_topic(self, segment_count):
         # Set compaction interval high at first, so we can get enough segments in log
         rpk_client = RpkTool(self.redpanda)
         rpk_client.cluster_config_set("log_compaction_interval_ms",
                                       f'{1000 * 60 * 60}')
 
-        segment_count = 10
         self.start_producer(throughput=10000, repeating_keys=10)
         wait_until_segments(
             redpanda=self.redpanda,
@@ -165,6 +164,34 @@ class EndToEndShadowIndexingTestCompactedTopic(EndToEndShadowIndexingBase):
         )
         self.producer.stop()
 
+        return original_snapshot
+
+    def _transfer_topic_leadership(self):
+        admin = Admin(self.redpanda)
+        cur_leader = admin.get_partition_leader(namespace='kafka',
+                                                topic=self.topic,
+                                                partition=0)
+        broker_ids = [x['node_id'] for x in admin.get_brokers()]
+        transfer_to = random.choice([n for n in broker_ids if n != cur_leader])
+        assert cur_leader != transfer_to, "incorrect partition move in test"
+        admin.transfer_leadership_to(namespace="kafka",
+                                     topic=self.topic,
+                                     partition=0,
+                                     target_id=transfer_to,
+                                     leader_id=cur_leader)
+
+        admin.await_stable_leader(self.topic,
+                                  partition=0,
+                                  namespace='kafka',
+                                  timeout_s=60,
+                                  backoff_s=2,
+                                  check=lambda node_id: node_id == transfer_to)
+
+    @skip_debug_mode
+    @cluster(num_nodes=5)
+    def test_write(self):
+        original_snapshot = self._prime_compacted_topic(10)
+
         self.kafka_tools.alter_topic_config(
             self.topic,
             {
@@ -173,6 +200,39 @@ class EndToEndShadowIndexingTestCompactedTopic(EndToEndShadowIndexingBase):
             },
         )
 
+        wait_for_removal_of_n_segments(redpanda=self.redpanda,
+                                       topic=self.topic,
+                                       partition_idx=0,
+                                       n=6,
+                                       original_snapshot=original_snapshot)
+
+        self.start_consumer(verify_offsets=False)
+        self.run_consumer_validation(enable_compaction=True)
+
+        s3_snapshot = S3Snapshot(self.topics, self.redpanda.s3_client,
+                                 self.s3_bucket_name, self.logger)
+        s3_snapshot.assert_at_least_n_uploaded_segments_compacted(self.topic,
+                                                                  partition=0,
+                                                                  n=1)
+        s3_snapshot.assert_segments_replaced(self.topic, partition=0)
+
+    @skip_debug_mode
+    @cluster(num_nodes=5)
+    def test_compacting_during_leadership_transfer(self):
+        original_snapshot = self._prime_compacted_topic(10)
+
+        self.kafka_tools.alter_topic_config(
+            self.topic,
+            {
+                TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES:
+                5 * self.segment_size,
+            },
+        )
+
+        # Transfer the topic to another node
+        self._transfer_topic_leadership()
+
+        # After leadership transfer has completed assert that manifest is OK
         wait_for_removal_of_n_segments(redpanda=self.redpanda,
                                        topic=self.topic,
                                        partition_idx=0,
@@ -238,6 +298,69 @@ class EndToEndShadowIndexingTestWithDisruptions(EndToEndShadowIndexingBase):
         ctx.assert_actions_triggered()
 
 
+class EndToEndCloudRetentionTest(EndToEndShadowIndexingBase):
+    segment_size = EndToEndShadowIndexingBase.segment_size // 4
+    retention_bytes = 10 * segment_size
+    topics = (TopicSpec(name=EndToEndShadowIndexingBase.s3_topic_name,
+                        partition_count=1,
+                        replication_factor=3,
+                        retention_bytes=retention_bytes,
+                        segment_bytes=segment_size), )
+
+    def __init__(self, test_context):
+        super().__init__(test_context,
+                         extra_rp_conf={
+                             'default_topic_replications': self.num_brokers,
+                             'cloud_storage_housekeeping_interval_ms': 1000 * 2
+                         })
+
+    @cluster(num_nodes=4, log_allow_list=CHAOS_LOG_ALLOW_LIST)
+    @skip_debug_mode
+    def test_retention_with_node_failures(self):
+        max_overshoot_percentage = 100
+
+        self.start_producer(throughput=10000)
+
+        def cloud_log_size() -> int:
+            s3_snapshot = S3Snapshot(self.topics, self.redpanda.s3_client,
+                                     self.s3_bucket_name, self.logger)
+            if not s3_snapshot.is_ntp_in_manifest(self.topic, 0):
+                self.logger.debug(f"No manifest present yet")
+                return 0
+
+            cloud_log_size = s3_snapshot.cloud_log_size_for_ntp(self.topic, 0)
+            ratio = cloud_log_size / self.retention_bytes
+            overshoot_percentage = max(ratio - 1, 0) * 100
+
+            self.logger.debug(f"Current cloud log size is: {cloud_log_size}")
+            self.logger.debug(f"Overshot by {overshoot_percentage}%")
+
+            if overshoot_percentage > max_overshoot_percentage:
+                raise RuntimeError(
+                    f"Cloud log size {overshoot_percentage}% greater than configured"
+                    f" retention (max allowed {max_overshoot_percentage}%)")
+
+            return cloud_log_size
+
+        pkill_config = ActionConfig(cluster_start_lead_time_sec=10,
+                                    min_time_between_actions_sec=10,
+                                    max_time_between_actions_sec=20)
+        with random_process_kills(self.redpanda, pkill_config) as ctx:
+            try:
+                wait_until(lambda: cloud_log_size() == -1,
+                           timeout_sec=120,
+                           backoff_sec=5)
+            except TimeoutError as e:
+                # This is the success path. Timing out means that
+                # we've stayed below the max cloud log size threshold
+                # for the duration of the test.
+                pass
+            finally:
+                self.producer.stop()
+
+        ctx.assert_actions_triggered()
+
+
 class ShadowIndexingWhileBusyTest(PreallocNodesTest):
     # With SI enabled, run common operations against a cluster
     # while the system is under load (busy).
@@ -250,7 +373,6 @@ class ShadowIndexingWhileBusyTest(PreallocNodesTest):
     def __init__(self, test_context: TestContext):
         si_settings = SISettings(log_segment_size=self.segment_size,
                                  cloud_storage_cache_size=20 * 2**30,
-                                 cloud_storage_bucket='while-busy-bucket',
                                  cloud_storage_enable_remote_read=False,
                                  cloud_storage_enable_remote_write=False)
 

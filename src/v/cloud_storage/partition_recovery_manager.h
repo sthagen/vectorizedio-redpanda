@@ -12,22 +12,16 @@
 
 #include "cloud_storage/offset_translation_layer.h"
 #include "cloud_storage/remote.h"
-#include "cloud_storage/topic_manifest.h"
-#include "cloud_storage/types.h"
 #include "model/metadata.h"
 #include "model/record.h"
 #include "s3/client.h"
 #include "storage/ntp_config.h"
-#include "utils/named_type.h"
 #include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
-#include <seastar/core/gate.hh>
 #include <seastar/core/sharded.hh>
 
-#include <compare>
-#include <iterator>
 #include <vector>
 
 namespace cloud_storage {
@@ -178,16 +172,14 @@ private:
 
     using offset_map_t = absl::btree_map<model::offset, segment_meta>;
 
-    ss::future<offset_map_t> build_offset_map(const recovery_material& mat);
-
     ss::future<download_part> download_log_with_capped_size(
-      const offset_map_t& offset_map,
+      offset_map_t offset_map,
       const partition_manifest& manifest,
       const std::filesystem::path& prefix,
       size_t max_size);
 
     ss::future<download_part> download_log_with_capped_time(
-      const offset_map_t& offset_map,
+      offset_map_t offset_map,
       const partition_manifest& manifest,
       const std::filesystem::path& prefix,
       model::timestamp_clock::duration retention_time);

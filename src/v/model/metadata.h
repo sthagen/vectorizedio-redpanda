@@ -57,7 +57,8 @@ using initial_revision_id
 /// Rack id type
 using rack_id = named_type<ss::sstring, struct rack_id_model_type>;
 struct broker_properties
-  : serde::envelope<broker_properties, serde::version<0>> {
+  : serde::
+      envelope<broker_properties, serde::version<0>, serde::compat_version<0>> {
     uint32_t cores;
     uint32_t available_memory_gb;
     uint32_t available_disk_gb;
@@ -73,6 +74,9 @@ struct broker_properties
                && etc_props == other.etc_props;
     }
 
+    friend std::ostream&
+    operator<<(std::ostream&, const model::broker_properties&);
+
     auto serde_fields() {
         return std::tie(
           cores,
@@ -84,7 +88,8 @@ struct broker_properties
 };
 
 struct broker_endpoint final
-  : serde::envelope<broker_endpoint, serde::version<0>> {
+  : serde::
+      envelope<broker_endpoint, serde::version<0>, serde::compat_version<0>> {
     ss::sstring name;
     net::unresolved_address address;
 
@@ -148,8 +153,11 @@ enum class membership_state : int8_t { active, draining, removed };
 enum class maintenance_state { active, inactive };
 
 std::ostream& operator<<(std::ostream&, membership_state);
+std::ostream& operator<<(std::ostream&, maintenance_state);
 
-class broker : public serde::envelope<broker, serde::version<0>> {
+class broker
+  : public serde::
+      envelope<broker, serde::version<0>, serde::compat_version<0>> {
 public:
     broker() noexcept = default;
 
@@ -180,6 +188,7 @@ public:
 
     broker(broker&&) noexcept = default;
     broker& operator=(broker&&) noexcept = default;
+    broker& operator=(const broker&) noexcept = default;
     broker(const broker&) = default;
     const node_id& id() const { return _id; }
 
@@ -189,16 +198,6 @@ public:
     }
     const net::unresolved_address& rpc_address() const { return _rpc_address; }
     const std::optional<rack_id>& rack() const { return _rack; }
-
-    membership_state get_membership_state() const { return _membership_state; }
-    void set_membership_state(membership_state st) { _membership_state = st; }
-
-    maintenance_state get_maintenance_state() const {
-        return _maintenance_state;
-    }
-    void set_maintenance_state(maintenance_state st) {
-        _maintenance_state = st;
-    }
 
     void replace_unassigned_node_id(const node_id id) {
         vassert(
@@ -221,9 +220,6 @@ private:
     net::unresolved_address _rpc_address;
     std::optional<rack_id> _rack;
     broker_properties _properties;
-    // in memory state, not serialized
-    membership_state _membership_state = membership_state::active;
-    maintenance_state _maintenance_state{maintenance_state::inactive};
 
     friend std::ostream& operator<<(std::ostream&, const broker&);
 };
@@ -260,7 +256,10 @@ struct broker_shard {
 };
 
 struct partition_metadata
-  : serde::envelope<partition_metadata, serde::version<0>> {
+  : serde::envelope<
+      partition_metadata,
+      serde::version<0>,
+      serde::compat_version<0>> {
     partition_metadata() noexcept = default;
     explicit partition_metadata(partition_id p) noexcept
       : id(p) {}
@@ -384,7 +383,9 @@ struct topic_namespace_eq {
     }
 };
 
-struct topic_metadata : serde::envelope<topic_metadata, serde::version<0>> {
+struct topic_metadata
+  : serde::
+      envelope<topic_metadata, serde::version<0>, serde::compat_version<0>> {
     topic_metadata() noexcept = default;
     explicit topic_metadata(topic_namespace v) noexcept
       : tp_ns(std::move(v)) {}

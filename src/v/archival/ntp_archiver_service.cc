@@ -209,10 +209,12 @@ ss::future<> ntp_archiver::upload_loop() {
           = co_await upload_next_candidates();
         if (non_compacted_upload_result.num_failed != 0) {
             // The logic in class `remote` already does retries: if we get here,
-            // it means the upload failed after several retries, indicating
-            // something non-transient may be wrong.  Hence error severity.
+            // it means the upload failed after several retries, justifying
+            // a warning to the operator: something non-transient may be wrong,
+            // although we do also see this in practice on AWS S3 occasionally
+            // during normal operation.
             vlog(
-              _rtclog.error,
+              _rtclog.warn,
               "Failed to upload {} segments out of {}",
               non_compacted_upload_result.num_failed,
               non_compacted_upload_result.num_succeeded
@@ -565,29 +567,27 @@ ntp_archiver::upload_tx(upload_candidate candidate) {
     co_return co_await _remote.upload_manifest(_bucket, manifest, fib);
 }
 
-static cloud_storage::upload_result process_multiple_upload_results(
-  std::vector<ss::future<cloud_storage::upload_result>>&& vec) {
-    auto res = cloud_storage::upload_result::success;
-    for (auto& v : vec) {
-        auto r = v.get();
-        if (r != cloud_storage::upload_result::success) {
-            res = r;
-        }
-    }
-    return res;
-}
-
 // The function turns an array of futures that return an error code into a
 // single future that returns error result of the last failed future or success
 // otherwise.
 static ss::future<cloud_storage::upload_result> aggregate_upload_results(
-  std::vector<ss::future<cloud_storage::upload_result>>&& upl_vec) {
-    return ss::do_with(
-      std::move(upl_vec),
-      [](std::vector<ss::future<cloud_storage::upload_result>>& all_uploads) {
-          return ss::when_all(all_uploads.begin(), all_uploads.end())
-            .then(&process_multiple_upload_results);
-      });
+  std::vector<ss::future<cloud_storage::upload_result>> upl_vec) {
+    return ss::when_all(upl_vec.begin(), upl_vec.end()).then([](auto vec) {
+        auto res = cloud_storage::upload_result::success;
+        for (auto& v : vec) {
+            try {
+                auto r = v.get();
+                if (r != cloud_storage::upload_result::success) {
+                    res = r;
+                }
+            } catch (const ss::gate_closed_exception&) {
+                res = cloud_storage::upload_result::cancelled;
+            } catch (...) {
+                res = cloud_storage::upload_result::failed;
+            }
+        }
+        return res;
+    });
 }
 
 ss::future<ntp_archiver::scheduled_upload>
