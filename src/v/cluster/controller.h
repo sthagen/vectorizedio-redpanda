@@ -38,7 +38,7 @@ public:
       ss::sharded<partition_manager>& pm,
       ss::sharded<shard_table>& st,
       ss::sharded<storage::api>& storage,
-      ss::sharded<storage::node_api>& storage_node,
+      ss::sharded<node::local_monitor>& local_monitor,
       ss::sharded<raft::group_manager>&,
       ss::sharded<v8_engine::data_policy_table>&,
       ss::sharded<features::feature_table>&,
@@ -139,8 +139,11 @@ public:
      * Create raft0, and start the services that the \c controller owns.
      * \param initial_raft0_brokers Brokers to start raft0 with. Empty for
      *      non-seeds.
+     * \param shard0_as an abort source only usable on shard0, and only for
+     *        use within this start function -- for the rest of the lifetime
+     *        of controller, it has its own member abort source.
      */
-    ss::future<> start(cluster_discovery&);
+    ss::future<> start(cluster_discovery&, ss::abort_source&);
 
     // prevents controller from accepting new requests
     ss::future<> shutdown_input();
@@ -189,7 +192,7 @@ private:
     ss::sharded<partition_manager>& _partition_manager;
     ss::sharded<shard_table>& _shard_table;
     ss::sharded<storage::api>& _storage;
-    ss::sharded<storage::node_api>& _storage_node; // single instance
+    ss::sharded<node::local_monitor>& _local_monitor; // single instance
     topic_updates_dispatcher _tp_updates_dispatcher;
     ss::sharded<security::credential_store> _credentials;
     ss::sharded<security::ephemeral_credential_store> _ephemeral_credentials;

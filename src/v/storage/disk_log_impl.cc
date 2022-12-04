@@ -519,8 +519,7 @@ ss::future<compaction_result> disk_log_impl::compact_adjacent_segments(
     // lock on the range, which is then released. the remainder of the
     // compaction process operates on replacement segment, and any conflicting
     // log operations are later identified before committing changes.
-    auto staging_path = std::filesystem::path(
-      fmt::format("{}.compaction.staging", target->reader().filename()));
+    auto staging_path = target->reader().path().to_compaction_staging();
     auto [replacement, generations]
       = co_await storage::internal::make_concatenated_segment(
         staging_path, segments, cfg, _manager.resources());
@@ -544,12 +543,11 @@ ss::future<compaction_result> disk_log_impl::compact_adjacent_segments(
      * remove index files. they will be rebuilt by the single segment compaction
      * operation, and also ensures we examine segments correctly on recovery.
      */
-    if (co_await ss::file_exists(target->index().filename())) {
-        co_await ss::remove_file(target->index().filename());
+    if (co_await ss::file_exists(target->index().path().string())) {
+        co_await ss::remove_file(target->index().path().string());
     }
 
-    auto compact_index = internal::compacted_index_path(
-      target->reader().filename().c_str());
+    auto compact_index = target->reader().path().to_compacted_index();
     if (co_await ss::file_exists(compact_index.string())) {
         co_await ss::remove_file(compact_index.string());
     }
@@ -1115,22 +1113,20 @@ disk_log_impl::timequery(timequery_config cfg) {
     if (_segs.empty()) {
         return ss::make_ready_future<std::optional<timequery_result>>();
     }
-    return make_reader(std::move(cfg))
-      .then([cfg](model::record_batch_reader reader) {
-          return model::consume_reader_to_memory(
-                   std::move(reader), model::no_timeout)
-            .then([cfg](model::record_batch_reader::storage_t st) {
-                using ret_t = std::optional<timequery_result>;
-                auto& batches = std::get<model::record_batch_reader::data_t>(
-                  st);
-                if (
-                  !batches.empty()
-                  && batches.front().header().max_timestamp >= cfg.time) {
-                    return ret_t(batch_timequery(batches.front(), cfg.time));
-                }
-                return ret_t();
-            });
-      });
+    return make_reader(cfg).then([cfg](model::record_batch_reader reader) {
+        return model::consume_reader_to_memory(
+                 std::move(reader), model::no_timeout)
+          .then([cfg](model::record_batch_reader::storage_t st) {
+              using ret_t = std::optional<timequery_result>;
+              auto& batches = std::get<model::record_batch_reader::data_t>(st);
+              if (
+                !batches.empty()
+                && batches.front().header().max_timestamp >= cfg.time) {
+                  return ret_t(batch_timequery(batches.front(), cfg.time));
+              }
+              return ret_t();
+          });
+    });
 }
 
 ss::future<> disk_log_impl::remove_segment_permanently(

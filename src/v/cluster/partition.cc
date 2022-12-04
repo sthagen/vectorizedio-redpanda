@@ -35,6 +35,7 @@ partition::partition(
   ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::sharded<cloud_storage::cache>& cloud_storage_cache,
   ss::sharded<features::feature_table>& feature_table,
+  config::binding<uint64_t> max_concurrent_producer_ids,
   std::optional<s3::bucket_name> read_replica_bucket)
   : _raft(r)
   , _probe(std::make_unique<replicated_partition_probe>(*this))
@@ -66,8 +67,7 @@ partition::partition(
         }
         const model::topic_namespace tp_ns(
           _raft->ntp().ns, _raft->ntp().tp.topic);
-        bool is_group_ntp = tp_ns == model::kafka_group_nt
-                            || tp_ns == model::kafka_consumer_offsets_nt;
+        bool is_group_ntp = tp_ns == model::kafka_consumer_offsets_nt;
 
         bool has_rm_stm = (_is_tx_enabled || _is_idempotence_enabled)
                           && model::controller_ntp != _raft->ntp()
@@ -75,7 +75,11 @@ partition::partition(
 
         if (has_rm_stm) {
             _rm_stm = ss::make_shared<cluster::rm_stm>(
-              clusterlog, _raft.get(), _tx_gateway_frontend, _feature_table);
+              clusterlog,
+              _raft.get(),
+              _tx_gateway_frontend,
+              _feature_table,
+              max_concurrent_producer_ids);
             stm_manager->add_stm(_rm_stm);
         }
 

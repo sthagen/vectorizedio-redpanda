@@ -399,8 +399,6 @@ class SecurityConfig:
         self.endpoint_authn_method: Optional[str] = None
         self.tls_provider: Optional[TLSProvider] = None
         self.require_client_auth: bool = True
-        self.pp_authn_method: Optional[str] = None
-        self.sr_authn_method: Optional[str] = None
         self.auto_auth: Optional[bool] = None
 
         # The rules to extract principal from mtls
@@ -434,6 +432,54 @@ class LoggingConfig:
             args += f" --logger-log-level={levels_arg}"
 
         return args
+
+
+class AuthConfig:
+    def __init__(self):
+        self.authn_method: Optional[str] = None
+
+
+class TlsConfig(AuthConfig):
+    def __init__(self):
+        super(TlsConfig, self).__init__()
+        self.server_key: Optional[str] = None
+        self.server_crt: Optional[str] = None
+        self.truststore_file: Optional[str] = None
+        self.client_key: Optional[str] = None
+        self.client_crt: Optional[str] = None
+        self.require_client_auth: bool = True
+
+    def maybe_write_client_certs(self, node, logger, tls_client_key_file: str,
+                                 tls_client_crt_file: str):
+        if self.client_key is not None:
+            logger.info(f"Writing client tls key file: {tls_client_key_file}")
+            logger.debug(open(self.client_key, "r").read())
+            node.account.mkdirs(os.path.dirname(tls_client_key_file))
+            node.account.copy_to(self.client_key, tls_client_key_file)
+
+        if self.client_crt is not None:
+            logger.info(f"Writing client tls crt file: {tls_client_crt_file}")
+            logger.debug(open(self.client_crt, "r").read())
+            node.account.mkdirs(os.path.dirname(tls_client_crt_file))
+            node.account.copy_to(self.client_crt, tls_client_crt_file)
+
+
+class PandaproxyConfig(TlsConfig):
+    PP_TLS_CLIENT_KEY_FILE = "/etc/redpanda/pp_client.key"
+    PP_TLS_CLIENT_CRT_FILE = "/etc/redpanda/pp_client.crt"
+
+    def __init__(self):
+        super(PandaproxyConfig, self).__init__()
+        self.cache_keep_alive_ms: int = 300000
+        self.cache_max_size: int = 10
+
+
+class SchemaRegistryConfig(TlsConfig):
+    SR_TLS_CLIENT_KEY_FILE = "/etc/redpanda/sr_client.key"
+    SR_TLS_CLIENT_CRT_FILE = "/etc/redpanda/sr_client.crt"
+
+    def __init__(self):
+        super(SchemaRegistryConfig, self).__init__()
 
 
 class RedpandaService(Service):
@@ -511,34 +557,31 @@ class RedpandaService(Service):
         }
     }
 
-    def __init__(self,
-                 context,
-                 num_brokers,
-                 *,
-                 extra_rp_conf=None,
-                 extra_node_conf=None,
-                 enable_pp=False,
-                 enable_sr=False,
-                 resource_settings=None,
-                 si_settings=None,
-                 log_level: Optional[str] = None,
-                 log_config: Optional[LoggingConfig] = None,
-                 environment: Optional[dict[str, str]] = None,
-                 security: SecurityConfig = SecurityConfig(),
-                 node_ready_timeout_s=None,
-                 superuser: Optional[SaslCredentials] = None,
-                 skip_if_no_redpanda_log: bool = False,
-                 pp_keep_alive: Optional[int] = None,
-                 pp_cache_max_size: Optional[int] = None):
+    def __init__(
+            self,
+            context,
+            num_brokers,
+            *,
+            extra_rp_conf=None,
+            extra_node_conf=None,
+            resource_settings=None,
+            si_settings=None,
+            log_level: Optional[str] = None,
+            log_config: Optional[LoggingConfig] = None,
+            environment: Optional[dict[str, str]] = None,
+            security: SecurityConfig = SecurityConfig(),
+            node_ready_timeout_s=None,
+            superuser: Optional[SaslCredentials] = None,
+            skip_if_no_redpanda_log: bool = False,
+            pandaproxy_config: Optional[PandaproxyConfig] = None,
+            schema_registry_config: Optional[SchemaRegistryConfig] = None):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._extra_rp_conf = extra_rp_conf or dict()
-        self._enable_pp = enable_pp
-        self._enable_sr = enable_sr
-        self._pp_keep_alive = pp_keep_alive
-        self._pp_cache_max_size = pp_cache_max_size
         self._security = security
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
+        self._pandaproxy_config = pandaproxy_config
+        self._schema_registry_config = schema_registry_config
 
         if superuser is None:
             superuser = self.SUPERUSER_CREDENTIALS
@@ -566,14 +609,11 @@ class RedpandaService(Service):
                     self.LOG_LEVEL_KEY, self.DEFAULT_LOG_LEVEL)
             else:
                 self._log_level = log_level
-            self._log_config = LoggingConfig(
-                self._log_level, {
-                    'exception': 'debug',
-                    'archival': 'debug',
-                    'io': 'debug',
-                    'cloud_storage': 'debug',
-                    'seastar_memory': 'debug'
-                })
+            self._log_config = LoggingConfig(self._log_level, {
+                'exception': 'debug',
+                'io': 'debug',
+                'seastar_memory': 'debug'
+            })
 
         self._admin = Admin(self,
                             auth=(self._superuser.username,
@@ -659,6 +699,12 @@ class RedpandaService(Service):
         self._security = settings
         self._init_tls()
 
+    def set_pandaproxy_settings(self, settings: PandaproxyConfig):
+        self._pandaproxy_config = settings
+
+    def set_schema_registry_settings(self, settings: SchemaRegistryConfig):
+        self._schema_registry_config = settings
+
     def _init_tls(self):
         """
         Call this if tls setting may have changed.
@@ -676,9 +722,6 @@ class RedpandaService(Service):
 
     def endpoint_authn_method(self):
         return self._security.endpoint_authn_method
-
-    def pp_authn_method(self):
-        return self._security.pp_authn_method
 
     def require_client_auth(self):
         return self._security.require_client_auth
@@ -790,6 +833,17 @@ class RedpandaService(Service):
         """
         return 0.2 if first_start else 1.0
 
+    def wait_for_membership(self, first_start):
+        self.logger.info("Waiting for all brokers to join cluster")
+        expected = set(self._started)
+
+        wait_until(lambda: {n
+                            for n in self._started
+                            if self.registered(n)} == expected,
+                   timeout_sec=30,
+                   backoff_sec=self._startup_poll_interval(first_start),
+                   err_msg="Cluster membership did not stabilize")
+
     def start(self,
               nodes=None,
               clean_nodes=True,
@@ -868,24 +922,25 @@ class RedpandaService(Service):
         if not self._skip_create_superuser:
             self._admin.create_user(*self._superuser)
 
-        self.logger.info("Waiting for all brokers to join cluster")
-        expected = set(self._started)
-
-        wait_until(lambda: {n
-                            for n in self._started
-                            if self.registered(n)} == expected,
-                   timeout_sec=30,
-                   backoff_sec=self._startup_poll_interval(first_start),
-                   err_msg="Cluster membership did not stabilize")
+        self.wait_for_membership(first_start=first_start)
 
         self.logger.info("Verifying storage is in expected state")
         storage = self.storage()
         for node in storage.nodes:
-            if not set(node.ns) == {"redpanda"} or not set(
-                    node.ns["redpanda"].topics) == {"controller", "kvstore"}:
+            unexpected_ns = set(node.ns) - {"redpanda"}
+            if unexpected_ns:
+                for ns in unexpected_ns:
+                    self.logger.error(
+                        f"node {node.name}: unexpected namespace: {ns}, "
+                        f"topics: {set(node.ns[ns].topics)}")
+                raise RuntimeError("Unexpected files in data directory")
+
+            unexpected_rp_topics = set(
+                node.ns["redpanda"].topics) - {"controller", "kvstore"}
+            if unexpected_rp_topics:
                 self.logger.error(
-                    f"Unexpected files: ns={node.ns} redpanda topics={node.ns['redpanda'].topics}"
-                )
+                    f"node {node.name}: unexpected topics in redpanda namespace: "
+                    f"{unexpected_rp_topics}")
                 raise RuntimeError("Unexpected files in data directory")
 
         if self.sasl_enabled():
@@ -931,6 +986,23 @@ class RedpandaService(Service):
             node.account.mkdirs(
                 os.path.dirname(RedpandaService.TLS_CA_CRT_FILE))
             node.account.copy_to(ca.crt, RedpandaService.TLS_CA_CRT_FILE)
+
+            if self._pandaproxy_config is not None:
+                self._pandaproxy_config.maybe_write_client_certs(
+                    node, self.logger, PandaproxyConfig.PP_TLS_CLIENT_KEY_FILE,
+                    PandaproxyConfig.PP_TLS_CLIENT_CRT_FILE)
+                self._pandaproxy_config.server_key = RedpandaService.TLS_SERVER_KEY_FILE
+                self._pandaproxy_config.server_crt = RedpandaService.TLS_SERVER_CRT_FILE
+                self._pandaproxy_config.truststore_file = RedpandaService.TLS_CA_CRT_FILE
+
+            if self._schema_registry_config is not None:
+                self._schema_registry_config.maybe_write_client_certs(
+                    node, self.logger,
+                    SchemaRegistryConfig.SR_TLS_CLIENT_KEY_FILE,
+                    SchemaRegistryConfig.SR_TLS_CLIENT_CRT_FILE)
+                self._schema_registry_config.server_key = RedpandaService.TLS_SERVER_KEY_FILE
+                self._schema_registry_config.server_crt = RedpandaService.TLS_SERVER_CRT_FILE
+                self._schema_registry_config.truststore_file = RedpandaService.TLS_CA_CRT_FILE
 
     def security_config(self):
         return self._security_config
@@ -1303,7 +1375,10 @@ class RedpandaService(Service):
         return self.s3_client.list_objects(
             self._si_settings.cloud_storage_bucket)
 
-    def set_cluster_config(self, values: dict, expect_restart: bool = False):
+    def set_cluster_config(self,
+                           values: dict,
+                           expect_restart: bool = False,
+                           admin_client: Admin = None):
         """
         Update cluster configuration and wait for all nodes to report that they
         have seen the new config.
@@ -1312,11 +1387,14 @@ class RedpandaService(Service):
         :param expect_restart: set to true if you wish to permit a node restart for needs_restart=yes properties.
                                If you set such a property without this flag, an assertion error will be raised.
         """
-        patch_result = self._admin.patch_cluster_config(upsert=values)
+        if admin_client is None:
+            admin_client = self._admin
+
+        patch_result = admin_client.patch_cluster_config(upsert=values)
         new_version = patch_result['config_version']
 
         def is_ready():
-            status = self._admin.get_cluster_config_status(
+            status = admin_client.get_cluster_config_status(
                 node=self.controller())
             ready = all([n['config_version'] >= new_version for n in status])
 
@@ -1803,16 +1881,12 @@ class RedpandaService(Service):
                            node_ip=node_ip,
                            kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
                            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
-                           enable_pp=self._enable_pp,
-                           enable_sr=self._enable_sr,
+                           pandaproxy_config=self._pandaproxy_config,
+                           schema_registry_config=self._schema_registry_config,
                            superuser=self._superuser,
                            sasl_enabled=self.sasl_enabled(),
                            endpoint_authn_method=self.endpoint_authn_method(),
-                           pp_authn_method=self._security.pp_authn_method,
-                           sr_authn_method=self._security.sr_authn_method,
-                           auto_auth=self._security.auto_auth,
-                           pp_keep_alive=self._pp_keep_alive,
-                           pp_cache_max_size=self._pp_cache_max_size)
+                           auto_auth=self._security.auto_auth)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)
@@ -1974,26 +2048,29 @@ class RedpandaService(Service):
                     f"registered: node {node.name} now visible in peer {peer.name}'s broker list ({admin_brokers})"
                 )
 
-        auth_args = {}
-        if self.sasl_enabled():
-            auth_args = {
-                'username': self._superuser.username,
-                'password': self._superuser.password,
-                'algorithm': self._superuser.algorithm
-            }
+        if self.brokers():  # Conditional in case Kafka API turned off
+            auth_args = {}
+            if self.sasl_enabled():
+                auth_args = {
+                    'username': self._superuser.username,
+                    'password': self._superuser.password,
+                    'algorithm': self._superuser.algorithm
+                }
+            client = PythonLibrdkafka(self,
+                                      tls_cert=self._tls_cert,
+                                      **auth_args)
+            brokers = client.brokers()
+            broker = brokers.get(node_id, None)
+            if broker is None:
+                # This should never happen, because we already checked via the admin API
+                # that the node of interest had become visible to all peers.
+                self.logger.error(
+                    f"registered: node {node.name} not found in kafka metadata!"
+                )
+                assert broker is not None
 
-        client = PythonLibrdkafka(self, tls_cert=self._tls_cert, **auth_args)
+            self.logger.debug(f"registered: found broker info: {broker}")
 
-        brokers = client.brokers()
-        broker = brokers.get(node_id, None)
-        if broker is None:
-            # This should never happen, because we already checked via the admin API
-            # that the node of interest had become visible to all peers.
-            self.logger.error(
-                f"registered: node {node.name} not found in kafka metadata!")
-            assert broker is not None
-
-        self.logger.debug(f"registered: found broker info: {broker}")
         return True
 
     def controller(self):
@@ -2133,8 +2210,12 @@ class RedpandaService(Service):
 
     def broker_address(self, node):
         assert node in self.nodes, f"where node is {node.name}"
+        assert node in self._started
         cfg = self._node_configs[node]
-        return f"{node.account.hostname}:{one_or_many(cfg['redpanda']['kafka_api'])['port']}"
+        if cfg['redpanda']['kafka_api']:
+            return f"{node.account.hostname}:{one_or_many(cfg['redpanda']['kafka_api'])['port']}"
+        else:
+            return None
 
     def admin_endpoint(self, node):
         assert node in self.nodes, f"where node is {node.name}"
@@ -2153,6 +2234,7 @@ class RedpandaService(Service):
 
     def brokers_list(self, limit=None) -> list[str]:
         brokers = [self.broker_address(n) for n in self._started[:limit]]
+        brokers = [b for b in brokers if b is not None]
         random.shuffle(brokers)
         return brokers
 
@@ -2348,24 +2430,31 @@ class RedpandaService(Service):
     def cov_enabled(self):
         return self._context.globals.get(self.COV_KEY, self.DEFAULT_COV_OPT)
 
-    def search_log_any(self, pattern: str, nodes: list[ClusterNode] = None):
-        # Test helper for grepping the redpanda log.
-        # The design follows python's built-in any() function.
-        # https://docs.python.org/3/library/functions.html#any
+    def search_log_node(self, node: ClusterNode, pattern: str):
+        for line in node.account.ssh_capture(
+                f"grep \"{pattern}\" {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
+        ):
+            # We got a match
+            self.logger.debug(f"Found {pattern} on node {node.name}: {line}")
+            return True
 
-        # :param pattern: the string to search for
-        # :param nodes: a list of nodes to run grep on
-        # :return:  true if any instances of `pattern` found
+        return False
+
+    def search_log_any(self, pattern: str, nodes: list[ClusterNode] = None):
+        """
+        Test helper for grepping the redpanda log.
+        The design follows python's built-in any() function.
+        https://docs.python.org/3/library/functions.html#any
+
+        :param pattern: the string to search for
+        :param nodes: a list of nodes to run grep on
+        :return:  true if any instances of `pattern` found
+        """
         if nodes is None:
             nodes = self.nodes
 
         for node in nodes:
-            for line in node.account.ssh_capture(
-                    f"grep \"{pattern}\" {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
-            ):
-                # We got a match
-                self.logger.debug(
-                    f"Found {pattern} on node {node.name}: {line}")
+            if self.search_log_node(node, pattern):
                 return True
 
         # Fall through, no matches

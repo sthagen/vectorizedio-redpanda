@@ -15,6 +15,7 @@
 #include "cloud_storage/fwd.h"
 #include "cluster/config_manager.h"
 #include "cluster/fwd.h"
+#include "cluster/node/local_monitor.h"
 #include "cluster/node_status_backend.h"
 #include "cluster/node_status_table.h"
 #include "config/node_config.h"
@@ -40,6 +41,7 @@
 #include "rpc/rpc_server.h"
 #include "seastarx.h"
 #include "ssx/metrics.h"
+#include "storage/api.h"
 #include "storage/fwd.h"
 #include "utils/stop_signal.h"
 #include "v8_engine/fwd.h"
@@ -105,7 +107,6 @@ public:
 
     ss::sharded<features::feature_table> feature_table;
 
-    ss::sharded<kafka::coordinator_ntp_mapper> co_coordinator_ntp_mapper;
     ss::sharded<kafka::coordinator_ntp_mapper> coordinator_ntp_mapper;
     ss::sharded<kafka::fetch_session_cache> fetch_session_cache;
     ss::sharded<kafka::group_router> group_router;
@@ -117,6 +118,7 @@ public:
 
     ss::sharded<storage::api> storage;
     ss::sharded<storage::node_api> storage_node;
+    ss::sharded<cluster::node::local_monitor> local_monitor;
 
     ss::sharded<v8_engine::data_policy_table> data_policies;
 
@@ -142,7 +144,7 @@ private:
 
     // Starts the services meant for Redpanda runtime. Must be called after
     // having constructed the subsystems via the corresponding `wire_up` calls.
-    void start_runtime_services(cluster::cluster_discovery&);
+    void start_runtime_services(cluster::cluster_discovery&, ::stop_signal&);
     void start_kafka(const model::node_id&, ::stop_signal&);
 
     // All methods are calleds from Seastar thread
@@ -208,7 +210,6 @@ private:
 
     ss::sharded<rpc::connection_cache> _connection_cache;
     ss::sharded<kafka::group_manager> _group_manager;
-    ss::sharded<kafka::group_manager> _co_group_manager;
     ss::sharded<rpc::rpc_server> _rpc;
     ss::sharded<admin_server> _admin;
     ss::sharded<net::conn_quota> _kafka_conn_quotas;

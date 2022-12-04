@@ -539,6 +539,7 @@ ss::future<ss::httpd::redirect_exception> admin_server::redirect_to_leader(
               "redirect: {} did not match any kafka listeners, redirecting to "
               "peer's internal RPC address",
               req_hostname);
+            target_host = leader.broker.rpc_address().host();
         }
     }
 
@@ -782,6 +783,13 @@ ss::future<> admin_server::throw_on_error(
             co_return;
         case raft::errc::not_leader:
             throw co_await redirect_to_leader(req, ntp);
+        case raft::errc::node_does_not_exists:
+        case raft::errc::not_voter:
+            // node_does_not_exist is a 400 rather than a 404, because it
+            // comes up in the context of a destination for leader transfer,
+            // rather than a node ID appearing in a URL path.
+            throw ss::httpd::bad_request_exception(
+              fmt::format("Invalid request: {}", ec.message()));
         default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected raft error: {}", ec.message()));
@@ -1790,6 +1798,7 @@ void admin_server::register_features_routes() {
           auto version = ft.get_active_version();
 
           res.cluster_version = version;
+          res.original_cluster_version = ft.get_original_version();
           for (const auto& fs : ft.get_feature_state()) {
               ss::httpd::features_json::feature_state item;
               vlog(

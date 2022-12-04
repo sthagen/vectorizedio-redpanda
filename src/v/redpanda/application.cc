@@ -41,6 +41,8 @@
 #include "cluster/tx_gateway.h"
 #include "cluster/tx_gateway_frontend.h"
 #include "cluster/types.h"
+#include "compression/async_stream_zstd.h"
+#include "compression/stream_zstd.h"
 #include "config/configuration.h"
 #include "config/endpoint_tls_config.h"
 #include "config/node_config.h"
@@ -104,7 +106,11 @@ static void set_local_kafka_client_config(
   const config::node_config& config) {
     client_config.emplace();
     const auto& kafka_api = config.kafka_api.value();
-    vassert(!kafka_api.empty(), "There are no kafka_api listeners");
+    if (kafka_api.empty()) {
+        // No Kafka listeners configured, cannot configure
+        // a client.
+        return;
+    }
     client_config->brokers.set_value(
       std::vector<net::unresolved_address>{kafka_api[0].address});
     const auto& kafka_api_tls = config::node().kafka_api_tls.value();
@@ -345,11 +351,17 @@ void application::initialize(
   std::optional<YAML::Node> schema_reg_client_cfg,
   std::optional<scheduling_groups> groups) {
     /*
-     * allocate per-core zstd decompression workspace. it can be several
-     * megabytes in size, so do it before memory becomes fragmented.
+     * allocate per-core zstd decompression workspace and per-core
+     * async_stream_zstd workspaces. it can be several megabytes in size, so do
+     * it before memory becomes fragmented.
      */
     ss::smp::invoke_on_all([] {
+        // TODO: remove this when stream_zstd is replaced with async_stream_zstd
+        // in v/kafka
         compression::stream_zstd::init_workspace(
+          config::shard_local_cfg().zstd_decompress_workspace_bytes());
+
+        compression::initialize_async_stream_zstd(
           config::shard_local_cfg().zstd_decompress_workspace_bytes());
     }).get0();
 
@@ -879,7 +891,10 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(partition_recovery_manager),
       std::ref(cloud_storage_api),
       std::ref(shadow_index_cache),
-      std::ref(feature_table))
+      std::ref(feature_table),
+      ss::sharded_parameter([] {
+          return config::shard_local_cfg().max_concurrent_producer_ids.bind();
+      }))
       .get();
     vlog(_log.info, "Partition manager started");
 
@@ -898,7 +913,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       partition_manager,
       shard_table,
       storage,
-      storage_node,
+      local_monitor,
       std::ref(raft_group_manager),
       data_policies,
       std::ref(feature_table),
@@ -991,21 +1006,9 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
     }
 
     // group membership
-    syschecks::systemd_message("Creating kafka group managers").get();
+    syschecks::systemd_message("Creating kafka group manager").get();
     construct_service(
       _group_manager,
-      model::kafka_group_nt,
-      std::ref(raft_group_manager),
-      std::ref(partition_manager),
-      std::ref(controller->get_topics_state()),
-      std::ref(tx_gateway_frontend),
-      std::ref(controller->get_feature_table()),
-      &kafka::make_backward_compatible_serializer,
-      std::ref(config::shard_local_cfg()),
-      kafka::enable_group_metrics::no)
-      .get();
-    construct_service(
-      _co_group_manager,
       model::kafka_consumer_offsets_nt,
       std::ref(raft_group_manager),
       std::ref(partition_manager),
@@ -1018,10 +1021,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       .get();
     syschecks::systemd_message("Creating kafka group shard mapper").get();
     construct_service(
-      coordinator_ntp_mapper, std::ref(metadata_cache), model::kafka_group_nt)
-      .get();
-    construct_service(
-      co_coordinator_ntp_mapper,
+      coordinator_ntp_mapper,
       std::ref(metadata_cache),
       model::kafka_consumer_offsets_nt)
       .get();
@@ -1031,11 +1031,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       _scheduling_groups.kafka_sg(),
       smp_service_groups.kafka_smp_sg(),
       std::ref(_group_manager),
-      std::ref(_co_group_manager),
       std::ref(shard_table),
-      std::ref(coordinator_ntp_mapper),
-      std::ref(co_coordinator_ntp_mapper),
-      std::ref(controller->get_feature_table()))
+      std::ref(coordinator_ntp_mapper))
       .get();
     if (coproc_enabled()) {
         syschecks::systemd_message("Creating coproc::api").get();
@@ -1248,6 +1245,17 @@ void application::wire_up_bootstrap_services() {
     }).get();
     syschecks::systemd_message("Constructing storage services").get();
     construct_single_service_sharded(storage_node).get();
+    construct_single_service_sharded(
+      local_monitor,
+      config::shard_local_cfg().storage_space_alert_free_threshold_bytes.bind(),
+      config::shard_local_cfg()
+        .storage_space_alert_free_threshold_percent.bind(),
+      config::shard_local_cfg().storage_min_free_bytes.bind(),
+      config::node().data_directory().as_sstring(),
+      std::ref(storage_node),
+      std::ref(storage))
+      .get();
+
     construct_service(
       storage,
       []() { return kvstore_config_from_global_config(); },
@@ -1258,6 +1266,20 @@ void application::wire_up_bootstrap_services() {
           return log_cfg;
       })
       .get();
+
+    // Hook up local_monitor to update storage_resources when disk state changes
+    auto storage_disk_notification
+      = storage_node.local().register_disk_notification(
+        [this](uint64_t total_space, uint64_t free_space) {
+            return storage.invoke_on_all(
+              [total_space, free_space](storage::api& api) {
+                  api.resources().update_allowance(total_space, free_space);
+              });
+        });
+    _deferred.emplace_back([this, storage_disk_notification] {
+        storage_node.local().unregister_disk_notification(
+          storage_disk_notification);
+    });
 
     // Start empty, populated from snapshot in start_bootstrap_services
     syschecks::systemd_message("Creating feature table").get();
@@ -1319,34 +1341,7 @@ void application::start_bootstrap_services() {
 
     // single instance
     storage_node.invoke_on_all(&storage::node_api::start).get0();
-
-    // Early initialization of disk stats, so that logic for e.g. picking
-    // falloc sizes works without having to wait for a local_monitor tick.
-    auto tmp_lm = cluster::node::local_monitor(
-      config::shard_local_cfg().storage_space_alert_free_threshold_bytes.bind(),
-      config::shard_local_cfg()
-        .storage_space_alert_free_threshold_percent.bind(),
-      config::shard_local_cfg().storage_min_free_bytes.bind(),
-      storage_node,
-      storage);
-    tmp_lm.update_state().get();
-
-    auto disk_stats
-      = storage_node
-          .invoke_on(
-            ss::shard_id{0},
-            [](const storage::node_api& na) -> storage::disk_metrics {
-                return na.get_disk_metrics();
-            })
-          .get();
-
-    storage
-      .invoke_on_all([disk_stats](storage::api& sa) -> ss::future<> {
-          sa.resources().update_allowance(
-            disk_stats.total_bytes, disk_stats.free_bytes);
-          return ss::now();
-      })
-      .get();
+    local_monitor.invoke_on_all(&cluster::node::local_monitor::start).get0();
 
     storage.invoke_on_all(&storage::api::start).get();
 
@@ -1487,16 +1482,13 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
         _migrators.push_back(
           std::make_unique<features::migrators::cloud_storage_config>(
             *controller));
-        _migrators.push_back(
-          std::make_unique<features::migrators::group_metadata_migration>(
-            *controller, group_router));
     }
 
     if (cd.is_cluster_founder().get()) {
         controller->set_ready().get();
     }
 
-    start_runtime_services(cd);
+    start_runtime_services(cd, app_signal);
 
     if (_proxy_config) {
         _proxy->start().get();
@@ -1522,7 +1514,8 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     syschecks::systemd_notify_ready().get();
 }
 
-void application::start_runtime_services(cluster::cluster_discovery& cd) {
+void application::start_runtime_services(
+  cluster::cluster_discovery& cd, ::stop_signal& app_signal) {
     ssx::background = feature_table.invoke_on_all(
       [this](features::feature_table& ft) {
           return ft.await_feature(features::feature::rpc_v2_by_default)
@@ -1564,7 +1557,6 @@ void application::start_runtime_services(cluster::cluster_discovery& cd) {
 
     syschecks::systemd_message("Starting Kafka group manager").get();
     _group_manager.invoke_on_all(&kafka::group_manager::start).get();
-    _co_group_manager.invoke_on_all(&kafka::group_manager::start).get();
 
     // Initialize the Raft RPC endpoint before the rest of the runtime RPC
     // services so the cluster seeds can elect a leader and write a cluster
@@ -1588,7 +1580,7 @@ void application::start_runtime_services(cluster::cluster_discovery& cd) {
           .get();
     }
     syschecks::systemd_message("Starting controller").get();
-    controller->start(cd).get0();
+    controller->start(cd, app_signal.abort_source()).get0();
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.

@@ -766,9 +766,10 @@ class SizeBasedRetention(BaseCase):
         for topic in self.expected_recovered_topics:
             for _, manifest in topic_manifests:
                 if manifest['topic'] == topic.name:
-                    self._restore_topic(
-                        manifest,
-                        {"retention.bytes": self.restored_size_bytes})
+                    self._restore_topic(manifest, {
+                        "retention.local.target.bytes":
+                        self.restored_size_bytes
+                    })
 
     def validate_cluster(self, baseline, restored):
         """Check size of every partition."""
@@ -904,7 +905,8 @@ class TimeBasedRetention(BaseCase):
             for _, manifest in topic_manifests:
                 if manifest['topic'] == topic.name:
                     # retention - 1 hour
-                    self._restore_topic(manifest, {"retention.ms": 3600000})
+                    self._restore_topic(manifest,
+                                        {"retention.local.target.ms": 3600000})
 
     def validate_cluster(self, baseline, restored):
         """Check that the topic is writeable"""
@@ -1082,6 +1084,7 @@ class TopicRecoveryTest(RedpandaTest):
         for node in self.redpanda.nodes:
             self.logger.info(f"Starting node {node.account.hostname}")
             self.redpanda.start_node(node)
+        self.redpanda.wait_for_membership(first_start=False)
         self._started = True
 
     def _wipe_data(self):
@@ -1235,8 +1238,6 @@ class TopicRecoveryTest(RedpandaTest):
         self._wipe_data()
 
         self._start_redpanda_nodes()
-
-        time.sleep(5)
 
         self.logger.info("Restoring topic data")
         controller_cs = self._collect_controller_log_checksums()
