@@ -17,9 +17,9 @@
 #include "cloud_storage/remote.h"
 #include "cloud_storage/remote_segment_index.h"
 #include "cloud_storage/types.h"
+#include "cloud_storage_clients/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
-#include "s3/client.h"
 #include "storage/parser.h"
 #include "storage/segment_reader.h"
 #include "storage/translating_reader.h"
@@ -58,7 +58,7 @@ public:
     remote_segment(
       remote& r,
       cache& cache,
-      s3::bucket_name bucket,
+      cloud_storage_clients::bucket_name bucket,
       const partition_manifest& m,
       model::offset base_offset,
       retry_chain_node& parent);
@@ -123,6 +123,8 @@ public:
         return _path;
     }
 
+    bool is_stopped() const { return _stopped; }
+
 private:
     /// get a file offset for the corresponding kafka offset
     /// if the index is available
@@ -159,7 +161,7 @@ private:
     ss::gate _gate;
     remote& _api;
     cache& _cache;
-    s3::bucket_name _bucket;
+    cloud_storage_clients::bucket_name _bucket;
     const model::ntp& _ntp;
     remote_segment_path _path;
 
@@ -186,6 +188,9 @@ private:
 
     // For backing off on apparent thrash/saturation of the local cache
     simple_time_jitter<ss::lowres_clock> _cache_backoff_jitter;
+
+    bool _compacted{false};
+    bool _stopped{false};
 };
 
 class remote_segment_batch_consumer;
@@ -240,11 +245,26 @@ public:
     /// Get base offset (redpanda offset)
     model::offset base_rp_offset() const { return _seg->get_base_rp_offset(); }
 
+    kafka::offset base_kafka_offset() const {
+        return _seg->get_base_kafka_offset();
+    }
+
     bool is_eof() const { return _cur_rp_offset > _seg->get_max_rp_offset(); }
 
     void set_eof() {
         _cur_rp_offset = _seg->get_max_rp_offset() + model::offset{1};
     }
+
+    model::offset current_rp_offset() const { return _cur_rp_offset; }
+    kafka::offset current_kafka_offset() const {
+        return _cur_rp_offset - _cur_delta;
+    }
+
+    bool reads_from_segment(const remote_segment& segm) const {
+        return &segm == _seg.get();
+    }
+
+    bool is_stopped() const { return _stopped; }
 
 private:
     friend class single_record_consumer;

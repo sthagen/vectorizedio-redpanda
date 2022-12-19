@@ -20,8 +20,6 @@
 #include "cluster/partition_manager.h"
 #include "config/configuration.h"
 #include "model/metadata.h"
-#include "s3/client.h"
-#include "s3/error.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
 #include "storage/parser.h"
@@ -79,7 +77,11 @@ ntp_archiver::ntp_archiver(
       config::shard_local_cfg().cloud_storage_housekeeping_interval_ms.bind())
   , _housekeeping_jitter(_housekeeping_interval(), 5ms)
   , _next_housekeeping(_housekeeping_jitter())
-  , _ntp_metrics_disabled(conf.ntp_metrics_disabled) {
+  , _ntp_metrics_disabled(conf.ntp_metrics_disabled)
+  , _segment_tags(cloud_storage::remote::make_segment_tags(_ntp, _rev))
+  , _manifest_tags(
+      cloud_storage::remote::make_partition_manifest_tags(_ntp, _rev))
+  , _tx_tags(cloud_storage::remote::make_tx_manifest_tags(_ntp, _rev)) {
     vassert(
       _partition && _partition->is_elected_leader(),
       "must be the leader to launch ntp_archiver {}",
@@ -464,7 +466,8 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest() {
       ctxlog.debug,
       "Uploading manifest, path: {}",
       manifest().get_manifest_path());
-    co_return co_await _remote.upload_manifest(_bucket, manifest(), fib);
+    co_return co_await _remote.upload_manifest(
+      _bucket, manifest(), fib, _manifest_tags);
 }
 
 remote_segment_path
@@ -521,7 +524,8 @@ ntp_archiver::upload_segment(upload_candidate candidate) {
       candidate.content_length,
       reset_func,
       fib,
-      lazy_abort_source);
+      lazy_abort_source,
+      _segment_tags);
 }
 
 bool ntp_archiver::archiver_lost_leadership(
@@ -564,7 +568,8 @@ ntp_archiver::upload_tx(upload_candidate candidate) {
 
     cloud_storage::tx_range_manifest manifest(path, tx_range);
 
-    co_return co_await _remote.upload_manifest(_bucket, manifest, fib);
+    co_return co_await _remote.upload_manifest(
+      _bucket, manifest, fib, _tx_tags);
 }
 
 // The function turns an array of futures that return an error code into a
@@ -1211,13 +1216,15 @@ ntp_archiver::delete_segment(const remote_segment_path& path) {
       _metadata_sync_timeout, _cloud_storage_initial_backoff, &_rtcnode);
 
     auto res = co_await _remote.delete_object(
-      _bucket, s3::object_key{path}, fib);
+      _bucket, cloud_storage_clients::object_key{path}, fib);
 
     if (res == cloud_storage::upload_result::success) {
         auto tx_range_manifest_path
           = cloud_storage::tx_range_manifest(path).get_manifest_path();
         co_await _remote.delete_object(
-          _bucket, s3::object_key{tx_range_manifest_path}, fib);
+          _bucket,
+          cloud_storage_clients::object_key{tx_range_manifest_path},
+          fib);
     }
 
     co_return res;

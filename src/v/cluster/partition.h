@@ -48,8 +48,10 @@ public:
       ss::sharded<cloud_storage::remote>&,
       ss::sharded<cloud_storage::cache>&,
       ss::sharded<features::feature_table>&,
+      ss::sharded<cluster::tm_stm_cache>&,
       config::binding<uint64_t>,
-      std::optional<s3::bucket_name> read_replica_bucket = std::nullopt);
+      std::optional<cloud_storage_clients::bucket_name> read_replica_bucket
+      = std::nullopt);
 
     raft::group_id group() const { return _raft->group(); }
     ss::future<> start();
@@ -222,7 +224,7 @@ public:
         return cfg.is_read_replica_mode_enabled();
     }
 
-    s3::bucket_name get_read_replica_bucket() const {
+    cloud_storage_clients::bucket_name get_read_replica_bucket() const {
         return _read_replica_bucket.value();
     }
 
@@ -281,11 +283,13 @@ private:
     partition_probe _probe;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
     ss::sharded<features::feature_table>& _feature_table;
+    ss::sharded<cluster::tm_stm_cache>& _tm_stm_cache;
     bool _is_tx_enabled{false};
     bool _is_idempotence_enabled{false};
     ss::shared_ptr<cloud_storage::remote_partition> _cloud_storage_partition;
     ss::lw_shared_ptr<const storage::offset_translator_state> _translator;
-    std::optional<s3::bucket_name> _read_replica_bucket{std::nullopt};
+    std::optional<cloud_storage_clients::bucket_name> _read_replica_bucket{
+      std::nullopt};
     bool _remote_delete_enabled{storage::ntp_config::default_remote_delete};
 
     friend std::ostream& operator<<(std::ostream& o, const partition& x);

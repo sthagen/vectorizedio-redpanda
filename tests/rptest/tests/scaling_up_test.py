@@ -59,7 +59,7 @@ class ScalingUpTest(EndToEndTest):
             if replicas != total_replicas:
                 return False
 
-            if not all(expected_range[0] < p[1] < expected_range[1]
+            if not all(expected_range[0] <= p[1] <= expected_range[1]
                        for p in per_node.items()):
                 return False
             admin = Admin(self.redpanda)
@@ -148,6 +148,7 @@ class ScalingUpTest(EndToEndTest):
         self.await_startup(min_records=5 * throughput, timeout_sec=120)
         # add three nodes at once
         for n in self.redpanda.nodes[3:]:
+            self.redpanda.clean_node(n)
             self.redpanda.start_node(n)
 
         self.wait_for_partitions_rebalanced(total_replicas=total_replicas,

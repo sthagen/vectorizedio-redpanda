@@ -41,6 +41,7 @@ public:
       ss::sharded<cloud_storage::remote>&,
       ss::sharded<cloud_storage::cache>&,
       ss::sharded<features::feature_table>&,
+      ss::sharded<cluster::tm_stm_cache>&,
       config::binding<uint64_t>);
 
     using manage_cb_t
@@ -81,7 +82,7 @@ public:
       raft::group_id,
       std::vector<model::broker>,
       std::optional<remote_topic_properties> = std::nullopt,
-      std::optional<s3::bucket_name> = std::nullopt);
+      std::optional<cloud_storage_clients::bucket_name> = std::nullopt);
 
     ss::future<> shutdown(const model::ntp& ntp);
 
@@ -200,6 +201,7 @@ private:
     ss::sharded<cloud_storage::remote>& _cloud_storage_api;
     ss::sharded<cloud_storage::cache>& _cloud_storage_cache;
     ss::sharded<features::feature_table>& _feature_table;
+    ss::sharded<cluster::tm_stm_cache>& _tm_stm_cache;
     ss::gate _gate;
     bool _block_new_leadership{false};
 

@@ -66,7 +66,15 @@ ss::future<> materialized_segments::stop() {
     // Do the last pass over the eviction list to stop remaining items returned
     // from readers after the eviction loop stopped.
     for (auto& rs : _eviction_list) {
-        co_await std::visit([](auto&& rs) { return rs->stop(); }, rs);
+        co_await std::visit(
+          [](auto&& rs) {
+              if (!rs->is_stopped()) {
+                  return rs->stop();
+              } else {
+                  return ss::make_ready_future<>();
+              }
+          },
+          rs);
     }
 }
 ss::future<> materialized_segments::start() {
@@ -201,7 +209,7 @@ void materialized_segments::trim_readers(size_t target_free) {
           cst_log.debug,
           "trim_readers: {} {} has {} readers",
           st.ntp(),
-          st.offset_key,
+          st.base_rp_offset(),
           st.readers.size());
 
         candidates.insert(std::make_pair(st.readers.size(), std::ref(st)));
@@ -216,7 +224,7 @@ void materialized_segments::trim_readers(size_t target_free) {
           cst_log.debug,
           "Trimming readers from segment {} offset {} ({} refs, {} readers)",
           st.ntp(),
-          st.base_rp_offset,
+          st.base_rp_offset(),
           st.segment.use_count(),
           st.readers.size());
 
@@ -271,14 +279,12 @@ void materialized_segments::trim_segments(std::optional<size_t> target_free) {
     }
 
     vlog(cst_log.debug, "found {} eviction candidates ", to_offload.size());
-    for (const auto& i : to_offload) {
-        remote_partition* p = i.first->parent.get();
-
+    for (auto [p, offset] : to_offload) {
         // Should not happen because we handled the case of parent==null
         // above, before inserting into to_offload
         vassert(p, "Unexpected orphan segment!");
 
-        p->offload_segment(i.second);
+        p->offload_segment(offset);
     }
 } // namespace cloud_storage
 
@@ -300,11 +306,12 @@ void materialized_segments::maybe_trim_segment(
           cst_log.debug,
           "Materialized segment {} offset {} is stale",
           st.ntp(),
-          st.offset_key);
+          st.base_rp_offset());
         // this will delete and unlink the object from
         // _materialized collection
         if (st.parent) {
-            to_offload.push_back(std::make_pair(&st, st.offset_key));
+            to_offload.push_back(
+              std::make_pair(st.parent.get(), st.base_rp_offset()));
         } else {
             // This cannot happen, because materialized_segment_state
             // is only instantiated by remote_partition and will
@@ -313,7 +320,7 @@ void materialized_segments::maybe_trim_segment(
               false,
               "materialized_segment_state outlived remote_partition (offset "
               "{})",
-              st.offset_key);
+              st.base_rp_offset());
         }
     } else {
         // We would like to trim this segment, but cannot right now
@@ -327,7 +334,7 @@ void materialized_segments::maybe_trim_segment(
           "Materialized segment {} base-offset {} is not stale: {} "
           "readers={}",
           st.ntp(),
-          st.base_rp_offset,
+          st.base_rp_offset(),
           st.segment.use_count(),
           st.readers.size());
 

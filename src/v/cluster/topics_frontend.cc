@@ -10,6 +10,7 @@
 #include "cluster/topics_frontend.h"
 
 #include "cloud_storage/remote.h"
+#include "cloud_storage_clients/configuration.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/commands.h"
 #include "cluster/controller_service.h"
@@ -35,7 +36,6 @@
 #include "random/generators.h"
 #include "rpc/errc.h"
 #include "rpc/types.h"
-#include "s3/configuration.h"
 #include "ssx/future-util.h"
 
 #include <seastar/core/coroutine.hh>
@@ -478,24 +478,6 @@ errc topics_frontend::validate_topic_configuration(
         }
     }
 
-    const auto& properties = assignable_config.cfg.properties;
-
-    if (
-      properties.retention_bytes.has_value()
-      && properties.retention_local_target_bytes.has_value()
-      && properties.retention_bytes.value()
-           < properties.retention_local_target_bytes.value()) {
-        return errc::invalid_retention_configuration;
-    }
-
-    if (
-      properties.retention_duration.has_value()
-      && properties.retention_local_target_ms.has_value()
-      && properties.retention_duration.value()
-           < properties.retention_local_target_ms.value()) {
-        return errc::invalid_retention_configuration;
-    }
-
     return errc::success;
 }
 
@@ -518,7 +500,7 @@ ss::future<topic_result> topics_frontend::do_create_topic(
 
         errc download_res = co_await rr_manager.set_remote_properties_in_config(
           assignable_config,
-          s3::bucket_name(
+          cloud_storage_clients::bucket_name(
             assignable_config.cfg.properties.read_replica_bucket.value()),
           _as.local());
 
@@ -554,7 +536,9 @@ ss::future<topic_result> topics_frontend::do_create_topic(
           _cloud_storage_api.local());
 
         errc download_res = co_await cfg_source.set_recovered_topic_properties(
-          assignable_config, s3::bucket_name(bucket.value()), _as.local());
+          assignable_config,
+          cloud_storage_clients::bucket_name(bucket.value()),
+          _as.local());
 
         if (download_res != errc::success) {
             vlog(

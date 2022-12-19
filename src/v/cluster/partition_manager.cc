@@ -53,6 +53,7 @@ partition_manager::partition_manager(
   ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::sharded<cloud_storage::cache>& cloud_storage_cache,
   ss::sharded<features::feature_table>& feature_table,
+  ss::sharded<cluster::tm_stm_cache>& tm_stm_cache,
   config::binding<uint64_t> max_concurrent_producer_ids)
   : _storage(storage.local())
   , _raft_manager(raft)
@@ -61,6 +62,7 @@ partition_manager::partition_manager(
   , _cloud_storage_api(cloud_storage_api)
   , _cloud_storage_cache(cloud_storage_cache)
   , _feature_table(feature_table)
+  , _tm_stm_cache(tm_stm_cache)
   , _max_concurrent_producer_ids(max_concurrent_producer_ids) {}
 
 partition_manager::ntp_table_container
@@ -80,7 +82,7 @@ ss::future<consensus_ptr> partition_manager::manage(
   raft::group_id group,
   std::vector<model::broker> initial_nodes,
   std::optional<remote_topic_properties> rtp,
-  std::optional<s3::bucket_name> read_replica_bucket) {
+  std::optional<cloud_storage_clients::bucket_name> read_replica_bucket) {
     gate_guard guard(_gate);
     auto dl_result = co_await maybe_download_log(ntp_cfg, rtp);
     auto [logs_recovered, min_kafka_offset, max_kafka_offset, manifest]
@@ -157,6 +159,7 @@ ss::future<consensus_ptr> partition_manager::manage(
       _cloud_storage_api,
       _cloud_storage_cache,
       _feature_table,
+      _tm_stm_cache,
       _max_concurrent_producer_ids,
       read_replica_bucket);
 

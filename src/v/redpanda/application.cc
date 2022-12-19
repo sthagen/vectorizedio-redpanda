@@ -125,20 +125,16 @@ static void set_local_kafka_client_config(
     }
 }
 
-static void set_sr_local_kafka_client_config(
-  std::optional<kafka::client::configuration>& client_config,
-  const config::node_config& config) {
-    set_local_kafka_client_config(client_config, config);
-    if (client_config.has_value()) {
-        if (!client_config->produce_batch_delay.is_overriden()) {
-            client_config->produce_batch_delay.set_value(0ms);
-        }
-        if (!client_config->produce_batch_record_count.is_overriden()) {
-            client_config->produce_batch_record_count.set_value(int32_t(0));
-        }
-        if (!client_config->produce_batch_size_bytes.is_overriden()) {
-            client_config->produce_batch_size_bytes.set_value(int32_t(0));
-        }
+static void
+set_sr_kafka_client_defaults(kafka::client::configuration& client_config) {
+    if (!client_config.produce_batch_delay.is_overriden()) {
+        client_config.produce_batch_delay.set_value(0ms);
+    }
+    if (!client_config.produce_batch_record_count.is_overriden()) {
+        client_config.produce_batch_record_count.set_value(int32_t(0));
+    }
+    if (!client_config.produce_batch_size_bytes.is_overriden()) {
+        client_config.produce_batch_size_bytes.set_value(int32_t(0));
     }
 }
 
@@ -587,9 +583,10 @@ void application::hydrate_config(const po::variables_map& cfg) {
         if (config["schema_registry_client"]) {
             _schema_reg_client_config.emplace(config["schema_registry_client"]);
         } else {
-            set_sr_local_kafka_client_config(
+            set_local_kafka_client_config(
               _schema_reg_client_config, config::node());
         }
+        set_sr_kafka_client_defaults(*_schema_reg_client_config);
         config_printer("schema_registry", *_schema_reg_config);
         config_printer("schema_registry_client", *_schema_reg_client_config);
     }
@@ -882,6 +879,9 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         cloud_configs.stop().get();
     }
 
+    syschecks::systemd_message("Creating tm_stm_cache").get();
+    construct_service(tm_stm_cache).get();
+
     syschecks::systemd_message("Adding partition manager").get();
     construct_service(
       partition_manager,
@@ -892,6 +892,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(cloud_storage_api),
       std::ref(shadow_index_cache),
       std::ref(feature_table),
+      std::ref(tm_stm_cache),
       ss::sharded_parameter([] {
           return config::shard_local_cfg().max_concurrent_producer_ids.bind();
       }))
@@ -1107,7 +1108,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(id_allocator_frontend),
       _rm_group_proxy.get(),
       std::ref(rm_partition_frontend),
-      std::ref(feature_table))
+      std::ref(feature_table),
+      std::ref(tm_stm_cache))
       .get();
     _kafka_conn_quotas
       .start([]() {
