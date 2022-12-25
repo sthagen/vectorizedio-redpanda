@@ -10,7 +10,6 @@
  */
 
 #pragma once
-#include "archival/service.h"
 #include "cluster/fwd.h"
 #include "config/endpoint_tls_config.h"
 #include "coproc/partition_manager.h"
@@ -52,9 +51,9 @@ public:
       cluster::controller*,
       ss::sharded<cluster::shard_table>&,
       ss::sharded<cluster::metadata_cache>&,
-      ss::sharded<archival::scheduler_service>&,
       ss::sharded<rpc::connection_cache>&,
-      ss::sharded<cluster::node_status_table>&);
+      ss::sharded<cluster::node_status_table>&,
+      ss::sharded<cluster::self_test_frontend>&);
 
     ss::future<> start();
     ss::future<> stop();
@@ -229,6 +228,7 @@ private:
     void register_hbadger_routes();
     void register_transaction_routes();
     void register_debug_routes();
+    void register_self_test_routes();
     void register_cluster_routes();
     void register_shadow_indexing_routes();
 
@@ -306,6 +306,14 @@ private:
     ss::future<ss::json::json_return_type>
       sync_local_state_handler(std::unique_ptr<ss::httpd::request>);
 
+    /// Self test routes
+    ss::future<ss::json::json_return_type>
+      self_test_start_handler(std::unique_ptr<ss::httpd::request>);
+    ss::future<ss::json::json_return_type>
+      self_test_stop_handler(std::unique_ptr<ss::httpd::request>);
+    ss::future<ss::json::json_return_type>
+      self_test_get_results_handler(std::unique_ptr<ss::httpd::request>);
+
     ss::future<> throw_on_error(
       ss::httpd::request& req,
       std::error_code ec,
@@ -344,6 +352,6 @@ private:
     ss::sharded<rpc::connection_cache>& _connection_cache;
     request_authenticator _auth;
     bool _ready{false};
-    ss::sharded<archival::scheduler_service>& _archival_service;
     ss::sharded<cluster::node_status_table>& _node_status_table;
+    ss::sharded<cluster::self_test_frontend>& _self_test_frontend;
 };

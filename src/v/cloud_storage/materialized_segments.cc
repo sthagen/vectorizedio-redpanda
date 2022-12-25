@@ -65,7 +65,7 @@ ss::future<> materialized_segments::stop() {
 
     // Do the last pass over the eviction list to stop remaining items returned
     // from readers after the eviction loop stopped.
-    for (auto& rs : _eviction_list) {
+    for (auto& rs : _eviction_pending) {
         co_await std::visit(
           [](auto&& rs) {
               if (!rs->is_stopped()) {
@@ -112,17 +112,17 @@ size_t materialized_segments::current_segments() const {
 
 void materialized_segments::evict_reader(
   std::unique_ptr<remote_segment_batch_reader> reader) {
-    _eviction_list.push_back(std::move(reader));
+    _eviction_pending.push_back(std::move(reader));
     _cvar.signal();
 }
 void materialized_segments::evict_segment(
   ss::lw_shared_ptr<remote_segment> segment) {
-    _eviction_list.push_back(std::move(segment));
+    _eviction_pending.push_back(std::move(segment));
     _cvar.signal();
 }
 
 ss::future<> materialized_segments::flush_evicted() {
-    if (_eviction_list.empty()) {
+    if (_eviction_pending.empty() && _eviction_in_flight.empty()) {
         // Fast path, avoid waking up the eviction loop if there is no work.
         co_return;
     }
@@ -131,7 +131,7 @@ ss::future<> materialized_segments::flush_evicted() {
 
     // Write a barrier to the list and wait for the eviction consumer
     // to reach it: this
-    _eviction_list.push_back(barrier);
+    _eviction_pending.push_back(barrier);
     _cvar.signal();
 
     co_await barrier->promise.get_future();
@@ -140,10 +140,13 @@ ss::future<> materialized_segments::flush_evicted() {
 ss::future<> materialized_segments::run_eviction_loop() {
     // Evict readers asynchronously
     while (true) {
-        co_await _cvar.wait([this] { return !_eviction_list.empty(); });
-        auto tmp_list = std::exchange(_eviction_list, {});
-        for (auto& rs : tmp_list) {
-            co_await std::visit([](auto&& rs) { return rs->stop(); }, rs);
+        co_await _cvar.wait([this] { return !_eviction_pending.empty(); });
+        _eviction_in_flight = std::exchange(_eviction_pending, {});
+        while (!_eviction_in_flight.empty()) {
+            co_await std::visit(
+              [](auto&& rs) { return rs->stop(); },
+              _eviction_in_flight.front());
+            _eviction_in_flight.pop_front();
         }
     }
 }
@@ -238,13 +241,17 @@ void materialized_segments::trim_readers(size_t target_free) {
 }
 
 /**
- * TTL based demotion of materialized_segment_state objects back to
- * offloaded_segment_state, and background eviction of the underlying
- * segment and reader objects.
+ * TTL based demotion of materialized_segment_state objects and background
+ * eviction of the underlying segment and reader objects.
  *
  * This method does not guarantee to free any resources: it will not do
  * anything if no segments have an atime older than the TTL.  Ssee trim_readers
  * for how to trim the reader population back to a specific size
+ *
+ * NOTE: This method must never be made async or yield while iterating over
+ * segments. If it does yield and remote_partition::stop runs, remote_partition
+ * can clear out the segments map, and a subsequent offload of that segment will
+ * cause a vassert failure.
  *
  * @param target_free: if set, the trim will remove segments until the
  *        number of units available in segments_semaphore reaches the
@@ -295,6 +302,10 @@ void materialized_segments::trim_segments(std::optional<size_t> target_free) {
  */
 void materialized_segments::maybe_trim_segment(
   materialized_segment_state& st, offload_list_t& to_offload) {
+    if (st.segment->is_stopped()) {
+        return;
+    }
+
     if (st.segment->download_in_progress()) {
         return;
     }

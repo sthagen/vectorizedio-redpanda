@@ -185,9 +185,12 @@ func (r *ClusterReconciler) Reconcile(
 		schemaRegistrySu = resources.NewSuperUsers(r.Client, &redpandaCluster, r.Scheme, resources.ScramSchemaRegistryUsername, resources.SchemaRegistrySuffix, log)
 		schemaRegistrySuKey = schemaRegistrySu.Key()
 	}
-	pki := certmanager.NewPki(r.Client, &redpandaCluster, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+	pki, err := certmanager.NewPki(ctx, r.Client, &redpandaCluster, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating pki: %w", err)
+	}
 	sa := resources.NewServiceAccount(r.Client, &redpandaCluster, r.Scheme, log)
-	configMapResource := resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), proxySuKey, schemaRegistrySuKey, log)
+	configMapResource := resources.NewConfigMap(r.Client, &redpandaCluster, r.Scheme, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), proxySuKey, schemaRegistrySuKey, pki.BrokerTLSConfigProvider(), log)
 	secretResource := resources.PreStartStopScriptSecret(r.Client, &redpandaCluster, r.Scheme, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), proxySuKey, schemaRegistrySuKey, log)
 
 	sts := resources.NewStatefulSet(
@@ -225,7 +228,7 @@ func (r *ClusterReconciler) Reconcile(
 	}
 
 	for _, res := range toApply {
-		err := res.Ensure(ctx)
+		err = res.Ensure(ctx)
 
 		var e *resources.RequeueAfterError
 		if errors.As(err, &e) {
@@ -355,7 +358,7 @@ func validateImagePullPolicy(imagePullPolicy corev1.PullPolicy) error {
 	return nil
 }
 
-//nolint:funlen // refactor in the next iteration
+//nolint:funlen,gocyclo // refactor in the next iteration
 func (r *ClusterReconciler) handlePodFinalizer(
 	ctx context.Context, rp *redpandav1alpha1.Cluster, log logr.Logger,
 ) error {
@@ -414,7 +417,10 @@ func (r *ClusterReconciler) handlePodFinalizer(
 		headlessSvc := resources.NewHeadlessService(r.Client, rp, r.Scheme, headlessPorts, log)
 		clusterSvc := resources.NewClusterService(r.Client, rp, r.Scheme, clusterPorts, log)
 
-		pki := certmanager.NewPki(r.Client, rp, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+		pki, err := certmanager.NewPki(ctx, r.Client, rp, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+		if err != nil {
+			return fmt.Errorf("creating pki: %w", err)
+		}
 
 		adminClient, err := r.AdminAPIClientFactory(ctx, r.Client, rp, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), pki.AdminAPIConfigProvider())
 		if err != nil {
@@ -435,7 +441,7 @@ func (r *ClusterReconciler) handlePodFinalizer(
 		// if it's not gone
 		if broker != nil {
 			// decommission it
-			log.WithValues(nodeID).Info("decommissioning broker")
+			log.WithValues("node-id", nodeID).Info("decommissioning broker")
 			if err = adminClient.DecommissionBroker(ctx, nodeID); err != nil {
 				return fmt.Errorf(`unable to decommission node "%d": %w`, nodeID, err)
 			}
@@ -464,7 +470,7 @@ func (r *ClusterReconciler) handlePodFinalizer(
 					}
 					continue
 				}
-				log.WithValues(key).Info("deleting PersistentVolumeClaim")
+				log.WithValues("persistent-volume-claim", key).Info("deleting PersistentVolumeClaim")
 				if err := r.Delete(ctx, &pvc, &client.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 					return fmt.Errorf(`unable to delete PersistentVolumeClaim "%s/%s": %w`, key.Name, key.Namespace, err)
 				}
@@ -482,7 +488,7 @@ func (r *ClusterReconciler) removePodFinalizer(
 	ctx context.Context, pod *corev1.Pod, log logr.Logger,
 ) error {
 	if controllerutil.ContainsFinalizer(pod, FinalizerKey) {
-		log.V(7).WithValues(pod.Namespace, pod.Name).Info("removing finalizer")
+		log.V(7).WithValues("namespace", pod.Namespace, "name", pod.Name).Info("removing finalizer")
 		controllerutil.RemoveFinalizer(pod, FinalizerKey)
 		if err := r.Update(ctx, pod); err != nil {
 			return err
@@ -495,7 +501,7 @@ func (r *ClusterReconciler) setPodFinalizer(
 	ctx context.Context, pod *corev1.Pod, log logr.Logger,
 ) error {
 	if !controllerutil.ContainsFinalizer(pod, FinalizerKey) {
-		log.V(7).WithValues(pod.Namespace, pod.Name).Info("adding finalizer")
+		log.V(7).WithValues("namespace", pod.Namespace, "name", pod.Name).Info("adding finalizer")
 		controllerutil.AddFinalizer(pod, FinalizerKey)
 		if err := r.Update(ctx, pod); err != nil {
 			return err
@@ -524,7 +530,7 @@ func (r *ClusterReconciler) setPodNodeIDAnnotation(
 		if err != nil {
 			return fmt.Errorf("cannot fetch node id for node-id annotation: %w", err)
 		}
-		log.WithValues(pod.Name, nodeID).Info("setting node-id annotation")
+		log.WithValues("pod-name", pod.Name, "node-id", nodeID).Info("setting node-id annotation")
 		pod.Annotations[PodAnnotationNodeIDKey] = fmt.Sprintf("%d", nodeID)
 		if err := r.Update(ctx, pod, &client.UpdateOptions{}); err != nil {
 			return fmt.Errorf(`unable to update pod "%s" with node-id annotation: %w`, pod.Name, err)
@@ -540,7 +546,10 @@ func (r *ClusterReconciler) fetchAdminNodeID(ctx context.Context, rp *redpandav1
 	headlessSvc := resources.NewHeadlessService(r.Client, rp, r.Scheme, headlessPorts, log)
 	clusterSvc := resources.NewClusterService(r.Client, rp, r.Scheme, clusterPorts, log)
 
-	pki := certmanager.NewPki(r.Client, rp, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+	pki, err := certmanager.NewPki(ctx, r.Client, rp, headlessSvc.HeadlessServiceFQDN(r.clusterDomain), clusterSvc.ServiceFQDN(r.clusterDomain), r.Scheme, log)
+	if err != nil {
+		return -1, fmt.Errorf("creating pki: %w", err)
+	}
 
 	ordinal, err := strconv.ParseInt(pod.Name[len(rp.Name)+1:], 10, 0)
 	if err != nil {

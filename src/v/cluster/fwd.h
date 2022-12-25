@@ -37,7 +37,6 @@ class members_frontend;
 class config_frontend;
 class config_manager;
 class members_backend;
-class data_policy_frontend;
 class tx_gateway;
 class rm_group_proxy;
 class non_replicable_topics_frontend;
@@ -53,6 +52,8 @@ class partition_balancer_state;
 class node_status_backend;
 class node_status_table;
 class ephemeral_credential_frontend;
+class self_test_backend;
+class self_test_frontend;
 
 namespace node {
 class local_monitor;

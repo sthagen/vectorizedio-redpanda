@@ -123,8 +123,6 @@ public:
     void offload_segment(model::offset);
 
 private:
-    ss::future<> run_eviction_loop();
-
     friend struct materialized_segment_state;
 
     using materialized_segment_ptr
@@ -134,8 +132,7 @@ private:
       = absl::btree_map<model::offset, materialized_segment_ptr>;
     using iterator = segment_map_t::iterator;
 
-    /// This is exposed for the benefit of offloaded_segment_state and
-    /// materialized_segment_state
+    /// This is exposed for the benefit of the materialized_segment_state
     materialized_segments& materialized();
 
     /// Materialize segment if needed and create a reader

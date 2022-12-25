@@ -16,16 +16,21 @@
 #   [jerry@winterland]$ dev_cluster.py -e vbuild/debug/clang/bin/redpanda
 #
 import asyncio
+import multiprocessing
 import pathlib
 import yaml
 import dataclasses
 import argparse
-import sys
+import signal
+import os
+import shutil
 
 try:
     from rich import print
 except ImportError:
     pass
+
+BOOTSTRAP_YAML = ".bootstrap.yaml"
 
 
 @dataclasses.dataclass
@@ -51,16 +56,30 @@ class NodeConfig:
 
 
 class Redpanda:
-    def __init__(self, binary, config):
+    def __init__(self, binary, cores, config, extra_args):
         self.binary = binary
+        self.cores = cores
         self.config = config
         self.process = None
+        self.extra_args = extra_args
+
+    def stop(self):
+        print(f"{self.process.pid}: dev_cluster stop requested")
+        self.process.send_signal(signal.SIGINT)
 
     async def run(self):
-        self.process = await asyncio.create_subprocess_exec(
-            self.binary,
-            "--redpanda-cfg",
-            self.config,
+        log_path = pathlib.Path(os.path.dirname(self.config)) / "redpanda.log"
+
+        # If user did not override cores with extra args, apply it from our internal cores setting
+        if not {"-c", "--smp"} & set(self.extra_args):
+            cores_args = f"-c {self.cores}" if self.cores else ""
+        else:
+            cores_args = ""
+
+        extra_args = ' '.join(f"\"{a}\"" for a in self.extra_args)
+
+        self.process = await asyncio.create_subprocess_shell(
+            f"{self.binary} --redpanda-cfg {self.config} {cores_args} {extra_args} 2>&1 | tee -i {log_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT)
 
@@ -71,21 +90,7 @@ class Redpanda:
             line = line.decode("utf8").rstrip()
             print(f"{self.process.pid}: {line}")
 
-        self.process.terminate()
-        return await self.process.wait()
-
-
-async def input_helper(configs):
-    def dump_endpoints():
-        for config, _ in configs:
-            print("admin endpoint:",
-                  f"http://localhost:{config.redpanda.admin.port}")
-
-    while True:
-        loop = asyncio.get_event_loop()
-        content = await loop.run_in_executor(None, sys.stdin.readline)
-        if "h" in content:
-            dump_endpoints()
+        await self.process.wait()
 
 
 async def main():
@@ -96,6 +101,10 @@ async def main():
                         help="path to redpanda executable",
                         default="redpanda")
     parser.add_argument("--nodes", type=int, help="number of nodes", default=3)
+    parser.add_argument("--cores",
+                        type=int,
+                        help="number of cores per node",
+                        default=None)
     parser.add_argument("-d",
                         "--directory",
                         type=pathlib.Path,
@@ -117,7 +126,13 @@ async def main():
                         type=str,
                         help="listening address",
                         default="0.0.0.0")
-    args = parser.parse_args()
+    args, extra_args = parser.parse_known_args()
+
+    if extra_args and extra_args[0] == "--":
+        extra_args = extra_args[1:]
+    elif extra_args:
+        # Re-do with strict parse: this will surface unknown argument errors
+        args = parser.parse_args()
 
     seed_servers = [
         NetworkAddress(args.listen_address, args.base_rpc_port + i)
@@ -158,13 +173,31 @@ async def main():
                       f,
                       indent=2,
                       Dumper=get_config_dumper())
+
+        # If there is a bootstrap file in pwd, propagate it to each node's
+        # directory so that they'll load it on first start
+        if os.path.exists(BOOTSTRAP_YAML):
+            shutil.copyfile(BOOTSTRAP_YAML, node_dir / BOOTSTRAP_YAML)
+
         return config, conf_file
 
     configs = [prepare_node(i) for i in range(args.nodes)]
-    nodes = [Redpanda(args.executable, c[1]) for c in configs]
+
+    cores = args.cores
+    if cores is None:
+        cores = max(multiprocessing.cpu_count() // args.nodes, 1)
+    nodes = [
+        Redpanda(args.executable, cores, c[1], extra_args) for c in configs
+    ]
 
     coros = [r.run() for r in nodes]
-    coros.append(input_helper(configs))
+
+    def stop():
+        for n in nodes:
+            n.stop()
+
+    asyncio.get_event_loop().add_signal_handler(signal.SIGINT, stop)
+
     await asyncio.gather(*coros)
 
 

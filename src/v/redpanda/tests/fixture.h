@@ -29,7 +29,7 @@
 #include "kafka/client/transport.h"
 #include "kafka/protocol/fetch.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
-#include "kafka/server/protocol.h"
+#include "kafka/server/server.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timeout_clock.h"
@@ -107,8 +107,11 @@ public:
         app.check_environment();
         app.wire_up_and_start(*app_signal, true);
 
+        configs.start(ss::sstring("fixture_config")).get();
+
         // used by request context builder
-        proto = std::make_unique<kafka::protocol>(
+        proto = std::make_unique<kafka::server>(
+          &configs,
           app.smp_service_groups.kafka_smp_sg(),
           app.metadata_cache,
           app.controller->get_topics_frontend(),
@@ -126,8 +129,9 @@ public:
           app.controller->get_api(),
           app.tx_gateway_frontend,
           app.cp_partition_manager,
-          app.data_policies,
           std::nullopt);
+
+        configs.stop().get();
     }
 
     // creates single node with default configuration
@@ -214,11 +218,6 @@ public:
         aconf.segment_upload_timeout = 1s;
         aconf.manifest_upload_timeout = 1s;
         aconf.time_limit = std::nullopt;
-        // Set the archiver reconciliation interval to be longer than the
-        // duration of any sensible unit test. Unit tests request reconciliation
-        // manually by calling into the scheduler service.
-        // TODO: Remove in PR#7547
-        aconf.reconciliation_interval = 1h;
         return aconf;
     }
 
@@ -311,10 +310,6 @@ public:
                   .set_value(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                       archival_cfg->cloud_storage_initial_backoff));
-                config.get("cloud_storage_reconciliation_interval_ms")
-                  .set_value(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                      archival_cfg->reconciliation_interval));
                 config.get("cloud_storage_manifest_upload_timeout_ms")
                   .set_value(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -563,7 +558,7 @@ public:
         security::sasl_server sasl(security::sasl_server::sasl_state::complete);
         auto conn = ss::make_lw_shared<kafka::connection_context>(
           *proto,
-          net::server::resources(nullptr, nullptr),
+          nullptr,
           std::move(sasl),
           false,
           std::nullopt,
@@ -591,7 +586,8 @@ public:
     uint16_t proxy_port;
     uint16_t schema_reg_port;
     std::filesystem::path data_dir;
-    std::unique_ptr<kafka::protocol> proto;
+    ss::sharded<net::server_configuration> configs;
+    std::unique_ptr<kafka::server> proto;
     bool remove_on_shutdown;
     std::unique_ptr<::stop_signal> app_signal;
 };

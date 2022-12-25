@@ -55,6 +55,13 @@ rpcgen(
   INCLUDES ${CMAKE_BINARY_DIR}/src/v
 )
 
+rpcgen(
+  TARGET self_test_rpc
+  IN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/self_test_rpc.json
+  OUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/self_test_rpc_service.h
+  INCLUDES ${CMAKE_BINARY_DIR}/src/v
+)
+
 v_cc_library(
   NAME cluster
   SRCS
@@ -98,8 +105,6 @@ v_cc_library(
     tx_helpers.cc
     security_manager.cc
     security_frontend.cc
-    data_policy_manager.cc
-    data_policy_frontend.cc
     cluster_discovery.cc
     controller_api.cc
     members_frontend.cc
@@ -130,6 +135,9 @@ v_cc_library(
     partition_balancer_rpc_handler.cc
     node_status_backend.cc
     node_status_rpc_handler.cc
+    self_test_backend.cc
+    self_test_frontend.cc
+    self_test_rpc_handler.cc
     bootstrap_service.cc
     bootstrap_backend.cc
     ephemeral_credential_frontend.cc
@@ -144,12 +152,13 @@ v_cc_library(
     partition_balancer_rpc
     node_status_rpc
     ephemeral_credential_rpc
+    self_test_rpc
     v::raft
     Roaring::roaring
     absl::flat_hash_map
     v::model
-    v::v8_engine
     v::cloud_storage
+    v::archival
     v::features
   )
 add_subdirectory(tests)

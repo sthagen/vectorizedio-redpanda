@@ -18,8 +18,8 @@
 #include "kafka/server/connection_context.h"
 #include "kafka/server/fetch_session_cache.h"
 #include "kafka/server/logger.h"
-#include "kafka/server/protocol.h"
 #include "kafka/server/response.h"
+#include "kafka/server/server.h"
 #include "kafka/types.h"
 #include "seastarx.h"
 #include "vlog.h"
@@ -86,7 +86,7 @@ public:
 
     request_reader& reader() { return _reader; }
 
-    latency_probe& probe() { return _conn->server().probe(); }
+    latency_probe& probe() { return _conn->server().latency_probe(); }
 
     const cluster::metadata_cache& metadata_cache() const {
         return _conn->server().metadata_cache();
@@ -218,10 +218,6 @@ public:
 
     cluster::security_frontend& security_frontend() const {
         return _conn->server().security_frontend();
-    }
-
-    v8_engine::data_policy_table& data_policy_table() const {
-        return _conn->server().data_policy_table();
     }
 
     security::authorizer& authorizer() { return _conn->server().authorizer(); }
