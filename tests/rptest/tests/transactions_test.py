@@ -10,6 +10,7 @@
 from rptest.services.cluster import cluster
 from rptest.util import wait_until_result
 from rptest.clients.types import TopicSpec
+from time import sleep, time
 
 import uuid
 
@@ -194,7 +195,7 @@ class TransactionsTest(RedpandaTest):
             assert False, "send_offsetes should fail"
         except ck.cimpl.KafkaException as e:
             kafka_error = e.args[0]
-            assert kafka_error.code() == ck.cimpl.KafkaError.INVALID_TXN_STATE
+            assert kafka_error.code() == ck.cimpl.KafkaError._FENCED
 
         try:
             # if abort fails an app should recreate a producer otherwise
@@ -202,7 +203,7 @@ class TransactionsTest(RedpandaTest):
             producer.abort_transaction()
         except ck.cimpl.KafkaException as e:
             kafka_error = e.args[0]
-            assert kafka_error.code() == ck.cimpl.KafkaError.INVALID_TXN_STATE
+            assert kafka_error.code() == ck.cimpl.KafkaError._FENCED
 
     @cluster(num_nodes=3)
     def change_static_member_test(self):
@@ -259,12 +260,65 @@ class TransactionsTest(RedpandaTest):
         producer.abort_transaction()
 
     @cluster(num_nodes=3)
+    def expired_tx_test(self):
+        # confluent_kafka client uses the same timeout both for init_transactions
+        # and produce; we want to test expiration on produce so we need to keep
+        # the timeout low to avoid long sleeps in the test but when we set it too
+        # low init_transactions throws NOT_COORDINATOR. using explicit reties on
+        # it to overcome the problem
+        #
+        # for explanation see
+        # https://github.com/redpanda-data/redpanda/issues/7991
+
+        timeout_s = 30
+        begin = time()
+        while True:
+            assert time(
+            ) - begin <= timeout_s, f"Can't init transactions within {timeout_s} sec"
+            try:
+                producer = ck.Producer({
+                    'bootstrap.servers':
+                    self.redpanda.brokers(),
+                    'transactional.id':
+                    '0',
+                    'transaction.timeout.ms':
+                    5000,
+                })
+                producer.init_transactions()
+                break
+            except ck.cimpl.KafkaException as e:
+                self.redpanda.logger.debug(f"error on init_transactions",
+                                           exc_info=True)
+                kafka_error = e.args[0]
+                assert kafka_error.code() in [
+                    ck.cimpl.KafkaError.NOT_COORDINATOR,
+                    ck.cimpl.KafkaError._TIMED_OUT
+                ]
+
+        producer.begin_transaction()
+
+        for i in range(0, 10):
+            producer.produce(self.input_t.name,
+                             str(i),
+                             str(i),
+                             partition=0,
+                             on_delivery=self.on_delivery)
+        producer.flush()
+        sleep(10)
+        try:
+            producer.commit_transaction()
+            assert False, "tx is expected to be expired"
+        except ck.cimpl.KafkaException as e:
+            kafka_error = e.args[0]
+            assert kafka_error.code() == ck.cimpl.KafkaError._FENCED
+
+    @cluster(num_nodes=3)
     def graceful_leadership_transfer_test(self):
 
         producer = ck.Producer({
             'bootstrap.servers': self.redpanda.brokers(),
             'transactional.id': '0',
-            'transaction.timeout.ms': 10000,
+            'transaction.timeout.ms': 60000,
         })
 
         producer.init_transactions()

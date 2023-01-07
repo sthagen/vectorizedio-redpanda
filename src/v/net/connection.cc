@@ -31,6 +31,9 @@ bool is_reconnect_error(const std::system_error& e) {
         switch (v) {
         case GNUTLS_E_PUSH_ERROR:
         case GNUTLS_E_PULL_ERROR:
+        case GNUTLS_E_UNEXPECTED_PACKET:
+        case GNUTLS_E_UNSUPPORTED_VERSION_PACKET:
+        case GNUTLS_E_NO_CIPHER_SUITES:
         case GNUTLS_E_PREMATURE_TERMINATION:
             return true;
         default:
@@ -42,6 +45,7 @@ bool is_reconnect_error(const std::system_error& e) {
         case ENETUNREACH:
         case ETIMEDOUT:
         case ECONNRESET:
+        case ENOTCONN:
         case ECONNABORTED:
         case EPIPE:
             return true;
@@ -89,6 +93,18 @@ std::optional<ss::sstring> is_disconnect_exception(std::exception_ptr e) {
     }
 
     return std::nullopt;
+}
+
+bool is_auth_error(std::exception_ptr e) {
+    try {
+        rethrow_exception(e);
+    } catch (const authentication_exception& e) {
+        return true;
+    } catch (...) {
+        return false;
+    }
+
+    __builtin_unreachable();
 }
 
 connection::connection(

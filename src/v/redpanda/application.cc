@@ -81,6 +81,7 @@
 #include "version.h"
 #include "vlog.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
 #include <seastar/core/seastar.hh>
@@ -326,6 +327,9 @@ int application::run(int ac, char** av) {
                 wire_up_and_start(app_signal);
                 app_signal.wait().get();
                 vlog(_log.info, "Stopping...");
+            } catch (const ss::abort_requested_exception&) {
+                vlog(_log.info, "Redpanda startup aborted");
+                return 0;
             } catch (...) {
                 vlog(
                   _log.error,
@@ -639,7 +643,8 @@ void application::configure_admin_server() {
       std::ref(metadata_cache),
       std::ref(_connection_cache),
       std::ref(node_status_table),
-      std::ref(self_test_frontend))
+      std::ref(self_test_frontend),
+      _schema_registry.get())
       .get();
 }
 
@@ -860,6 +865,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         syschecks::systemd_message("Starting cloud storage api").get();
         ss::sharded<cloud_storage::configuration> cloud_configs;
         cloud_configs.start().get();
+        auto stop_config = ss::defer(
+          [&cloud_configs] { cloud_configs.stop().get(); });
         cloud_configs
           .invoke_on_all([](cloud_storage::configuration& c) {
               return cloud_storage::configuration::get_config().then(
@@ -873,8 +880,6 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           cloud_configs.local().bucket_name,
           std::ref(cloud_storage_api))
           .get();
-
-        cloud_configs.stop().get();
     }
 
     syschecks::systemd_message("Creating tm_stm_cache").get();

@@ -44,7 +44,7 @@ configuration::configuration()
       {.needs_restart = needs_restart::no,
        .example = "16777216",
        .visibility = visibility::tunable},
-      std::nullopt)
+      1_MiB)
   , log_segment_size_max(
       *this,
       "log_segment_size_max",
@@ -540,6 +540,13 @@ configuration::configuration()
       "abort_timed_out_transactions_interval_ms",
       "How often look for the inactive transactions and abort them",
       {.visibility = visibility::tunable},
+      10s)
+  , tx_log_stats_interval_s(
+      *this,
+      "tx_log_stats_interval_s",
+      "How often to log per partition tx stats, works only with debug logging "
+      "enabled.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
   , create_topic_timeout_ms(
       *this,
