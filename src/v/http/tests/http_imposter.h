@@ -10,9 +10,9 @@
 
 #pragma once
 
+#include "http/tests/registered_urls.h"
 #include "net/unresolved_address.h"
 #include "seastarx.h"
-#include "test_utils/registered_urls.h"
 #include "vassert.h"
 
 #include <seastar/core/sstring.hh>
@@ -21,7 +21,8 @@
 class http_imposter_fixture {
 public:
     static constexpr std::string_view httpd_host_name = "127.0.0.1";
-    static constexpr uint httpd_port_number = 4430;
+
+    uint16_t httpd_port_number();
 
 public:
     using request_predicate

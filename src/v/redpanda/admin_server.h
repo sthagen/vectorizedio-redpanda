@@ -15,10 +15,9 @@
 #include "coproc/partition_manager.h"
 #include "model/metadata.h"
 #include "pandaproxy/schema_registry/fwd.h"
-#include "request_auth.h"
-#include "rp_services.h"
 #include "rpc/connection_cache.h"
 #include "seastarx.h"
+#include "utils/request_auth.h"
 
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/sstring.hh>
@@ -36,6 +35,10 @@ struct admin_server_cfg {
     std::vector<config::endpoint_tls_config> endpoints_tls;
     ss::sstring admin_api_docs_dir;
     ss::scheduling_group sg;
+};
+
+enum class service_kind {
+    schema_registry,
 };
 
 namespace detail {
@@ -266,6 +269,9 @@ private:
       get_broker_handler(std::unique_ptr<ss::httpd::request>);
     ss::future<ss::json::json_return_type>
       decomission_broker_handler(std::unique_ptr<ss::httpd::request>);
+    ss::future<ss::json::json_return_type>
+      get_decommission_progress_handler(std::unique_ptr<ss::httpd::request>);
+
     ss::future<ss::json::json_return_type>
       recomission_broker_handler(std::unique_ptr<ss::httpd::request>);
     ss::future<ss::json::json_return_type>

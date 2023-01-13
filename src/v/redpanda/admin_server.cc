@@ -70,11 +70,11 @@
 #include "redpanda/admin/api-doc/shadow_indexing.json.h"
 #include "redpanda/admin/api-doc/status.json.h"
 #include "redpanda/admin/api-doc/transaction.json.h"
-#include "redpanda/request_auth.h"
 #include "rpc/errc.h"
 #include "security/scram_algorithm.h"
 #include "security/scram_authenticator.h"
 #include "ssx/metrics.h"
+#include "utils/string_switch.h"
 #include "vlog.h"
 
 #include <seastar/core/coroutine.hh>
@@ -98,6 +98,7 @@
 #include <limits>
 #include <stdexcept>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 
 using namespace std::chrono_literals;
@@ -1946,6 +1947,73 @@ ss::future<ss::json::json_return_type> admin_server::decomission_broker_handler(
     co_return ss::json::json_void();
 }
 
+ss::future<ss::json::json_return_type>
+admin_server::get_decommission_progress_handler(
+  std::unique_ptr<ss::httpd::request> req) {
+    model::node_id id = parse_broker_id(*req);
+    auto res
+      = co_await _controller->get_api().local().get_node_decommission_progress(
+        id, 5s + model::timeout_clock::now());
+    if (!res) {
+        if (res.error() == cluster::errc::node_does_not_exists) {
+            throw ss::httpd::base_exception(
+              fmt::format("Node {} does not exists", id),
+              ss::httpd::reply::status_type::not_found);
+        } else if (res.error() == cluster::errc::invalid_node_operation) {
+            throw ss::httpd::base_exception(
+              fmt::format("Node {} is not decommissioning", id),
+              ss::httpd::reply::status_type::bad_request);
+        }
+
+        throw ss::httpd::base_exception(
+          fmt::format(
+            "Unable to get decommission status for {} - {}",
+            id,
+            res.error().message()),
+          ss::httpd::reply::status_type::internal_server_error);
+    }
+    ss::httpd::broker_json::decommission_status ret;
+    auto& decommission_progress = res.value();
+
+    ret.replicas_left = decommission_progress.replicas_left;
+    ret.finished = decommission_progress.finished;
+
+    for (auto& p : decommission_progress.current_reconfigurations) {
+        ss::httpd::broker_json::partition_reconfiguration_status status;
+        status.ns = p.ntp.ns;
+        status.topic = p.ntp.tp.topic;
+        status.partition = p.ntp.tp.partition;
+        auto added_replicas = cluster::subtract_replica_sets(
+          p.previous_assignment, p.current_assignment);
+        // we are only interested in reconfigurations where one replica was
+        // added to the node
+        if (added_replicas.size() != 1) {
+            continue;
+        }
+        ss::httpd::broker_json::broker_shard moving_to{};
+        moving_to.node_id = added_replicas.front().node_id();
+        moving_to.core = added_replicas.front().shard;
+        status.moving_to = moving_to;
+        size_t left_to_move = 0;
+        size_t already_moved = 0;
+        for (auto replica_status : p.already_transferred_bytes) {
+            left_to_move += (p.current_partition_size - replica_status.bytes);
+            already_moved += replica_status.bytes;
+        }
+        status.bytes_left_to_move = left_to_move;
+        status.bytes_moved = already_moved;
+        status.partition_size = p.current_partition_size;
+        // if no information from partitions is present yet, we may indicate
+        // that everything have to be moved
+        if (already_moved == 0 && left_to_move == 0) {
+            status.bytes_left_to_move = p.current_partition_size;
+        }
+        ret.partitions.push(status);
+    }
+
+    co_return ret;
+}
+
 ss::future<ss::json::json_return_type> admin_server::recomission_broker_handler(
   std::unique_ptr<ss::httpd::request> req) {
     model::node_id id = parse_broker_id(*req);
@@ -2027,6 +2095,12 @@ void admin_server::register_broker_routes() {
       ss::httpd::broker_json::get_broker,
       [this](std::unique_ptr<ss::httpd::request> req) {
           return get_broker_handler(std::move(req));
+      });
+
+    register_route<user>(
+      ss::httpd::broker_json::get_decommission,
+      [this](std::unique_ptr<ss::httpd::request> req) {
+          return get_decommission_progress_handler(std::move(req));
       });
 
     register_route<superuser>(
@@ -2935,32 +3009,86 @@ void admin_server::register_transaction_routes() {
       });
 }
 
+static json::validator make_self_test_start_validator() {
+    const std::string schema = R"(
+{
+    "type": "object",
+    "properties": {
+        "nodes": {
+            "type": "array",
+            "items": {
+                "type": "number"
+            }
+        },
+        "tests": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string"
+                    }
+                },
+                "required": ["type"]
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}
+)";
+    return json::validator(schema);
+}
+
 ss::future<ss::json::json_return_type>
 admin_server::self_test_start_handler(std::unique_ptr<ss::httpd::request> req) {
+    static thread_local json::validator self_test_start_validator(
+      make_self_test_start_validator());
     if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
         vlog(logger.debug, "Need to redirect self_test_start request");
         throw co_await redirect_to_leader(*req, model::controller_ntp);
     }
     auto doc = parse_json_body(*req);
-    std::optional<cluster::diskcheck_opts> dto;
-    std::optional<cluster::netcheck_opts> nto;
-    if (!doc.HasMember("tests")) {
-        dto = cluster::diskcheck_opts::from_json(doc);
-        nto = cluster::netcheck_opts::from_json(doc);
-    } else {
-        for (const auto& name : doc["tests"].GetArray()) {
-            if (name == "disk") {
-                dto = cluster::diskcheck_opts::from_json(doc);
-            } else if (name == "network") {
-                nto = cluster::netcheck_opts::from_json(doc);
+    apply_validator(self_test_start_validator, doc);
+    std::vector<model::node_id> ids;
+    cluster::start_test_request r;
+    if (!doc.IsNull()) {
+        if (doc.HasMember("nodes")) {
+            const auto& node_ids = doc["nodes"].GetArray();
+            for (const auto& element : node_ids) {
+                ids.emplace_back(element.GetInt());
             }
+        } else {
+            /// If not provided, default is to start the test on all nodes
+            ids = _controller->get_members_table().local().node_ids();
+        }
+        if (doc.HasMember("tests")) {
+            const auto& params = doc["tests"].GetArray();
+            for (const auto& element : params) {
+                const auto& obj = element.GetObject();
+                const ss::sstring test_type(obj["type"].GetString());
+                if (test_type == "disk") {
+                    r.dtos.push_back(cluster::diskcheck_opts::from_json(obj));
+                } else if (test_type == "network") {
+                    r.ntos.push_back(cluster::netcheck_opts::from_json(obj));
+                } else {
+                    throw ss::httpd::bad_param_exception(
+                      "Unknown self_test 'type', valid options are 'disk' or "
+                      "'network'");
+                }
+            }
+        } else {
+            /// Default test run is to start 1 disk and 1 network test with
+            /// default arguments
+            r.dtos.push_back(cluster::diskcheck_opts{});
+            r.ntos.push_back(cluster::netcheck_opts{});
         }
     }
     try {
         auto tid = co_await _self_test_frontend.invoke_on(
           cluster::self_test_frontend::shard,
-          [dto, nto](auto& self_test_frontend) {
-              return self_test_frontend.start_test(dto, nto);
+          [r, ids](auto& self_test_frontend) {
+              return self_test_frontend.start_test(r, ids);
           });
         vlog(logger.info, "Request to start self test succeeded: {}", tid);
         co_return ss::json::json_return_type(tid);
@@ -3010,6 +3138,7 @@ self_test_result_to_json(const cluster::self_test_result& str) {
     r.bps = str.bps;
     r.test_id = ss::sstring(str.test_id);
     r.name = str.name;
+    r.info = str.info;
     r.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                    str.duration)
                    .count();
@@ -3347,6 +3476,28 @@ void admin_server::register_shadow_indexing_routes() {
       });
 }
 
+constexpr std::string_view to_string_view(service_kind kind) {
+    switch (kind) {
+    case service_kind::schema_registry:
+        return "schema-registry";
+    }
+    return "invalid";
+}
+
+template<typename E>
+std::enable_if_t<std::is_enum_v<E>, std::optional<E>>
+  from_string_view(std::string_view);
+
+template<>
+constexpr std::optional<service_kind>
+from_string_view<service_kind>(std::string_view sv) {
+    return string_switch<std::optional<service_kind>>(sv)
+      .match(
+        to_string_view(service_kind::schema_registry),
+        service_kind::schema_registry)
+      .default_match(std::nullopt);
+}
+
 ss::future<> admin_server::restart_redpanda_service(service_kind service) {
     if (service == service_kind::schema_registry) {
         // Checks specific to schema registry
@@ -3358,7 +3509,11 @@ ss::future<> admin_server::restart_redpanda_service(service_kind service) {
 
         try {
             co_await _schema_registry->restart();
-        } catch (...) {
+        } catch (const std::exception& ex) {
+            vlog(
+              logger.error,
+              "Unknown issue restarting schema_registry: {}",
+              ex.what());
             throw ss::httpd::server_error_exception(
               "Unknown issue restarting schema_registry");
         }
@@ -3373,10 +3528,10 @@ admin_server::redpanda_services_restart_handler(
       service_param);
     if (!service.has_value()) {
         throw ss::httpd::not_found_exception(
-          fmt::format("Invalid service: {}", service));
+          fmt::format("Invalid service: {}", service_param));
     }
 
-    vlog(logger.info, "Restart redpanda service: {}", service);
+    vlog(logger.info, "Restart redpanda service: {}", to_string_view(*service));
     co_await restart_redpanda_service(*service);
     co_return ss::json::json_return_type(ss::json::json_void());
 }

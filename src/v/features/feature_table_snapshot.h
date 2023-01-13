@@ -31,7 +31,7 @@ class feature_table;
 struct feature_state_snapshot
   : serde::envelope<
       feature_state_snapshot,
-      serde::version<1>,
+      serde::version<0>,
       serde::compat_version<0>> {
     ss::sstring name;
     feature_state::state state;
@@ -47,13 +47,13 @@ struct feature_state_snapshot
 struct feature_table_snapshot
   : serde::envelope<
       feature_table_snapshot,
-      serde::version<0>,
+      serde::version<1>,
       serde::compat_version<0>> {
     model::offset applied_offset;
     cluster::cluster_version version{cluster::invalid_version};
     std::optional<security::license> license;
     std::vector<feature_state_snapshot> states;
-    cluster::cluster_version original_version;
+    cluster::cluster_version original_version{cluster::invalid_version};
 
     auto serde_fields() {
         return std::tie(

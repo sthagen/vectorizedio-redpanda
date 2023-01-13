@@ -15,7 +15,9 @@
 #include "bytes/scattered_message.h"
 #include "config/configuration.h"
 #include "kafka/protocol/sasl_authenticate.h"
+#include "kafka/server/handlers/fetch.h"
 #include "kafka/server/handlers/handler_interface.h"
+#include "kafka/server/handlers/produce.h"
 #include "kafka/server/protocol_utils.h"
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/request_context.h"
@@ -40,72 +42,77 @@ using namespace std::chrono_literals;
 
 namespace kafka {
 
+ss::future<> connection_context::process() {
+    while (true) {
+        if (is_finished_parsing()) {
+            break;
+        }
+        co_await process_one_request();
+    }
+}
+
 ss::future<> connection_context::process_one_request() {
-    return parse_size(conn->input())
-      .then([this](std::optional<size_t> sz) mutable {
-          if (!sz) {
-              return ss::make_ready_future<>();
-          }
-          if (sz > _max_request_size()) {
-              return ss::make_exception_future<>(
-                net::invalid_request_error(fmt::format(
-                  "request size {} is larger than the configured max {}",
-                  sz,
-                  _max_request_size())));
-          }
-          /*
-           * Intercept the wire protocol when:
-           *
-           * 1. sasl is enabled (implied by 2)
-           * 2. during auth phase
-           * 3. handshake was v0
-           */
-          if (unlikely(
-                sasl()
-                && sasl()->state()
-                     == security::sasl_server::sasl_state::authenticate
-                && sasl()->handshake_v0())) {
-              return handle_auth_v0(*sz).handle_exception(
-                [this](std::exception_ptr e) {
-                    vlog(klog.info, "Detected error processing request: {}", e);
-                    conn->shutdown_input();
-                });
-          }
-          return parse_header(conn->input())
-            .then([this,
-                   s = sz.value()](std::optional<request_header> h) mutable {
-                _server.probe().add_bytes_received(s);
-                if (!h) {
-                    vlog(
-                      klog.debug,
-                      "could not parse header from client: {}",
-                      conn->addr);
-                    _server.probe().header_corrupted();
-                    return ss::make_ready_future<>();
-                }
-                return dispatch_method_once(std::move(h.value()), s)
-                  .handle_exception_type(
-                    [this](const kafka_api_version_not_supported_exception& e) {
-                        vlog(
-                          klog.warn,
-                          "Error while processing request from {} - {}",
-                          conn->addr,
-                          e.what());
-                        conn->shutdown_input();
-                    })
-                  .handle_exception_type([this](const std::bad_alloc&) {
-                      // In general, dispatch_method_once does not throw,
-                      // but bad_allocs are an exception.  Log it cleanly
-                      // to avoid this bubbling up as an unhandled
-                      // exceptional future.
-                      vlog(
-                        klog.error,
-                        "Request from {} failed on memory exhaustion "
-                        "(std::bad_alloc)",
-                        conn->addr);
-                  });
-            });
-      });
+    auto sz = co_await parse_size(conn->input());
+    if (!sz.has_value()) {
+        co_return;
+    }
+
+    if (sz.value() > _max_request_size()) {
+        throw net::invalid_request_error(fmt::format(
+          "request size {} is larger than the configured max {}",
+          sz,
+          _max_request_size()));
+    }
+
+    /*
+     * Intercept the wire protocol when:
+     *
+     * 1. sasl is enabled (implied by 2)
+     * 2. during auth phase
+     * 3. handshake was v0
+     */
+    if (unlikely(
+          sasl()
+          && sasl()->state() == security::sasl_server::sasl_state::authenticate
+          && sasl()->handshake_v0())) {
+        try {
+            co_return co_await handle_auth_v0(*sz);
+        } catch (...) {
+            vlog(
+              klog.info,
+              "Detected error processing request: {}",
+              std::current_exception());
+            conn->shutdown_input();
+        }
+    }
+
+    auto h = co_await parse_header(conn->input());
+    _server.probe().add_bytes_received(sz.value());
+    if (!h) {
+        vlog(klog.debug, "could not parse header from client: {}", conn->addr);
+        _server.probe().header_corrupted();
+        co_return;
+    }
+
+    try {
+        co_return co_await dispatch_method_once(
+          std::move(h.value()), sz.value());
+    } catch (const kafka_api_version_not_supported_exception& e) {
+        vlog(
+          klog.warn,
+          "Error while processing request from {} - {}",
+          conn->addr,
+          e.what());
+        conn->shutdown_input();
+    } catch (const std::bad_alloc&) {
+        // In general, dispatch_method_once does not throw, but bad_allocs are
+        // an exception. Log it cleanly to avoid this bubbling up as an
+        // unhandled exceptional future.
+        vlog(
+          klog.error,
+          "Request from {} failed on memory exhaustion (std::bad_alloc)",
+          conn->addr);
+    }
 }
 
 /*
@@ -199,11 +206,20 @@ ss::future<session_resources> connection_context::throttle_request(
     // distinguish throttling delays from real delays. delays
     // applied to subsequent messages allow backpressure to take
     // affect.
-    auto delay = _server.quota_mgr().record_tp_and_throttle(
-      hdr.client_id, request_size);
+    quota_manager::throttle_delay delay{};
+    if (hdr.key == fetch_api::key) {
+        delay = _server.quota_mgr().throttle_fetch_tp(hdr.client_id);
+    } else if (hdr.key == produce_api::key) {
+        delay = _server.quota_mgr().record_produce_tp_and_throttle(
+          hdr.client_id, request_size);
+    }
+    request_data r_data = request_data{
+      .request_key = hdr.key,
+      .client_id = ss::sstring{hdr.client_id.value_or("")}};
     auto tracker = std::make_unique<request_tracker>(_server.probe());
     auto fut = ss::now();
-    if (!delay.first_violation) {
+    if (
+      delay.duration > std::chrono::milliseconds(0) && !delay.first_violation) {
         fut = ss::sleep_abortable(delay.duration, _server.abort_source());
     }
     auto track = track_latency(hdr.key);
@@ -211,10 +227,14 @@ ss::future<session_resources> connection_context::throttle_request(
       .then([this, key = hdr.key, request_size] {
           return reserve_request_units(key, request_size);
       })
-      .then([this, delay, track, tracker = std::move(tracker)](
-              ssx::semaphore_units units) mutable {
+      .then([this,
+             r_data = std::move(r_data),
+             delay,
+             track,
+             tracker = std::move(tracker)](ssx::semaphore_units units) mutable {
           return server().get_request_unit().then(
             [this,
+             r_data = std::move(r_data),
              delay,
              mem_units = std::move(units),
              track,
@@ -225,7 +245,7 @@ ss::future<session_resources> connection_context::throttle_request(
                   .memlocks = std::move(mem_units),
                   .queue_units = std::move(qd_units),
                   .tracker = std::move(tracker),
-                };
+                  .request_data = std::move(r_data)};
                 if (track) {
                     r.method_latency = _server.hist().auto_measure();
                 }
@@ -434,6 +454,11 @@ ss::future<> connection_context::maybe_process_responses() {
         }
 
         auto msg = response_as_scattered(std::move(resp_and_res.response));
+        if (
+          resp_and_res.resources->request_data.request_key == fetch_api::key) {
+            _server.quota_mgr().record_fetch_tp(
+              resp_and_res.resources->request_data.client_id, msg.size());
+        }
         try {
             return conn->write(std::move(msg))
               .then([] {

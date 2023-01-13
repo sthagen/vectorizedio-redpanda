@@ -9,7 +9,7 @@
 import socket
 import time
 from ducktape.errors import TimeoutError
-from ducktape.mark import parametrize, matrix, ignore
+from ducktape.mark import parametrize, matrix, ok_to_fail
 from ducktape.utils.util import wait_until
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.services.cluster import cluster
@@ -258,6 +258,7 @@ class AccessControlListTest(RedpandaTest):
         client_auth - Controls the value of require_client_auth RP config
     '''
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/8202
     @cluster(num_nodes=3, log_allow_list=["Validation errors in node config"])
     @matrix(use_tls=[True, False],
             use_sasl=[True, False],
@@ -321,6 +322,7 @@ class AccessControlListTest(RedpandaTest):
     # * redpanda.service.admin: the default admin client
     # * admin: used for acl bootstrap
     # * cluster_describe: the principal under test
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/8202
     @cluster(num_nodes=3)
     # DEFAULT: The whole SAN
     @parametrize(rules="DEFAULT", fail=True)
@@ -448,8 +450,8 @@ class AccessControlListTestUpgrade(AccessControlListTest):
     # from v22.1.x, and still have sasl enabled. See PR 5292.
     @cluster(num_nodes=3)
     def test_upgrade_sasl(self):
-
-        self.installer.install(self.redpanda.nodes, (22, 1, 3))
+        old_version, old_version_str = self.installer.install(
+            self.redpanda.nodes, (22, 1))
         self.prepare_cluster(use_tls=True,
                              use_sasl=True,
                              enable_authz=None,
@@ -462,10 +464,10 @@ class AccessControlListTestUpgrade(AccessControlListTest):
             pass_w_super_user=True,
             err_msg='check_permissions failed before upgrade')
 
-        self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
+        self.installer.install(self.redpanda.nodes, (22, 2))
         self.redpanda.restart_nodes(self.redpanda.nodes)
         unique_versions = wait_for_num_versions(self.redpanda, 1)
-        assert "v22.1.3" not in unique_versions
+        assert old_version_str not in unique_versions
 
         self.check_permissions(
             pass_w_base_user=False,

@@ -285,7 +285,7 @@ class Admin:
         elif node is None:
             # Pick a random node to run this request on.  If that node gives
             # connection errors we will retry on other nodes.
-            node = random.choice(self.redpanda.nodes)
+            node = random.choice(self.redpanda.started_nodes())
             retry_connection = True
         else:
             # We were called with a specific node to run on -- do no retry on
@@ -467,6 +467,13 @@ class Admin:
         path = f"brokers/{id}/decommission"
         self.redpanda.logger.debug(f"decommissioning {path}")
         return self._request('put', path, node=node)
+
+    def get_decommission_status(self, id, node=None):
+        """
+        Get broker decommission status
+        """
+        path = f"brokers/{id}/decommission"
+        return self._request('get', path, node=node).json()
 
     def recommission_broker(self, id, node=None):
         """

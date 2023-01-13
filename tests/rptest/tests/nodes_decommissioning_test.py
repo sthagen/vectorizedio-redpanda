@@ -21,6 +21,7 @@ from rptest.clients.types import TopicSpec
 from rptest.tests.end_to_end import EndToEndTest
 from rptest.services.admin import Admin
 from rptest.services.redpanda import CHAOS_LOG_ALLOW_LIST, RESTART_LOG_ALLOW_LIST, RedpandaService
+from rptest.utils.node_operations import NodeDecommissionWaiter
 
 
 class NodesDecommissioningTest(EndToEndTest):
@@ -62,8 +63,8 @@ class NodesDecommissioningTest(EndToEndTest):
     def _not_decommissioned_node(self, *args):
         decom_node_ids = args
         return [
-            n for n in self.redpanda.nodes
-            if self.redpanda.idx(n) not in decom_node_ids
+            n for n in self.redpanda.started_nodes()
+            if self.redpanda.node_id(n) not in decom_node_ids
         ][0]
 
     def _node_removed(self, removed_id, node_to_query):
@@ -116,6 +117,39 @@ class NodesDecommissioningTest(EndToEndTest):
         rpk = RpkTool(self.redpanda)
         rpk.cluster_config_set("raft_learner_recovery_rate", str(rate))
 
+    # after node was removed the state should be consistent on all other not removed nodes
+    def _check_state_consistent(self, decommissioned_id):
+        admin = Admin(self.redpanda)
+
+        not_decommissioned = [
+            n for n in self.redpanda.started_nodes()
+            if self.redpanda.node_id(n) != decommissioned_id
+        ]
+
+        def _state_consistent():
+
+            for n in not_decommissioned:
+                cfg_status = admin.get_cluster_config_status(n)
+                brokers = admin.get_brokers(n)
+                config_ids = [s['node_id'] for s in cfg_status]
+                brokers_ids = [b['node_id'] for b in brokers]
+                if sorted(brokers_ids) != sorted(config_ids):
+                    return False
+                if decommissioned_id in brokers_ids:
+                    return False
+
+            return True
+
+        wait_until(_state_consistent, 10, 1)
+
+    def _wait_for_node_removed(self, decommissioned_id):
+
+        waiter = NodeDecommissionWaiter(self.redpanda, decommissioned_id,
+                                        self.logger)
+        waiter.wait_for_removal()
+
+        self._check_state_consistent(decommissioned_id)
+
     @cluster(
         num_nodes=6,
         # A decom can look like a restart in terms of logs from peers dropping
@@ -127,25 +161,13 @@ class NodesDecommissioningTest(EndToEndTest):
 
         self.start_producer(1)
         self.start_consumer(1)
-        self.await_startup()
         admin = Admin(self.redpanda)
 
         to_decommission = random.choice(self.redpanda.nodes)
         to_decommission_id = self.redpanda.idx(to_decommission)
         self.logger.info(f"decommissioning node: {to_decommission_id}", )
         admin.decommission_broker(to_decommission_id)
-
-        # A node which isn't being decommed, to use when calling into
-        # the admin API from this point onwards.
-        survivor_node = self._not_decommissioned_node(to_decommission_id)
-        self.logger.info(
-            f"Using survivor node {survivor_node.name} {self.redpanda.idx(survivor_node)}"
-        )
-
-        wait_until(
-            lambda: self._node_removed(to_decommission_id, survivor_node),
-            timeout_sec=120,
-            backoff_sec=2)
+        self._wait_for_node_removed(to_decommission_id)
 
         # Stop the decommissioned node, because redpanda internally does not
         # fence it, it is the responsibility of external orchestrator to
@@ -169,14 +191,11 @@ class NodesDecommissioningTest(EndToEndTest):
 
         to_decommission = self.redpanda.nodes[1]
         node_id = self.redpanda.idx(to_decommission)
-        survivor_node = survivor_node = self._not_decommissioned_node(node_id)
         self.redpanda.stop_node(node=to_decommission)
         self.logger.info(f"decommissioning node: {node_id}", )
         admin.decommission_broker(id=node_id)
 
-        wait_until(lambda: self._node_removed(node_id, survivor_node),
-                   timeout_sec=120,
-                   backoff_sec=2)
+        self._wait_for_node_removed(node_id)
 
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=45)
 
@@ -226,14 +245,10 @@ class NodesDecommissioningTest(EndToEndTest):
         self.logger.info(f"decommissioning node: {to_decommission}", )
         admin.decommission_broker(to_decommission)
 
-        survivor_node = self._not_decommissioned_node(to_decommission)
         # adjust recovery throttle to make sure moves will finish
         self._set_recovery_rate(2 << 30)
 
-        wait_until(lambda: self._node_removed(to_decommission, survivor_node),
-                   timeout_sec=120,
-                   backoff_sec=2)
-
+        self._wait_for_node_removed(to_decommission)
         # stop decommissioned node
         self.redpanda.stop_node(self.redpanda.get_node(to_decommission))
 
@@ -310,14 +325,7 @@ class NodesDecommissioningTest(EndToEndTest):
         self._wait_until_status(to_decommission, 'draining')
         self._set_recovery_rate(1024 * 1024 * 1024)
 
-        def node_removed():
-            brokers = admin.get_brokers()
-            for broker in brokers:
-                if broker['node_id'] == to_decommission:
-                    return False
-            return True
-
-        wait_until(node_removed, 60, 2)
+        self._wait_for_node_removed(to_decommission)
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_recommissioning_do_not_stop_all_moves_node(self):
@@ -422,15 +430,7 @@ class NodesDecommissioningTest(EndToEndTest):
                                 api_node=survivor_node)
 
         self._set_recovery_rate(2 << 30)
-
-        def node_removed():
-            brokers = admin.get_brokers(node=survivor_node)
-            for broker in brokers:
-                if broker['node_id'] == to_decommission_2:
-                    return False
-            return True
-
-        wait_until(node_removed, 60, 2)
+        self._wait_for_node_removed(to_decommission_2)
 
     def producer_throughput(self):
         return 1000 if self.debug_mode else 100000
@@ -461,6 +461,8 @@ class NodesDecommissioningTest(EndToEndTest):
         self.start_consumer(1)
         self.await_startup(min_records=self.records_to_wait(), timeout_sec=120)
         # throttle recovery
+        self.redpanda.clean_node(self.redpanda.nodes[-1],
+                                 preserve_current_install=True)
         self.redpanda.start_node(self.redpanda.nodes[-1])
         self._set_recovery_rate(10)
         # wait for rebalancing to start
@@ -482,15 +484,8 @@ class NodesDecommissioningTest(EndToEndTest):
 
         # shut the broker down
         self._set_recovery_rate(2 << 30)
+        self._wait_for_node_removed(to_decommission_id)
 
-        def node_removed():
-            brokers = admin.get_brokers(node=first_node)
-            for broker in brokers:
-                if broker['node_id'] == to_decommission_id:
-                    return False
-            return True
-
-        wait_until(node_removed, 60, 2)
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=240)
 
     @cluster(num_nodes=6, log_allow_list=RESTART_LOG_ALLOW_LIST)
@@ -519,9 +514,7 @@ class NodesDecommissioningTest(EndToEndTest):
         # cancel all reconfigurations
         admin.cancel_all_reconfigurations()
         self._set_recovery_rate(2 << 30)
-        wait_until(lambda: self._node_removed(node_id, survivor_node),
-                   timeout_sec=120,
-                   backoff_sec=2)
+        self._wait_for_node_removed(node_id)
 
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=240)
 
@@ -564,9 +557,7 @@ class NodesDecommissioningTest(EndToEndTest):
             self.logger.info(f"decommissioning node: {node_id}", )
             admin.decommission_broker(id=node_id)
 
-            wait_until(lambda: self._node_removed(node_id, survivor_node),
-                       timeout_sec=120,
-                       backoff_sec=2)
+            self._wait_for_node_removed(node_id)
 
         self.run_validation(enable_idempotence=False, consumer_timeout_sec=240)
 
@@ -610,15 +601,7 @@ class NodesDecommissioningTest(EndToEndTest):
 
                 decom_node = node_by_id(id)
                 admin.decommission_broker(id)
-
-                def node_removed():
-                    brokers = admin.get_brokers()
-                    for broker in brokers:
-                        if broker['node_id'] == id:
-                            return False
-                    return True
-
-                wait_until(node_removed, 240, 2)
+                self._wait_for_node_removed(id)
 
                 def has_partitions():
                     id = self.redpanda.node_id(node=decom_node,

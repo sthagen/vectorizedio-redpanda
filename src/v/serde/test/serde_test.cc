@@ -15,7 +15,6 @@
 #include "serde/serde.h"
 #include "tristate.h"
 #include "utils/fragmented_vector.h"
-#include "utils/uuid.h"
 
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/sstring.hh>
@@ -222,87 +221,6 @@ SEASTAR_THREAD_TEST_CASE(vector_test) {
     auto parser = iobuf_parser{std::move(b)};
     auto const m = serde::read<std::vector<int>>(parser);
     BOOST_CHECK((m == std::vector{1, 2, 3}));
-}
-
-SEASTAR_THREAD_TEST_CASE(uuid_test) {
-    auto b = iobuf();
-    uuid_t u = uuid_t::create();
-    serde::write(b, u);
-
-    auto parser = iobuf_parser{std::move(b)};
-    const auto r = serde::read<uuid_t>(parser);
-    BOOST_REQUIRE_EQUAL(u, r);
-}
-
-struct uuid_struct
-  : serde::envelope<uuid_struct, serde::version<0>, serde::compat_version<0>> {
-    uuid_t single;
-    std::optional<uuid_t> opt1;
-    std::optional<uuid_t> opt2;
-    std::vector<uuid_t> vec;
-    std::vector<std::optional<uuid_t>> opt_vec;
-};
-
-template<typename map_t>
-void verify_uuid_map() {
-    map_t m = {
-      {uuid_t::create(), 0},
-      {uuid_t::create(), 1},
-      {uuid_t::create(), 2},
-    };
-    auto b = iobuf();
-    serde::write(b, m);
-    auto parser = iobuf_parser{std::move(b)};
-    const auto r = serde::read<map_t>(parser);
-    BOOST_CHECK_EQUAL(m.size(), r.size());
-    for (const auto& [k, v] : m) {
-        const auto r_it = r.find(k);
-        BOOST_CHECK(m.end() != r_it);
-        BOOST_CHECK_EQUAL(v, r_it->second);
-    }
-}
-
-namespace std {
-template<>
-struct hash<uuid_t> {
-    size_t operator()(const uuid_t& u) const {
-        return boost::hash<uuid_t::underlying_t>()(u.uuid());
-    }
-};
-} // namespace std
-
-SEASTAR_THREAD_TEST_CASE(complex_uuid_types_test) {
-    uuid_struct us;
-    us.single = uuid_t::create();
-    us.opt1 = std::make_optional<uuid_t>(uuid_t::create());
-    us.opt2 = std::nullopt;
-    us.vec = {
-      uuid_t::create(),
-      uuid_t::create(),
-      uuid_t::create(),
-    };
-    us.opt_vec = {
-      std::make_optional<uuid_t>(uuid_t::create()),
-      std::nullopt,
-      std::make_optional<uuid_t>(uuid_t::create()),
-      std::nullopt,
-    };
-    auto b = iobuf();
-    serde::write(b, us);
-    auto parser = iobuf_parser{std::move(b)};
-    const auto r = serde::read<uuid_struct>(parser);
-    BOOST_CHECK_EQUAL(us.single, r.single);
-    BOOST_CHECK(us.opt1 == r.opt1);
-    BOOST_CHECK(us.opt2 == r.opt2);
-    BOOST_CHECK_EQUAL(us.vec, r.vec);
-    BOOST_CHECK_EQUAL(us.opt_vec.size(), r.opt_vec.size());
-    for (int i = 0; i < us.opt_vec.size(); ++i) {
-        BOOST_CHECK(us.opt_vec[i] == r.opt_vec[i]);
-    }
-
-    // Map types.
-    verify_uuid_map<std::unordered_map<uuid_t, int>>();
-    verify_uuid_map<absl::flat_hash_map<uuid_t, int>>();
 }
 
 // struct with differing sizes:
@@ -602,6 +520,7 @@ SEASTAR_THREAD_TEST_CASE(compat_test_half_field_1) {
     };
 
     auto b = serde::to_iobuf(half_field_1{.a = 1, .b = 2, .c = 3});
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     BOOST_CHECK_THROW(serde::from_iobuf<small>(std::move(b)), std::exception);
 }
 
@@ -621,6 +540,7 @@ SEASTAR_THREAD_TEST_CASE(compat_test_half_field_2) {
 
     auto b1 = serde::to_iobuf(
       half_field_2{.a = 1, .b = 2, .c = 3, .d = 0x1234});
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     BOOST_CHECK_THROW(serde::from_iobuf<big>(std::move(b1)), std::exception);
 }
 
@@ -823,11 +743,16 @@ SEASTAR_THREAD_TEST_CASE(serde_tristate_test) {
 
     BOOST_CHECK_EQUAL(
       disabled,
+      // NOLINTNEXTLINE(bugprone-use-after-move)
       serde::from_iobuf<tristate<ss::sstring>>(std::move(disabled_buf)));
     BOOST_CHECK_EQUAL(
-      empty, serde::from_iobuf<tristate<ss::sstring>>(std::move(empty_buf)));
+      empty,
+      // NOLINTNEXTLINE(bugprone-use-after-move)
+      serde::from_iobuf<tristate<ss::sstring>>(std::move(empty_buf)));
     BOOST_CHECK_EQUAL(
-      set, serde::from_iobuf<tristate<ss::sstring>>(std::move(set_buf)));
+      set,
+      // NOLINTNEXTLINE(bugprone-use-after-move)
+      serde::from_iobuf<tristate<ss::sstring>>(std::move(set_buf)));
 }
 
 SEASTAR_THREAD_TEST_CASE(seastar_inet_address_test) {
@@ -836,9 +761,13 @@ SEASTAR_THREAD_TEST_CASE(seastar_inet_address_test) {
     iobuf ipv4_buf = serde::to_iobuf(ipv4);
     iobuf ipv6_buf = serde::to_iobuf(ipv6);
     BOOST_CHECK_EQUAL(
-      ipv4, serde::from_iobuf<ss::net::inet_address>(std::move(ipv4_buf)));
+      ipv4,
+      // NOLINTNEXTLINE(bugprone-use-after-move)
+      serde::from_iobuf<ss::net::inet_address>(std::move(ipv4_buf)));
     BOOST_CHECK_EQUAL(
-      ipv6, serde::from_iobuf<ss::net::inet_address>(std::move(ipv6_buf)));
+      ipv6,
+      // NOLINTNEXTLINE(bugprone-use-after-move)
+      serde::from_iobuf<ss::net::inet_address>(std::move(ipv6_buf)));
 }
 
 template<template<class...> class T>

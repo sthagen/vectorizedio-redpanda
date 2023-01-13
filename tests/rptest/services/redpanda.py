@@ -94,6 +94,8 @@ CHAOS_LOG_ALLOW_LIST = [
     # Failure to progress STMs promptly
     re.compile("raft::offset_monitor::wait_timed_out"),
 
+    # storage - log_manager.cc:415 - Leftover staging file found, removing: /var/lib/redpanda/data/kafka/__consumer_offsets/15_320/0-1-v1.log.staging
+    re.compile("storage - .*Leftover staging file"),
     # e.g. cluster - controller_backend.cc:466 - exception while executing partition operation: {type: update_finished, ntp: {kafka/test-topic-1944-1639161306808363/1}, offset: 413, new_assignment: { id: 1, group_id: 65, replicas: {{node_id: 3, shard: 2}, {node_id: 4, shard: 2}, {node_id: 1, shard: 0}} }, previous_assignment: {nullopt}} - std::__1::__fs::filesystem::filesystem_error (error system:39, filesystem error: remove failed: Directory not empty [/var/lib/redpanda/data/kafka/test-topic-1944-1639161306808363])
     re.compile("cluster - .*Directory not empty"),
     re.compile("r/heartbeat - .*cannot find consensus group"),
@@ -1009,6 +1011,13 @@ class RedpandaService(Service):
         preamble, res_args = self._resource_settings.to_cli(
             dedicated_node=self._dedicated_nodes)
 
+        # each node will create its own copy of the .profraw file
+        # since each node creates a redpanda broker.
+        if self.cov_enabled():
+            self._environment.update(
+                dict(LLVM_PROFILE_FILE=
+                     f"\"{RedpandaService.COVERAGE_PROFRAW_CAPTURE}\""))
+
         # Pass environment variables via FOO=BAR shell expressions
         env_preamble = " ".join(
             [f"{k}={v}" for (k, v) in self._environment.items()])
@@ -1020,12 +1029,6 @@ class RedpandaService(Service):
             " --abort-on-seastar-bad-alloc "
             f" {res_args} "
             f" >> {RedpandaService.STDOUT_STDERR_CAPTURE} 2>&1 &")
-
-        # set llvm_profile var for code coverae
-        # each node will create its own copy of the .profraw file
-        # since each node creates a redpanda broker.
-        if self.cov_enabled():
-            cmd = f"LLVM_PROFILE_FILE=\"{RedpandaService.COVERAGE_PROFRAW_CAPTURE}\" " + cmd
 
         node.account.ssh(cmd)
 
@@ -1412,6 +1415,12 @@ class RedpandaService(Service):
         any_restarts = any(n['restart'] for n in config_status)
         if any_restarts and expect_restart:
             self.restart_nodes(self.nodes)
+            # Having disrupted the cluster with a restart, wait for the controller
+            # to be available again before returning to the caller, so that they do
+            # not have to worry about subsequent configuration actions failing.
+            self._admin.await_stable_leader(namespace="redpanda",
+                                            topic="controller",
+                                            partition=0)
         elif any_restarts:
             raise AssertionError(
                 "Nodes report restart required but expect_restart is False")

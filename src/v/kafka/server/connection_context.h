@@ -64,6 +64,11 @@ private:
     net::server_probe& _probe;
 };
 
+struct request_data {
+    api_key request_key;
+    ss::sstring client_id;
+};
+
 // Used to hold resources associated with a given request until
 // the response has been send, as well as to track some statistics
 // about the request.
@@ -79,6 +84,7 @@ struct session_resources {
     ssx::semaphore_units queue_units;
     std::unique_ptr<hdr_hist::measurement> method_latency;
     std::unique_ptr<request_tracker> tracker;
+    request_data request_data;
 };
 
 class connection_context final
@@ -187,12 +193,14 @@ public:
         return authorized;
     }
 
+    ss::future<> process();
     ss::future<> process_one_request();
-    bool is_finished_parsing() const;
     ss::net::inet_address client_host() const { return _client_addr; }
     uint16_t client_port() const { return conn ? conn->addr.port() : 0; }
 
 private:
+    bool is_finished_parsing() const;
+
     // Reserve units from memory from the memory semaphore in proportion
     // to the number of bytes the request procesisng is expected to
     // take.
