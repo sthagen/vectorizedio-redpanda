@@ -41,6 +41,8 @@ partition::partition(
   config::binding<uint64_t> max_concurrent_producer_ids,
   std::optional<cloud_storage_clients::bucket_name> read_replica_bucket)
   : _raft(r)
+  , _partition_mem_tracker(
+      ss::make_shared<util::mem_tracker>(_raft->ntp().path()))
   , _probe(std::make_unique<replicated_partition_probe>(*this))
   , _tx_gateway_frontend(tx_gateway_frontend)
   , _feature_table(feature_table)
@@ -99,12 +101,14 @@ partition::partition(
                 _raft.get(),
                 _cloud_storage_api.local(),
                 _feature_table.local(),
-                clusterlog);
+                clusterlog,
+                _partition_mem_tracker);
             stm_manager->add_stm(_archival_meta_stm);
 
             if (cloud_storage_cache.local_is_initialized()) {
-                auto bucket
-                  = config::shard_local_cfg().cloud_storage_bucket.value();
+                const auto& bucket_config
+                  = cloud_storage::configuration::get_bucket_config();
+                auto bucket = bucket_config.value();
                 if (
                   read_replica_bucket
                   && _raft->log_config().is_read_replica_mode_enabled()) {
@@ -118,8 +122,9 @@ partition::partition(
                     bucket = read_replica_bucket;
                 }
                 if (!bucket) {
-                    throw std::runtime_error{
-                      "configuration property cloud_storage_bucket is not set"};
+                    throw std::runtime_error{fmt::format(
+                      "configuration property {} is not set",
+                      bucket_config.name())};
                 }
                 _cloud_storage_partition
                   = ss::make_shared<cloud_storage::remote_partition>(
@@ -322,22 +327,6 @@ ss::future<> partition::stop() {
 
     auto f = ss::now();
 
-    if (_id_allocator_stm) {
-        return _id_allocator_stm->stop();
-    }
-
-    if (_log_eviction_stm) {
-        f = _log_eviction_stm->stop();
-    }
-
-    if (_rm_stm) {
-        f = f.then([this] { return _rm_stm->stop(); });
-    }
-
-    if (_tm_stm) {
-        f = f.then([this] { return _tm_stm->stop(); });
-    }
-
     if (_archiver) {
         f = f.then([this] { return _archiver->stop(); });
     }
@@ -348,6 +337,22 @@ ss::future<> partition::stop() {
 
     if (_cloud_storage_partition) {
         f = f.then([this] { return _cloud_storage_partition->stop(); });
+    }
+
+    if (_id_allocator_stm) {
+        f = f.then([this] { return _id_allocator_stm->stop(); });
+    }
+
+    if (_log_eviction_stm) {
+        f = f.then([this] { return _log_eviction_stm->stop(); });
+    }
+
+    if (_rm_stm) {
+        f = f.then([this] { return _rm_stm->stop(); });
+    }
+
+    if (_tm_stm) {
+        f = f.then([this] { return _tm_stm->stop(); });
     }
 
     // no state machine
@@ -419,6 +424,24 @@ void partition::maybe_construct_archiver() {
           log().config(), _archival_conf, _cloud_storage_api.local(), *this);
     }
 }
+
+uint64_t partition::non_log_disk_size_bytes() const {
+    uint64_t non_log_disk_size = _raft->get_snapshot_size();
+    if (_rm_stm) {
+        non_log_disk_size += _rm_stm->get_snapshot_size();
+    }
+    if (_tm_stm) {
+        non_log_disk_size += _tm_stm->get_snapshot_size();
+    }
+    if (_archival_meta_stm) {
+        non_log_disk_size += _archival_meta_stm->get_snapshot_size();
+    }
+    if (_id_allocator_stm) {
+        non_log_disk_size += _id_allocator_stm->get_snapshot_size();
+    }
+    return non_log_disk_size;
+}
+
 ss::future<> partition::update_configuration(topic_properties properties) {
     auto& old_ntp_config = _raft->log().config();
     auto new_ntp_config = properties.get_ntp_cfg_overrides();
@@ -511,7 +534,7 @@ ss::future<> partition::remove_persistent_state() {
     }
 }
 
-ss::future<> partition::remove_remote_persistent_state() {
+ss::future<> partition::remove_remote_persistent_state(ss::abort_source& as) {
     // Backward compatibility: even if remote.delete is true, only do
     // deletion if the partition is in full tiered storage mode (this
     // excludes read replica clusters from deleting data in S3)
@@ -527,7 +550,7 @@ ss::future<> partition::remove_remote_persistent_state() {
           get_ntp_config(),
           get_ntp_config().is_archival_enabled(),
           get_ntp_config().is_read_replica_mode_enabled());
-        co_await _cloud_storage_partition->erase();
+        co_await _cloud_storage_partition->erase(as);
     } else {
         vlog(
           clusterlog.info, "Leaving S3 objects behind for partition {}", ntp());

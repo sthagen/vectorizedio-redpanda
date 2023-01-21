@@ -204,6 +204,9 @@ public:
     ss::shared_ptr<cluster::rm_stm> rm_stm();
 
     size_t size_bytes() const { return _raft->log().size_bytes(); }
+
+    uint64_t non_log_disk_size_bytes() const;
+
     ss::future<> update_configuration(topic_properties);
 
     const storage::ntp_config& get_ntp_config() const {
@@ -259,7 +262,7 @@ public:
       std::optional<model::timeout_clock::time_point> deadline = std::nullopt);
 
     ss::future<> remove_persistent_state();
-    ss::future<> remove_remote_persistent_state();
+    ss::future<> remove_remote_persistent_state(ss::abort_source& as);
 
     std::optional<model::offset> get_term_last_offset(model::term_id) const;
 
@@ -314,6 +317,7 @@ public:
 
 private:
     consensus_ptr _raft;
+    ss::shared_ptr<util::mem_tracker> _partition_mem_tracker;
     ss::lw_shared_ptr<raft::log_eviction_stm> _log_eviction_stm;
     ss::shared_ptr<cluster::id_allocator_stm> _id_allocator_stm;
     ss::shared_ptr<cluster::rm_stm> _rm_stm;

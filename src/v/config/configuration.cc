@@ -14,10 +14,12 @@
 #include "config/node_config.h"
 #include "config/validators.h"
 #include "model/metadata.h"
+#include "security/gssapi_principal_mapper.h"
 #include "security/mtls.h"
 #include "storage/chunk_cache.h"
 #include "storage/segment_appender.h"
 #include "units.h"
+#include "utils/bottomless_token_bucket.h"
 
 #include <cstdint>
 #include <optional>
@@ -79,6 +81,34 @@ configuration::configuration()
       "Duration after which inactive readers will be evicted from cache",
       {.visibility = visibility::tunable},
       30s)
+  , log_segment_ms(
+      *this,
+      "log_segment_ms",
+      "Default log segment lifetime in ms for topics which do not set "
+      "segment.ms",
+      {.needs_restart = needs_restart::no,
+       .example = "3600000",
+       .visibility = visibility::user},
+      std::nullopt,
+      {.min = 60s})
+  , log_segment_ms_min(
+      *this,
+      "log_segment_ms_min",
+      "Lower bound on topic segment.ms: lower values will be clamped to this "
+      "value",
+      {.needs_restart = needs_restart::no,
+       .example = "60000",
+       .visibility = visibility::tunable},
+      60s)
+  , log_segment_ms_max(
+      *this,
+      "log_segment_ms_max",
+      "Upper bound on topic segment.ms: higher values will be clamped to this "
+      "value",
+      {.needs_restart = needs_restart::no,
+       .example = "31536000000",
+       .visibility = visibility::tunable},
+      24h * 365)
   , rpc_server_listen_backlog(
       *this,
       "rpc_server_listen_backlog",
@@ -333,6 +363,27 @@ configuration::configuration()
       "Timeout for new member joins",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       30'000ms)
+  , group_offset_retention_sec(
+      *this,
+      "group_offset_retention_sec",
+      "Consumer group offset retention seconds. Offset retention can be "
+      "disabled by setting this value to null.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      24h * 7)
+  , group_offset_retention_check_ms(
+      *this,
+      "group_offset_retention_check_ms",
+      "How often the system should check for expired group offsets.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      10min)
+  , legacy_group_offset_retention_enabled(
+      *this,
+      "legacy_group_offset_retention_enabled",
+      "Group offset retention is enabled by default in versions of Redpanda >= "
+      "23.1. To enable offset retention after upgrading from an older version "
+      "set this option to true.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
   , metadata_dissemination_interval_ms(
       *this,
       "metadata_dissemination_interval_ms",
@@ -829,6 +880,32 @@ configuration::configuration()
       "required. see also `kafka_enable_authorization`",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       false)
+  , sasl_mechanisms(
+      *this,
+      "sasl_mechanisms",
+      "A list of supported SASL mechanisms. `SCRAM` and `GSSAPI` are allowed.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"SCRAM"},
+      validate_sasl_mechanisms)
+  , sasl_kerberos_keytab(
+      *this,
+      "sasl_kerberos_keytab",
+      "The location of the Kerberos keytab file for Redpanda",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      "/var/lib/redpanda/redpanda.keytab")
+  , sasl_kerberos_principal(
+      *this,
+      "sasl_kerberos_principal",
+      "The primary of the Kerberos Service Principal Name (SPN) for Redpanda",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      "redpanda")
+  , sasl_kerberos_principal_mapping(
+      *this,
+      "sasl_kerberos_principal_mapping",
+      "Rules for mapping Kerberos Service Principal Name (SPN) to Redpanda",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"DEFAULT"},
+      security::validate_kerberos_mapping_rules)
   , kafka_enable_authorization(
       *this,
       "kafka_enable_authorization",
@@ -871,6 +948,19 @@ configuration::configuration()
       "limit applies to compressed batch size",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1_MiB)
+  , kafka_nodelete_topics(
+      *this,
+      "kafka_nodelete_topics",
+      "Prevents the topics in the list from being deleted via the kafka api",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"__audit", "__consumer_offsets", "__redpanda_e2e_probe", "_schemas"})
+  , kafka_noproduce_topics(
+      *this,
+      "kafka_noproduce_topics",
+      "Prevents the topics in the list from having message produced to them "
+      "via the kafka api",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"__audit"})
   , compaction_ctrl_update_interval_ms(
       *this,
       "compaction_ctrl_update_interval_ms",
@@ -1160,6 +1250,30 @@ configuration::configuration()
       "Enable re-uploading data for compacted topics",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       true)
+  , cloud_storage_azure_storage_account(
+      *this,
+      "cloud_storage_azure_storage_account",
+      "The name of the Azure storage account to use with Tiered Storage",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      std::nullopt)
+  , cloud_storage_azure_container(
+      *this,
+      "cloud_storage_azure_container",
+      "The name of the Azure container to use with Tiered Storage. Note that "
+      "the container must belong to 'cloud_storage_azure_storage_account'",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      std::nullopt)
+  , cloud_storage_azure_shared_key(
+      *this,
+      "cloud_storage_azure_shared_key",
+      "The shared key to be used for Azure Shared Key authentication with the "
+      "configured Azure storage account (see "
+      "'cloud_storage_azure_storage_account)'. Note that Redpanda expects this "
+      "string to be Base64 encoded.",
+      {.needs_restart = needs_restart::yes,
+       .visibility = visibility::user,
+       .secret = is_secret::yes},
+      std::nullopt)
   , cloud_storage_upload_ctrl_update_interval_ms(
       *this,
       "cloud_storage_upload_ctrl_update_interval_ms",
@@ -1563,7 +1677,33 @@ configuration::configuration()
       "Maximum capacity of rate limit accumulation"
       "in controller configuration operations limit",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      std::nullopt) {}
+      std::nullopt)
+  , kafka_throughput_limit_node_in_bps(
+      *this,
+      "kafka_throughput_limit_node_in_bps",
+      "Node wide throughput ingress limit - maximum kafka traffic throughput "
+      "allowed on the ingress side of each node, in bytes/s. Default is no "
+      "limit.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt,
+      {.min = 1})
+  , kafka_throughput_limit_node_out_bps(
+      *this,
+      "kafka_throughput_limit_node_out_bps",
+      "Node wide throughput egress limit - maximum kafka traffic throughput "
+      "allowed on the egress side of each node, in bytes/s. Default is no "
+      "limit.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt,
+      {.min = ss::smp::count})
+  , kafka_quota_balancer_window(
+      *this,
+      "kafka_quota_balancer_window_ms",
+      "Time window used to average current throughput measurement for quota "
+      "balancer, in milliseconds",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      5000ms,
+      {.min = 1ms, .max = bottomless_token_bucket::max_width}) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

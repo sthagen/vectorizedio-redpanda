@@ -81,8 +81,12 @@ struct license
     /// Seconds since epoch until license expiration
     std::chrono::seconds expires() const noexcept;
 
+    auto operator<=>(const license&) const = delete;
+
 private:
     friend struct fmt::formatter<license>;
+
+    friend bool operator==(const license& a, const license& b) = default;
 
     friend std::ostream& operator<<(std::ostream& os, const license& lic);
 };

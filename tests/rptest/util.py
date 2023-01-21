@@ -9,11 +9,9 @@
 
 import os
 import pprint
-import time
 from contextlib import contextmanager
 from typing import Optional
 
-from ducktape.errors import TimeoutError
 from ducktape.utils.util import wait_until
 from requests.exceptions import HTTPError
 
@@ -213,23 +211,42 @@ def wait_for_local_storage_truncate(redpanda,
                                     topic: str,
                                     partition_idx: int,
                                     target_bytes: int,
-                                    timeout_sec: Optional[int] = None):
+                                    timeout_sec: Optional[int] = None,
+                                    nodes: Optional[list] = None):
     """
-    For use in tiered storage tests: wait until the locally retained data
+    For use in tiered storage tests: wait until the locally etained data
     size for this partition is below a threshold on all nodes.
     """
     def is_truncated():
         storage = redpanda.storage(sizes=True)
         sizes = []
         for node_partition in storage.partitions("kafka", topic):
+            if node_partition.num != partition_idx:
+                continue
+            if nodes is not None and node_partition.node not in nodes:
+                continue
+
             total_size = sum(s.size if s.size else 0
                              for s in node_partition.segments.values())
             redpanda.logger.debug(
                 f"  {topic}/{partition_idx} node {node_partition.node.name} local size {total_size} ({len(node_partition.segments)} segments)"
             )
+            for s in node_partition.segments.values():
+                redpanda.logger.debug(
+                    f"    {topic}/{partition_idx} node {node_partition.node.name} {s.name} {s.size}"
+                )
             sizes.append(total_size)
 
-        return all(s <= target_bytes for s in sizes)
+        # The segment which is open for appends will differ in Redpanda's internal
+        # sizing (exact) vs. what the filesystem reports for a falloc'd file (to the
+        # nearest page).  Since our filesystem view may over-estimate the size of
+        # the log by a page, adjust the target size by that much.
+        threshold = target_bytes + 4096
+
+        # We expect to have measured size on at least one node, or this isn't meaningful
+        assert len(sizes) > 0
+
+        return all(s <= threshold for s in sizes)
 
     wait_until(is_truncated, timeout_sec=timeout_sec, backoff_sec=1)
 
@@ -316,16 +333,23 @@ def inject_remote_script(node, script_name):
     return remote_path
 
 
-def get_cluster_license():
-    license = os.environ.get("REDPANDA_SAMPLE_LICENSE", None)
+def _get_cluster_license(env_var):
+    license = os.environ.get(env_var, None)
     if license is None:
         is_ci = os.environ.get("CI", "false")
         if is_ci == "true":
             raise RuntimeError(
-                "Expected REDPANDA_SAMPLE_LICENSE variable to be set in this environment"
-            )
+                f"Expected {env_var} variable to be set in this environment")
 
     return license
+
+
+def get_cluster_license():
+    return _get_cluster_license("REDPANDA_SAMPLE_LICENSE")
+
+
+def get_second_cluster_license():
+    return _get_cluster_license("REDPANDA_SECOND_SAMPLE_LICENSE")
 
 
 class firewall_blocked:

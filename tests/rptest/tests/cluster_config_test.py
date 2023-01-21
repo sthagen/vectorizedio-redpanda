@@ -31,7 +31,8 @@ BOOTSTRAP_CONFIG = {
     'enable_idempotence': False,
 }
 
-SECRET_CONFIG_NAMES = frozenset(["cloud_storage_secret_key"])
+SECRET_CONFIG_NAMES = frozenset(
+    ["cloud_storage_secret_key", "cloud_storage_azure_shared_key"])
 
 
 class ClusterConfigUpgradeTest(RedpandaTest):
@@ -559,6 +560,18 @@ class ClusterConfigTest(RedpandaTest):
             else:
                 raise NotImplementedError(p['type'])
 
+            if name == 'sasl_mechanisms':
+                # The default value is ['SCRAM'], but the array cannot contain
+                # arbitrary strings because the config system validates them.
+                valid_value = ['SCRAM', 'GSSAPI']
+
+            if name == 'sasl_kerberos_principal_mapping':
+                # The default value is ['DEFAULT'], but the array must contain
+                # valid Kerberos mapping rules
+                valid_value = [
+                    'RULE:[1:$1]/L', 'RULE:[2:$1](Test.*)s/ABC///L', 'DEFAULT'
+                ]
+
             if name == 'enable_coproc':
                 # Don't try enabling coproc, it has external dependencies
                 continue
@@ -607,6 +620,9 @@ class ClusterConfigTest(RedpandaTest):
                 if isinstance(actual, bool):
                     # Lowercase because yaml and python capitalize bools differently.
                     actual = str(actual).lower()
+                    # Not all expected bools originate from example values
+                    if isinstance(expect, bool):
+                        expect = str(expect).lower()
                 else:
                     actual = str(actual)
                 if actual != str(expect):

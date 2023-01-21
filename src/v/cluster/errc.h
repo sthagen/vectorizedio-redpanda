@@ -35,6 +35,7 @@ enum class errc : int16_t {
     not_leader,
     partition_already_exists,
     waiting_for_recovery,
+    waiting_for_reconfiguration_finish,
     update_in_progress,
     user_exists,
     user_does_not_exist,
@@ -64,6 +65,7 @@ enum class errc : int16_t {
     unknown_update_interruption_error,
     throttling_quota_exceeded,
     cluster_already_exists,
+    no_partition_assignments,
 };
 struct errc_category final : public std::error_category {
     const char* name() const noexcept final { return "cluster::errc"; }
@@ -116,6 +118,8 @@ struct errc_category final : public std::error_category {
             return "Requested partition already exists";
         case errc::waiting_for_recovery:
             return "Waiting for partition to recover";
+        case errc::waiting_for_reconfiguration_finish:
+            return "Waiting for partition recovery to be finished";
         case errc::update_in_progress:
             return "Partition configuration update in progress";
         case errc::user_exists:
@@ -183,6 +187,8 @@ struct errc_category final : public std::error_category {
         case errc::cluster_already_exists:
             return "Node is a part of a cluster already, new cluster is not "
                    "created";
+        case errc::no_partition_assignments:
+            return "No replica assignments for the requested partition";
         }
         return "cluster::errc::unknown";
     }

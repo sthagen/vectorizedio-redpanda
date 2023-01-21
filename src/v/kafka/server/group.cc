@@ -88,7 +88,10 @@ group::group(
   enable_group_metrics group_metrics)
   : _id(std::move(id))
   , _state(md.members.empty() ? group_state::empty : group_state::stable)
-  , _state_timestamp(md.state_timestamp)
+  , _state_timestamp(
+      md.state_timestamp == model::timestamp(-1)
+        ? std::optional<model::timestamp>(std::nullopt)
+        : md.state_timestamp)
   , _generation(md.generation)
   , _num_members_joining(0)
   , _protocol_type(md.protocol_type)
@@ -2203,12 +2206,16 @@ group::store_txn_offsets(txn_offset_commit_request r) {
 
     prepared_tx ptx;
     ptx.tx_seq = tx_seq;
+    const auto now = model::timestamp::now();
     for (const auto& [tp, offset] : offsets) {
         offset_metadata md{
           .log_offset = e.value().last_offset,
           .offset = offset.offset,
           .metadata = offset.metadata.value_or(""),
-          .committed_leader_epoch = kafka::leader_epoch(offset.leader_epoch)};
+          .committed_leader_epoch = kafka::leader_epoch(offset.leader_epoch),
+          .commit_timestamp = now,
+          .expiry_timestamp = std::nullopt,
+        };
         ptx.offsets[tp] = md;
     }
     _prepared_txs[pid] = ptx;
@@ -2265,7 +2272,8 @@ void group::update_store_offset_builder(
   model::offset committed_offset,
   leader_epoch committed_leader_epoch,
   const ss::sstring& metadata,
-  model::timestamp commit_timestamp) {
+  model::timestamp commit_timestamp,
+  std::optional<model::timestamp> expiry_timestamp) {
     offset_metadata_key key{
       .group_id = _id, .topic = name, .partition = partition};
 
@@ -2275,6 +2283,10 @@ void group::update_store_offset_builder(
       .metadata = metadata,
       .commit_timestamp = commit_timestamp,
     };
+
+    if (expiry_timestamp.has_value()) {
+        value.expiry_timestamp = expiry_timestamp.value();
+    }
 
     auto kv = _md_serializer.to_kv(
       offset_metadata_kv{.key = std::move(key), .value = std::move(value)});
@@ -2288,6 +2300,14 @@ group::offset_commit_stages group::store_offsets(offset_commit_request&& r) {
     std::vector<std::pair<model::topic_partition, offset_metadata>>
       offset_commits;
 
+    const auto expiry_timestamp = [&r]() -> std::optional<model::timestamp> {
+        if (r.data.retention_time_ms == -1) {
+            return std::nullopt;
+        }
+        return model::timestamp(
+          model::timestamp::now().value() + r.data.retention_time_ms);
+    }();
+
     for (const auto& t : r.data.topics) {
         for (const auto& p : t.partitions) {
             update_store_offset_builder(
@@ -2297,13 +2317,16 @@ group::offset_commit_stages group::store_offsets(offset_commit_request&& r) {
               p.committed_offset,
               p.committed_leader_epoch,
               p.committed_metadata.value_or(""),
-              model::timestamp(p.commit_timestamp));
+              model::timestamp(p.commit_timestamp),
+              expiry_timestamp);
 
             model::topic_partition tp(t.name, p.partition_index);
             offset_metadata md{
               .offset = p.committed_offset,
               .metadata = p.committed_metadata.value_or(""),
               .committed_leader_epoch = p.committed_leader_epoch,
+              .commit_timestamp = model::timestamp(p.commit_timestamp),
+              .expiry_timestamp = expiry_timestamp,
             };
 
             offset_commits.emplace_back(std::make_pair(tp, md));
@@ -3026,7 +3049,8 @@ group::do_commit(kafka::group_id group_id, model::producer_identity pid) {
           metadata.offset,
           metadata.committed_leader_epoch,
           metadata.metadata,
-          model::timestamp{-1});
+          metadata.commit_timestamp,
+          metadata.expiry_timestamp);
     }
 
     batches.push_back(std::move(store_offset_builder).build());
@@ -3278,7 +3302,7 @@ group::decode_consumer_subscriptions(iobuf data) {
 }
 
 void group::update_subscriptions() {
-    if (_protocol_type != "consumer") {
+    if (_protocol_type != consumer_group_protocol_type) {
         _subscriptions.reset();
         return;
     }
@@ -3313,6 +3337,156 @@ void group::update_subscriptions() {
     }
 
     _subscriptions = std::move(subs);
+}
+
+std::vector<model::topic_partition> group::filter_expired_offsets(
+  std::chrono::seconds retention_period,
+  const std::function<bool(const model::topic&)>& subscribed,
+  const std::function<model::timestamp(const offset_metadata&)>&
+    effective_expires) {
+    /*
+     * default retention duration
+     */
+    const auto retain_for = model::timestamp(
+      std::chrono::duration_cast<std::chrono::milliseconds>(retention_period)
+        .count());
+
+    const auto now = model::timestamp::now();
+    std::vector<model::topic_partition> offsets;
+    for (const auto& offset : _offsets) {
+        /*
+         * an offset won't be removed if its topic has an active subscription or
+         * there are pending offset commits for the offset's topic.
+         */
+        if (
+          subscribed(offset.first.topic)
+          || _pending_offset_commits.contains(offset.first)) {
+            continue;
+        }
+
+        if (offset.second->metadata.expiry_timestamp.has_value()) {
+            /*
+             * the old way is explicit expiration time point per offset
+             */
+            const auto& expires
+              = offset.second->metadata.expiry_timestamp.value();
+            if (expires > now) {
+                continue;
+            }
+        } else {
+            /*
+             * the new way is a configurable global retention duration
+             */
+            const auto expires = effective_expires(offset.second->metadata);
+            if (model::timestamp(now() - expires()) < retain_for) {
+                continue;
+            }
+        }
+
+        offsets.push_back(offset.first);
+    }
+
+    return offsets;
+}
+
+std::vector<model::topic_partition>
+group::get_expired_offsets(std::chrono::seconds retention_period) {
+    const auto not_subscribed = [](const auto&) { return false; };
+
+    if (_protocol_type.has_value()) {
+        if (
+          _protocol_type.value() == consumer_group_protocol_type
+          && _subscriptions.has_value() && in_state(group_state::stable)) {
+            /*
+             * policy description from kafka source:
+             *
+             * <kafka>
+             * the group is stable and consumers exist.
+             *
+             * if an offset's topic is subscribed to and retention period has
+             * passed since the last commit timestamp, then expire the offset.
+             * offsets with pending commit are not expired.
+             * </kafka>
+             */
+            return filter_expired_offsets(
+              retention_period,
+              [this](const auto& topic) {
+                  return _subscriptions.value().contains(topic);
+              },
+              [](const offset_metadata& md) { return md.commit_timestamp; });
+
+        } else if (in_state(group_state::empty)) {
+            /*
+             * policy description from kafka source:
+             *
+             * <kafka>
+             * the group contains no consumers.
+             *
+             * if current state timestamp exists and retention period has passed
+             * since group became empty, expire all offsets with no pending
+             * offset commit.
+             *
+             * if there is no current state timestamp (old group metadata
+             * schema) and retention period has passed since the last commit
+             * timestamp, expire the offset
+             * </kafka>
+             */
+            return filter_expired_offsets(
+              retention_period,
+              not_subscribed,
+              [this](const offset_metadata& md) {
+                  if (_state_timestamp.has_value()) {
+                      return _state_timestamp.value();
+                  } else {
+                      return md.commit_timestamp;
+                  }
+              });
+        } else {
+            return {};
+        }
+    } else {
+        /*
+         * policy description from kafka source:
+         *
+         * <kafka>
+         * there is no configured protocol type, so this is a standalone/simple
+         * consumer that Kafka uses for offset storage only.
+         *
+         * expire offsets with no pending offset commits for which the retention
+         * period has passed since their last commit.
+         * </kafka>
+         */
+        return filter_expired_offsets(
+          retention_period, not_subscribed, [](const offset_metadata& md) {
+              return md.commit_timestamp;
+          });
+    }
+}
+
+std::vector<model::topic_partition>
+group::delete_expired_offsets(std::chrono::seconds retention_period) {
+    /*
+     * collect and delete expired offsets
+     */
+    auto offsets = get_expired_offsets(retention_period);
+    for (const auto& offset : offsets) {
+        vlog(_ctxlog.debug, "Expiring group offset {}", offset);
+        _offsets.erase(offset);
+    }
+
+    /*
+     * maybe mark the group as dead
+     */
+    const auto has_offsets = [this] {
+        return !_offsets.empty() || !_pending_offset_commits.empty()
+               || !_volatile_txs.empty() || !_tx_seqs.empty();
+    };
+
+    if (in_state(group_state::empty) && !has_offsets()) {
+        set_state(group_state::dead);
+    }
+
+    return offsets;
 }
 
 } // namespace kafka

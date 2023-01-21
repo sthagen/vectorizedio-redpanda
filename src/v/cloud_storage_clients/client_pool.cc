@@ -1,5 +1,6 @@
 #include "cloud_storage_clients/client_pool.h"
 
+#include "cloud_storage_clients/abs_client.h"
 #include "cloud_storage_clients/s3_client.h"
 
 namespace cloud_storage_clients {
@@ -32,12 +33,16 @@ void client_pool::shutdown_connections() {
 
 /// \brief Acquire http client from the pool.
 ///
+/// as: An abort source which must outlive the lease, that will
+///     be used to shutdown the client's connections when it fires.
+///
 /// \note it's guaranteed that the client can only be acquired once
 ///       before it gets released (release happens implicitly, when
 ///       the lifetime of the pointer ends).
 /// \return client pointer (via future that can wait if all clients
 ///         are in use)
-ss::future<client_pool::client_lease> client_pool::acquire() {
+ss::future<client_pool::client_lease>
+client_pool::acquire(ss::abort_source& as) {
     gate_guard guard(_gate);
     try {
         // If credentials have not yet been acquired, wait for them. It is
@@ -66,6 +71,7 @@ ss::future<client_pool::client_lease> client_pool::acquire() {
     _pool.pop_back();
     client_lease lease(
       client,
+      as,
       ss::make_deleter([pool = weak_from_this(), client, g = std::move(guard)] {
           if (pool) {
               pool->release(client);
@@ -87,10 +93,12 @@ void client_pool::populate_client_pool() {
 
 client_pool::http_client_ptr client_pool::make_client() const {
     return std::visit(
-      [this](const auto& cfg) {
+      [this](const auto& cfg) -> http_client_ptr {
           using cfg_type = std::decay_t<decltype(cfg)>;
           if constexpr (std::is_same_v<s3_configuration, cfg_type>) {
               return ss::make_shared<s3_client>(cfg, _as, _apply_credentials);
+          } else if constexpr (std::is_same_v<abs_configuration, cfg_type>) {
+              return ss::make_shared<abs_client>(cfg, _as, _apply_credentials);
           } else {
               static_assert(always_false_v<cfg_type>, "Unknown client type");
           }

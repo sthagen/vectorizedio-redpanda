@@ -60,6 +60,8 @@ public:
 
     deprecated_property enable_central_config;
 
+    property<std::optional<uint32_t>> crash_loop_limit;
+
     // build pidfile path: `<data_directory>/pid.lock`
     std::filesystem::path pidfile_path() const {
         return data_directory().path / "pid.lock";
@@ -67,6 +69,10 @@ public:
 
     std::filesystem::path strict_data_dir_file_path() const {
         return data_directory().path / ".redpanda_data_dir";
+    }
+
+    std::filesystem::path disk_benchmark_path() const {
+        return data_directory().path / "syschecks";
     }
 
     std::vector<model::broker_endpoint> advertised_kafka_api() const {

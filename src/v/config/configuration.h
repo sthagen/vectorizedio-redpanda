@@ -48,6 +48,10 @@ struct configuration final : public config_store {
     bounded_property<uint16_t> log_segment_size_jitter_percent;
     bounded_property<uint64_t> compacted_log_segment_size;
     property<std::chrono::milliseconds> readers_cache_eviction_timeout_ms;
+    bounded_property<std::optional<std::chrono::milliseconds>> log_segment_ms;
+    property<std::chrono::milliseconds> log_segment_ms_min;
+    property<std::chrono::milliseconds> log_segment_ms_max;
+
     // Network
     bounded_property<std::optional<int>> rpc_server_listen_backlog;
     bounded_property<std::optional<int>> rpc_server_tcp_recv_buf;
@@ -94,6 +98,9 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> group_max_session_timeout_ms;
     property<std::chrono::milliseconds> group_initial_rebalance_delay;
     property<std::chrono::milliseconds> group_new_member_join_timeout;
+    property<std::optional<std::chrono::seconds>> group_offset_retention_sec;
+    property<std::chrono::milliseconds> group_offset_retention_check_ms;
+    property<bool> legacy_group_offset_retention_enabled;
     property<std::chrono::milliseconds> metadata_dissemination_interval_ms;
     property<std::chrono::milliseconds> metadata_dissemination_retry_delay_ms;
     property<int16_t> metadata_dissemination_retries;
@@ -178,6 +185,10 @@ struct configuration final : public config_store {
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
     property<bool> enable_sasl;
+    property<std::vector<ss::sstring>> sasl_mechanisms;
+    property<ss::sstring> sasl_kerberos_keytab;
+    property<ss::sstring> sasl_kerberos_principal;
+    property<std::vector<ss::sstring>> sasl_kerberos_principal_mapping;
     property<std::optional<bool>> kafka_enable_authorization;
     property<std::optional<std::vector<ss::sstring>>>
       kafka_mtls_principal_mapping_rules;
@@ -186,6 +197,9 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> node_management_operation_timeout_ms;
     property<uint32_t> kafka_request_max_bytes;
     property<uint32_t> kafka_batch_max_bytes;
+    property<std::vector<ss::sstring>> kafka_nodelete_topics;
+    property<std::vector<ss::sstring>> kafka_noproduce_topics;
+
     // Compaction controller
     property<std::chrono::milliseconds> compaction_ctrl_update_interval_ms;
     property<double> compaction_ctrl_p_coeff;
@@ -240,6 +254,10 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_housekeeping_interval_ms;
     property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
     property<bool> cloud_storage_enable_compacted_topic_reupload;
+    // Azure Blob Storage
+    property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
+    property<std::optional<ss::sstring>> cloud_storage_azure_container;
+    property<std::optional<ss::sstring>> cloud_storage_azure_shared_key;
 
     // Archival upload controller
     property<std::chrono::milliseconds>
@@ -334,6 +352,13 @@ struct configuration final : public config_store {
     property<size_t> rps_limit_configuration_operations;
     property<std::optional<size_t>>
       controller_log_accummulation_rps_capacity_configuration_operations;
+
+    // node and cluster throughput limiting
+    bounded_property<std::optional<uint64_t>>
+      kafka_throughput_limit_node_in_bps;
+    bounded_property<std::optional<uint64_t>>
+      kafka_throughput_limit_node_out_bps;
+    bounded_property<std::chrono::milliseconds> kafka_quota_balancer_window;
 
     configuration();
 

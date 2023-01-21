@@ -258,11 +258,14 @@ archival_metadata_stm::archival_metadata_stm(
   raft::consensus* raft,
   cloud_storage::remote& remote,
   features::feature_table& ft,
-  ss::logger& logger)
+  ss::logger& logger,
+  ss::shared_ptr<util::mem_tracker> partition_mem_tracker)
   : cluster::persisted_stm("archival_metadata.snapshot", logger, raft)
   , _logger(logger, ssx::sformat("ntp: {}", raft->ntp()))
   , _manifest(ss::make_shared<cloud_storage::partition_manifest>(
-      raft->ntp(), raft->log_config().get_initial_revision()))
+      raft->ntp(),
+      raft->log_config().get_initial_revision(),
+      partition_mem_tracker))
   , _cloud_storage_api(remote)
   , _feature_table(ft) {}
 
@@ -542,8 +545,11 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
 ss::future<> archival_metadata_stm::handle_eviction() {
     cloud_storage::partition_manifest manifest;
 
-    auto bucket = config::shard_local_cfg().cloud_storage_bucket.value();
-    vassert(bucket, "configuration property cloud_storage_bucket must be set");
+    const auto& bucket_config
+      = cloud_storage::configuration::get_bucket_config();
+    auto bucket = bucket_config.value();
+    vassert(
+      bucket, "configuration property {} must be set", bucket_config.name());
 
     auto timeout
       = config::shard_local_cfg().cloud_storage_manifest_upload_timeout_ms();
@@ -626,6 +632,7 @@ ss::future<> archival_metadata_stm::apply_snapshot(
     *_manifest = cloud_storage::partition_manifest(
       _raft->ntp(),
       _raft->log_config().get_initial_revision(),
+      _manifest->mem_tracker(),
       snap.start_offset,
       snap.last_offset,
       snap.last_uploaded_compacted_offset,

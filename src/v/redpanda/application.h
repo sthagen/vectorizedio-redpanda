@@ -43,6 +43,7 @@
 #include "rpc/fwd.h"
 #include "rpc/rpc_server.h"
 #include "seastarx.h"
+#include "ssx/fwd.h"
 #include "ssx/metrics.h"
 #include "storage/api.h"
 #include "storage/fwd.h"
@@ -75,6 +76,9 @@ public:
       std::optional<scheduling_groups> = std::nullopt);
     void check_environment();
     void wire_up_and_start(::stop_signal&, bool test_mode = false);
+
+    void check_for_crash_loop();
+    void schedule_crash_tracker_file_cleanup();
 
     explicit application(ss::sstring = "main");
     ~application();
@@ -126,9 +130,21 @@ public:
     std::unique_ptr<cluster::controller> controller;
     std::unique_ptr<coproc::api> coprocessing;
 
+    std::unique_ptr<ssx::thread_worker> thread_worker;
+
 private:
     using deferred_actions
-      = std::vector<ss::deferred_action<std::function<void()>>>;
+      = std::deque<ss::deferred_action<std::function<void()>>>;
+
+    struct crash_tracker_metadata
+      : serde::envelope<
+          crash_tracker_metadata,
+          serde::version<0>,
+          serde::compat_version<0>> {
+        uint32_t _crash_count{0};
+        uint64_t _config_checksum{0};
+        model::timestamp _last_start_ts;
+    };
 
     // Constructs services across shards required to get bootstrap metadata.
     void wire_up_bootstrap_services();

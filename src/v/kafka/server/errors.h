@@ -56,6 +56,7 @@ constexpr error_code map_topic_error_code(cluster::errc code) {
     case cluster::errc::partition_not_exists:
     case cluster::errc::partition_already_exists:
     case cluster::errc::waiting_for_recovery:
+    case cluster::errc::waiting_for_reconfiguration_finish:
     case cluster::errc::update_in_progress:
     case cluster::errc::user_exists:
     case cluster::errc::user_does_not_exist:
@@ -80,6 +81,7 @@ constexpr error_code map_topic_error_code(cluster::errc code) {
     case cluster::errc::no_update_in_progress:
     case cluster::errc::unknown_update_interruption_error:
     case cluster::errc::cluster_already_exists:
+    case cluster::errc::no_partition_assignments:
         break;
     }
     return error_code::unknown_server_error;

@@ -70,6 +70,7 @@
 #include "raft/service.h"
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/io_priority.h"
+#include "ssx/thread_worker.h"
 #include "storage/backlog_controller.h"
 #include "storage/chunk_cache.h"
 #include "storage/compaction_controller.h"
@@ -98,7 +99,14 @@
 
 #include <chrono>
 #include <exception>
+#include <memory>
 #include <vector>
+
+// This file in the data directory tracks the metadata
+// needed to detect crash loops.
+static constexpr std::string_view crash_loop_tracker_file = "startup_log";
+// Crash tracking resets every 1h.
+static constexpr model::timestamp_clock::duration crash_reset_duration{1h};
 
 static void set_local_kafka_client_config(
   std::optional<kafka::client::configuration>& client_config,
@@ -201,6 +209,8 @@ void application::shutdown() {
     if (_kafka_server.local_is_initialized()) {
         _kafka_server.invoke_on_all(&net::server::wait_for_shutdown).get();
         _kafka_server.stop().get();
+    }
+    if (_kafka_conn_quotas.local_is_initialized()) {
         _kafka_conn_quotas.stop().get();
     }
     if (_rpc.local_is_initialized()) {
@@ -323,8 +333,14 @@ int application::run(int ac, char** av) {
                 hydrate_config(cfg);
                 initialize();
                 check_environment();
+                check_for_crash_loop();
                 setup_metrics();
                 wire_up_and_start(app_signal);
+                // We schedule the deletion _after_ the application fully
+                // starts up. This ensures that any errors like
+                // misconfigurations are also treated as unclean shutdowns
+                // thus avoiding crashloops.
+                schedule_crash_tracker_file_cleanup();
                 app_signal.wait().get();
                 vlog(_log.info, "Stopping...");
             } catch (const ss::abort_requested_exception&) {
@@ -618,6 +634,110 @@ void application::check_environment() {
     }
 }
 
+/// Here we check for too many consecutive unclean shutdowns/crashes
+/// and abort the startup sequence if the limit exceeds
+/// crash_loop_limit until the operator intervenes. Crash tracking
+/// is reset if the node configuration changes or its been 1h since
+/// the broker last failed to start. This metadata is tracked in the
+/// tracker file. This is to prevent on disk state from piling up in
+/// each unclean run and creating more state to recover for the next run.
+void application::check_for_crash_loop() {
+    auto file_path = config::node().data_directory().path
+                     / crash_loop_tracker_file;
+    std::optional<crash_tracker_metadata> maybe_crash_md;
+    if (ss::file_exists(file_path.string()).get()) {
+        // Ok to read the entire file, it contains a serialized uint32_t.
+        auto buf = read_fully(file_path).get();
+        try {
+            maybe_crash_md = serde::from_iobuf<crash_tracker_metadata>(
+              std::move(buf));
+        } catch (const serde::serde_exception&) {
+            // A malformed log file, ignore and reset it later.
+            // We truncate it below.
+            vlog(_log.warn, "Ignorning malformed tracker file {}", file_path);
+        }
+    }
+
+    // Compute the checksum of the current node configuration.
+    auto current_config
+      = read_fully_to_string(config::node().get_cfg_file_path()).get0();
+    auto checksum = xxhash_64(current_config.c_str(), current_config.length());
+
+    if (maybe_crash_md) {
+        auto& crash_md = maybe_crash_md.value();
+        auto& limit = config::node().crash_loop_limit.value();
+
+        // Check if it has been atleast 1h since last unsuccessful restart.
+        // Tracking resets every 1h.
+        auto time_since_last_start
+          = model::duration_since_epoch(model::timestamp::now())
+            - model::duration_since_epoch(crash_md._last_start_ts);
+
+        auto crash_limit_ok = !limit || crash_md._crash_count <= limit.value();
+        auto node_config_changed = crash_md._config_checksum != checksum;
+        auto tracking_reset = time_since_last_start > crash_reset_duration;
+
+        auto ok_to_proceed = crash_limit_ok || node_config_changed
+                             || tracking_reset;
+
+        if (!ok_to_proceed) {
+            vlog(
+              _log.error,
+              "Crash loop detected. Too many consecutive crashes {}, exceeded "
+              "{} configured value {}. To recover Redpanda from this state, "
+              "manually remove file at path {}. Crash loop automatically "
+              "resets 1h after last crash or with node configuration changes.",
+              crash_md._crash_count,
+              config::node().crash_loop_limit.name(),
+              limit.value(),
+              file_path);
+            throw std::runtime_error("Crash loop detected, aborting startup.");
+        }
+
+        vlog(
+          _log.debug,
+          "Consecutive crashes detected: {} node config changed: {} "
+          "time based tracking reset: {}",
+          crash_md._crash_count,
+          node_config_changed,
+          tracking_reset);
+
+        if (node_config_changed || tracking_reset) {
+            crash_md._crash_count = 0;
+        }
+    }
+
+    // Truncate and bump the crash count. We consider a run to be unclean by
+    // default unless the scheduled cleanup (that runs very late in shutdown)
+    // resets the file. See schedule_crash_tracker_file_cleanup().
+    auto new_crash_count = maybe_crash_md
+                             ? maybe_crash_md.value()._crash_count + 1
+                             : 1;
+    crash_tracker_metadata updated{
+      ._crash_count = new_crash_count,
+      ._config_checksum = checksum,
+      ._last_start_ts = model::timestamp::now()};
+    write_fully(file_path, serde::to_iobuf(updated)).get();
+    ss::sync_directory(config::node().data_directory.value().as_sstring())
+      .get();
+}
+
+void application::schedule_crash_tracker_file_cleanup() {
+    // Schedule a deletion of the tracker file. On a clean shutdown,
+    // the tracker file should be deleted thus reseting the crash count on the
+    // next run. In case of an unclean shutdown, we already bumped
+    // the crash count and that should be taken into account in the
+    // next run.
+    // We emplace it in the front to make it the last task to run.
+    _deferred.emplace_front([&] {
+        auto file = config::node().data_directory().path
+                    / crash_loop_tracker_file;
+        ss::remove_file(file.string()).get();
+        ss::sync_directory(config::node().data_directory().as_sstring()).get();
+        vlog(_log.debug, "Deleted crash loop tracker file: {}", file);
+    });
+}
+
 static admin_server_cfg
 admin_server_cfg_from_global_cfg(scheduling_groups& sgs) {
     return admin_server_cfg{
@@ -808,6 +928,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         return storage::internal::chunks().start();
     }).get();
 
+    construct_single_service(thread_worker);
+
     // cluster
     syschecks::systemd_message("Initializing connection cache").get();
     construct_service(_connection_cache).get();
@@ -933,7 +1055,11 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
     controller->wire_up().get0();
 
     construct_single_service_sharded(
-      self_test_backend, _scheduling_groups.self_test_sg())
+      self_test_backend,
+      node_id,
+      std::ref(local_monitor),
+      std::ref(_connection_cache),
+      _scheduling_groups.self_test_sg())
       .get();
 
     construct_single_service_sharded(
@@ -1018,7 +1144,6 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(tx_gateway_frontend),
       std::ref(controller->get_feature_table()),
       &kafka::make_consumer_offsets_serializer,
-      std::ref(config::shard_local_cfg()),
       kafka::enable_group_metrics::yes)
       .get();
     syschecks::systemd_message("Creating kafka group shard mapper").get();
@@ -1127,6 +1252,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
 
     ss::sharded<net::server_configuration> kafka_cfg;
     kafka_cfg.start(ss::sstring("kafka_rpc")).get();
+    auto kafka_cfg_cleanup = ss::defer(
+      [&kafka_cfg]() { kafka_cfg.stop().get(); });
     kafka_cfg
       .invoke_on_all([this](net::server_configuration& c) {
           return ss::async([this, &c] {
@@ -1247,9 +1374,9 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         std::ref(controller->get_api()),
         std::ref(tx_gateway_frontend),
         std::ref(cp_partition_manager),
-        qdc_config)
+        qdc_config,
+        std::ref(*thread_worker))
       .get();
-    kafka_cfg.stop().get();
     construct_service(
       fetch_session_cache,
       config::shard_local_cfg().fetch_session_eviction_timeout_ms())
@@ -1581,6 +1708,8 @@ void application::start_runtime_services(
                 }
             });
       });
+
+    thread_worker->start().get();
 
     // single instance
     node_status_backend.invoke_on_all(&cluster::node_status_backend::start)

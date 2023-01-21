@@ -8,6 +8,7 @@
 # by the Apache License, Version 2.0
 
 from ducktape.utils.util import wait_until
+from ducktape.mark import ok_to_fail
 from rptest.services.cluster import cluster
 from rptest.tests.prealloc_nodes import PreallocNodesTest
 from rptest.clients.types import TopicSpec
@@ -34,9 +35,11 @@ class CloudRetentionTest(PreallocNodesTest):
             test_context=test_context,
             node_prealloc_count=1,
             num_brokers=3,
-            si_settings=SISettings(log_segment_size=self.segment_size),
+            si_settings=SISettings(test_context,
+                                   log_segment_size=self.segment_size),
             extra_rp_conf=extra_rp_conf)
 
+    @ok_to_fail  # https://github.com/redpanda-data/redpanda/issues/8251
     @cluster(num_nodes=4)
     def test_cloud_retention(self):
         """
@@ -102,8 +105,8 @@ class CloudRetentionTest(PreallocNodesTest):
 
         def check_bucket_size():
             try:
-                size = sum(obj.ContentLength
-                           for obj in self.s3_client.list_objects(
+                size = sum(obj.content_length
+                           for obj in self.cloud_storage_client.list_objects(
                                self.si_settings.cloud_storage_bucket))
                 self.logger.info(f"bucket size: {size}")
                 # check that for each partition there is more than 1
