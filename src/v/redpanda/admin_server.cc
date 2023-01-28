@@ -13,6 +13,7 @@
 
 #include "archival/ntp_archiver_service.h"
 #include "cloud_storage/partition_manifest.h"
+#include "cloud_storage/topic_recovery_service.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
 #include "cluster/controller.h"
@@ -71,6 +72,7 @@
 #include "redpanda/admin/api-doc/status.json.h"
 #include "redpanda/admin/api-doc/transaction.json.h"
 #include "rpc/errc.h"
+#include "security/credential_store.h"
 #include "security/scram_algorithm.h"
 #include "security/scram_authenticator.h"
 #include "ssx/metrics.h"
@@ -115,7 +117,8 @@ admin_server::admin_server(
   ss::sharded<rpc::connection_cache>& connection_cache,
   ss::sharded<cluster::node_status_table>& node_status_table,
   ss::sharded<cluster::self_test_frontend>& self_test_frontend,
-  pandaproxy::schema_registry::api* schema_registry)
+  pandaproxy::schema_registry::api* schema_registry,
+  ss::sharded<cloud_storage::topic_recovery_service>& topic_recovery_svc)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
   , _cfg(std::move(cfg))
@@ -128,7 +131,8 @@ admin_server::admin_server(
   , _auth(config::shard_local_cfg().admin_api_require_auth.bind(), _controller)
   , _node_status_table(node_status_table)
   , _self_test_frontend(self_test_frontend)
-  , _schema_registry(schema_registry) {}
+  , _schema_registry(schema_registry)
+  , _topic_recovery_service(topic_recovery_svc) {}
 
 ss::future<> admin_server::start() {
     configure_metrics_route();
@@ -2035,7 +2039,7 @@ admin_server::get_decommission_progress_handler(
         status.topic = p.ntp.tp.topic;
         status.partition = p.ntp.tp.partition;
         auto added_replicas = cluster::subtract_replica_sets(
-          p.previous_assignment, p.current_assignment);
+          p.current_assignment, p.previous_assignment);
         // we are only interested in reconfigurations where one replica was
         // added to the node
         if (added_replicas.size() != 1) {
@@ -3300,6 +3304,28 @@ void admin_server::register_debug_routes() {
 
           return ss::make_ready_future<ss::json::json_return_type>(ret);
       });
+
+    register_route<user>(
+      seastar::httpd::debug_json::is_node_isolated,
+      [this](std::unique_ptr<ss::httpd::request>) {
+          return ss::make_ready_future<ss::json::json_return_type>(
+            _metadata_cache.local().is_node_isolated());
+      });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_controller_status,
+      [this](std::unique_ptr<ss::httpd::request>)
+        -> ss::future<ss::json::json_return_type> {
+          return _controller->get_last_applied_offset().then(
+            [this](auto offset) {
+                using result_t = ss::httpd::debug_json::controller_status;
+                result_t ans;
+                ans.last_applied_offset = offset;
+                ans.commited_index = _controller->get_commited_index();
+                return ss::make_ready_future<ss::json::json_return_type>(
+                  ss::json::json_return_type(ans));
+            });
+      });
 }
 ss::future<ss::json::json_return_type>
 admin_server::get_partition_balancer_status_handler(
@@ -3520,11 +3546,39 @@ ss::future<ss::json::json_return_type> admin_server::sync_local_state_handler(
     co_return ss::json::json_return_type(ss::json::json_void());
 }
 
+ss::future<ss::json::json_return_type>
+admin_server::initiate_topic_scan_and_recovery(
+  std::unique_ptr<ss::httpd::request> req) {
+    if (need_redirect_to_leader(model::controller_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, model::controller_ntp);
+    }
+
+    if (!_topic_recovery_service.local_is_initialized()) {
+        throw ss::httpd::bad_request_exception(
+          "Topic recovery is not available. is cloud storage enabled?");
+    }
+
+    auto result = _topic_recovery_service.local().start_recovery(*req);
+    if (result.status_code != ss::reply::status_type::accepted) {
+        throw ss::httpd::base_exception{result.message, result.status_code};
+    }
+
+    auto payload = ss::httpd::shadow_indexing_json::init_recovery_result{};
+    payload.status = result.message;
+    co_return ss::json::json_return_type{payload};
+}
+
 void admin_server::register_shadow_indexing_routes() {
     register_route<superuser>(
       ss::httpd::shadow_indexing_json::sync_local_state,
       [this](std::unique_ptr<ss::httpd::request> req) {
           return sync_local_state_handler(std::move(req));
+      });
+
+    register_route<superuser>(
+      ss::httpd::shadow_indexing_json::initiate_topic_scan_and_recovery,
+      [this](auto req) {
+          return initiate_topic_scan_and_recovery(std::move(req));
       });
 }
 

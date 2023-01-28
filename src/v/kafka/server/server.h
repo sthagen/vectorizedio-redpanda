@@ -20,8 +20,8 @@
 #include "kafka/server/fwd.h"
 #include "kafka/server/queue_depth_monitor.h"
 #include "net/server.h"
-#include "security/authorizer.h"
-#include "security/credential_store.h"
+#include "security/fwd.h"
+#include "security/gssapi_principal_mapper.h"
 #include "security/mtls.h"
 #include "ssx/fwd.h"
 #include "utils/ema.h"
@@ -42,6 +42,7 @@ public:
       ss::sharded<cluster::config_frontend>&,
       ss::sharded<features::feature_table>&,
       ss::sharded<quota_manager>&,
+      ss::sharded<snc_quota_manager>&,
       ss::sharded<kafka::group_router>&,
       ss::sharded<cluster::shard_table>&,
       ss::sharded<cluster::partition_manager>&,
@@ -100,6 +101,7 @@ public:
         return _fetch_session_cache.local();
     }
     quota_manager& quota_mgr() { return _quota_mgr.local(); }
+    snc_quota_manager& snc_quota_mgr() { return _snc_quota_mgr.local(); }
     bool is_idempotence_enabled() const { return _is_idempotence_enabled; }
     bool are_transactions_enabled() const { return _are_transactions_enabled; }
 
@@ -133,6 +135,10 @@ public:
         return _fetch_metadata_cache;
     }
 
+    security::gssapi_principal_mapper& gssapi_principal_mapper() {
+        return _gssapi_principal_mapper;
+    }
+
     latency_probe& latency_probe() { return _probe; }
 
     ssx::thread_worker& thread_worker() { return _thread_worker; }
@@ -144,6 +150,7 @@ private:
     ss::sharded<features::feature_table>& _feature_table;
     ss::sharded<cluster::metadata_cache>& _metadata_cache;
     ss::sharded<quota_manager>& _quota_mgr;
+    ss::sharded<snc_quota_manager>& _snc_quota_mgr;
     ss::sharded<kafka::group_router>& _group_router;
     ss::sharded<cluster::shard_table>& _shard_table;
     ss::sharded<cluster::partition_manager>& _partition_manager;
@@ -160,6 +167,7 @@ private:
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
     security::tls::principal_mapper _mtls_principal_mapper;
+    security::gssapi_principal_mapper _gssapi_principal_mapper;
 
     class latency_probe _probe;
     ssx::thread_worker& _thread_worker;

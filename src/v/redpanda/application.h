@@ -95,6 +95,9 @@ public:
     ss::sharded<cloud_storage::partition_recovery_manager>
       partition_recovery_manager;
     ss::sharded<cloud_storage::remote> cloud_storage_api;
+    ss::sharded<cluster::topic_recovery_status_frontend>
+      topic_recovery_status_frontend;
+    ss::sharded<cloud_storage::topic_recovery_service> topic_recovery_service;
 
     ss::sharded<cluster::id_allocator_frontend> id_allocator_frontend;
     ss::sharded<cluster::metadata_cache> metadata_cache;
@@ -118,6 +121,7 @@ public:
     ss::sharded<kafka::fetch_session_cache> fetch_session_cache;
     ss::sharded<kafka::group_router> group_router;
     ss::sharded<kafka::quota_manager> quota_mgr;
+    ss::sharded<kafka::snc_quota_manager> snc_quota_mgr;
     ss::sharded<kafka::rm_group_frontend> rm_group_frontend;
 
     ss::sharded<raft::group_manager> raft_group_manager;
@@ -235,10 +239,14 @@ private:
     std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;
     ss::sharded<archival::upload_controller> _archival_upload_controller;
+    ss::sharded<archival::upload_housekeeping_service>
+      _archival_upload_housekeeping;
 
     ss::metrics::metric_groups _metrics;
     ss::sharded<ssx::metrics::public_metrics_group> _public_metrics;
     std::unique_ptr<kafka::rm_group_proxy_impl> _rm_group_proxy;
+
+    std::unique_ptr<cluster::node_isolation_watcher> _node_isolation_watcher;
 
     // Small helpers to execute one-time upgrade actions
     std::vector<std::unique_ptr<features::feature_migrator>> _migrators;

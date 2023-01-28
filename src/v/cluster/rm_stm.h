@@ -244,6 +244,8 @@ public:
         model::offset lso_bound;
         std::optional<expiration_info> info;
 
+        std::optional<int32_t> seq;
+
         std::string_view get_status() const {
             switch (status) {
             case status_t::ongoing:
@@ -393,6 +395,24 @@ private:
     struct seq_entry_wrapper {
         seq_entry entry;
         safe_intrusive_list_hook _hook;
+
+        seq_entry_wrapper() = default;
+        explicit seq_entry_wrapper(seq_entry&& entry)
+          : entry(std::move(entry)) {}
+        seq_entry_wrapper(const seq_entry_wrapper&) = delete;
+        seq_entry_wrapper& operator=(seq_entry_wrapper&) = delete;
+        ~seq_entry_wrapper() = default;
+
+        seq_entry_wrapper(seq_entry_wrapper&& other) noexcept
+          : entry(std::move(other.entry)) {
+            _hook.swap_nodes(other._hook);
+        }
+
+        seq_entry_wrapper& operator=(seq_entry_wrapper&& other) noexcept {
+            entry = std::move(other.entry);
+            _hook.swap_nodes(other._hook);
+            return *this;
+        }
     };
 
     util::mem_tracker _tx_root_tracker{"tx-mem-root"};
@@ -708,6 +728,7 @@ private:
     get_tx_status(model::producer_identity pid) const;
     std::optional<expiration_info>
     get_expiration_info(model::producer_identity pid) const;
+    std::optional<int32_t> get_seq_number(model::producer_identity pid) const;
 
     uint8_t active_snapshot_version();
 

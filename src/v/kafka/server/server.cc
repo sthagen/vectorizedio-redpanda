@@ -78,6 +78,7 @@ server::server(
   ss::sharded<cluster::config_frontend>& cf,
   ss::sharded<features::feature_table>& ft,
   ss::sharded<quota_manager>& quota,
+  ss::sharded<snc_quota_manager>& snc_quota_mgr,
   ss::sharded<kafka::group_router>& router,
   ss::sharded<cluster::shard_table>& tbl,
   ss::sharded<cluster::partition_manager>& pm,
@@ -98,6 +99,7 @@ server::server(
   , _feature_table(ft)
   , _metadata_cache(meta)
   , _quota_mgr(quota)
+  , _snc_quota_mgr(snc_quota_mgr)
   , _group_router(router)
   , _shard_table(tbl)
   , _partition_manager(pm)
@@ -115,6 +117,8 @@ server::server(
   , _coproc_partition_manager(coproc_partition_manager)
   , _mtls_principal_mapper(
       config::shard_local_cfg().kafka_mtls_principal_mapping_rules.bind())
+  , _gssapi_principal_mapper(
+      config::shard_local_cfg().sasl_kerberos_principal_mapping.bind())
   , _thread_worker(tw) {
     if (qdc_config) {
         _qdc_mon.emplace(*qdc_config);
@@ -444,8 +448,7 @@ ss::future<response_ptr> sasl_handshake_handler::handle(
             ctx.sasl()->set_mechanism(
               std::make_unique<security::gssapi_authenticator>(
                 ctx.connection()->server().thread_worker(),
-                config::shard_local_cfg()
-                  .sasl_kerberos_principal_mapping.bind()));
+                ctx.connection()->server().gssapi_principal_mapper().rules()));
         }
     }
 

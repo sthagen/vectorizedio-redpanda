@@ -20,6 +20,14 @@
 
 #include <charconv>
 
+/*
+ * some older versions of re2 don't have operator for implicit cast to
+ * string_view so add this helper to support older re2.
+ */
+static std::string_view spv(const re2::StringPiece& sp) {
+    return {sp.data(), sp.size()};
+}
+
 namespace security {
 static constexpr std::string_view gssapi_name_pattern
   = R"(([^/@]*)(/([^/@]*))?@([^/@]*))";
@@ -95,10 +103,10 @@ parse_rules(const std::vector<ss::sstring>& unparsed_rules) {
             }
             rv.emplace_back(
               num_components,
-              format,
-              match_regex,
-              from_pattern,
-              to_pattern,
+              spv(format),
+              spv(match_regex),
+              spv(from_pattern),
+              spv(to_pattern),
               gssapi_rule::repeat{repeat == "g"},
               case_change);
         }
@@ -136,7 +144,9 @@ std::optional<gssapi_name> gssapi_name::parse(std::string_view principal_name) {
           &host_name,
           &realm)) {
         return gssapi_name(
-          ss::sstring(primary), ss::sstring(host_name), ss::sstring(realm));
+          ss::sstring(spv(primary)),
+          ss::sstring(spv(host_name)),
+          ss::sstring(spv(realm)));
     } else {
         if (principal_name.find('@') != std::string_view::npos) {
             vlog(seclog.warn, "Malformed gssapi name: {}", principal_name);
@@ -251,7 +261,7 @@ std::optional<ss::sstring> gssapi_rule::apply(
         }
         const re2::StringPiece base_piece(base->data(), base->size());
         if (_match.empty() || re2::RE2::FullMatch(base_piece, match_regex)) {
-            if (!_from_pattern) {
+            if (_from_pattern_str.empty()) {
                 result = *base;
             } else {
                 result = replace_substitution(
@@ -380,7 +390,14 @@ gssapi_principal_mapper::gssapi_principal_mapper(
 }
 
 std::optional<ss::sstring> gssapi_principal_mapper::apply(
-  std::string_view default_realm, gssapi_name name) const {
+  std::string_view default_realm, const gssapi_name& name) const {
+    return apply(default_realm, name, _rules);
+}
+
+std::optional<ss::sstring> gssapi_principal_mapper::apply(
+  std::string_view default_realm,
+  const gssapi_name& name,
+  const std::vector<gssapi_rule>& rules) {
     std::vector<std::string_view> params;
     if (name.host_name().empty()) {
         if (name.realm().empty()) {
@@ -391,13 +408,13 @@ std::optional<ss::sstring> gssapi_principal_mapper::apply(
         params = {name.realm(), name.primary(), name.host_name()};
     }
 
-    for (const auto& r : _rules) {
+    for (const auto& r : rules) {
         if (auto result = r.apply(default_realm, params); result.has_value()) {
             return result;
         }
     }
 
-    vlog(seclog.warn, "No rules apply to {}, rules: {}", name, _rules);
+    vlog(seclog.warn, "No rules apply to {}, rules: {}", name, rules);
     return std::nullopt;
 }
 

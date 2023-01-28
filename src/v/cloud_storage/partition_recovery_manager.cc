@@ -12,8 +12,10 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "cloud_storage/logger.h"
+#include "cloud_storage/recovery_utils.h"
 #include "cloud_storage/topic_manifest.h"
 #include "cloud_storage/types.h"
+#include "cluster/topic_recovery_status_frontend.h"
 #include "hashing/xx.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -105,7 +107,43 @@ ss::future<log_recovery_result> partition_recovery_manager::download_log(
       _gate,
       _root,
       _as);
-    co_return co_await downloader.download_log();
+    auto result = co_await downloader.download_log();
+    retry_chain_node fib{_as, download_timeout, initial_backoff};
+    if (co_await is_topic_recovery_active()) {
+        vlog(
+          cst_log.debug,
+          "topic recovery service is active, uploading result: {} for {}",
+          result.completed,
+          result.manifest.get_manifest_path());
+        co_await cloud_storage::place_download_result(
+          _remote.local(), _bucket, ntp_cfg, result.completed, fib);
+    }
+    co_return result;
+}
+
+ss::future<bool> partition_recovery_manager::is_topic_recovery_active() const {
+    const auto is_initialized
+      = _topic_recovery_status_frontend.has_value()
+        && _topic_recovery_service.has_value()
+        && _topic_recovery_status_frontend->get().local_is_initialized()
+        && _topic_recovery_service->get().local_is_initialized();
+    if (!is_initialized) {
+        co_return false;
+    }
+
+    co_return co_await _topic_recovery_status_frontend->get()
+      .local()
+      .is_recovery_running(
+        _topic_recovery_service->get(),
+        cluster::topic_recovery_status_frontend::skip_this_node::no);
+}
+
+void partition_recovery_manager::set_topic_recovery_components(
+  ss::sharded<cluster::topic_recovery_status_frontend>&
+    topic_recovery_status_frontend,
+  ss::sharded<cloud_storage::topic_recovery_service>& topic_recovery_service) {
+    _topic_recovery_status_frontend.emplace(topic_recovery_status_frontend);
+    _topic_recovery_service.emplace(topic_recovery_service);
 }
 
 partition_downloader::partition_downloader(
@@ -220,16 +258,16 @@ get_retention_policy(const storage::ntp_config::default_overrides& prop) {
         //
         // This differs from ordinary storage GC, in that we are applying
         // space _or_ time bounds: not both together.
-        if (prop.retention_local_target_bytes.has_value()) {
+        if (prop.retention_local_target_bytes.has_optional_value()) {
             auto v = prop.retention_local_target_bytes.value();
 
-            if (prop.retention_bytes.has_value()) {
+            if (prop.retention_bytes.has_optional_value()) {
                 v = std::min(prop.retention_bytes.value(), v);
             }
             return size_bound_deletion_parameters{v};
-        } else if (prop.retention_local_target_ms.has_value()) {
+        } else if (prop.retention_local_target_ms.has_optional_value()) {
             auto v = prop.retention_local_target_ms.value();
-            if (prop.retention_time.has_value()) {
+            if (prop.retention_time.has_optional_value()) {
                 v = std::min(prop.retention_time.value(), v);
             }
             return time_bound_deletion_parameters{v};

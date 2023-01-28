@@ -119,7 +119,6 @@ func (r *ClusterReconciler) Reconcile(
 		}
 		return ctrl.Result{}, fmt.Errorf("unable to retrieve Cluster resource: %w", err)
 	}
-
 	// if the cluster is being deleted, delete finalizers
 	if !redpandaCluster.GetDeletionTimestamp().IsZero() {
 		return r.handleClusterDeletion(ctx, &redpandaCluster, log)

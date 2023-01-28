@@ -421,7 +421,7 @@ template<typename T>
 void write(iobuf& out, tristate<T> t) {
     if (t.is_disabled()) {
         write<int8_t>(out, -1);
-    } else if (!t.has_value()) {
+    } else if (!t.has_optional_value()) {
         write<int8_t>(out, 0);
     } else {
         write<int8_t>(out, 1);
@@ -626,7 +626,8 @@ void read_nested(iobuf_parser& in, T& t, std::size_t const bytes_left_limit) {
         auto const h = read_header<Type>(in, bytes_left_limit);
 
         if constexpr (is_checksum_envelope<Type>) {
-            auto const shared = in.share(in.bytes_left() - h._bytes_left_limit);
+            auto const shared = in.share_no_consume(
+              in.bytes_left() - h._bytes_left_limit);
             auto read_only_in = iobuf_const_parser{shared};
             auto crc = crc::crc32c{};
             read_only_in.consume(

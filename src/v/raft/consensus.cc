@@ -948,7 +948,7 @@ ss::future<std::error_code> consensus::change_configuration(Func&& f) {
               return ss::make_ready_future<std::error_code>(
                 errc::configuration_change_in_progress);
           }
-
+          maybe_upgrade_configuration(latest_cfg);
           result<group_configuration> res = f(std::move(latest_cfg));
           if (res) {
               if (res.value().revision_id() < config().revision_id()) {
@@ -1057,9 +1057,31 @@ consensus::cancel_configuration_change(model::revision_id revision) {
       config());
     return interrupt_configuration_change(
              revision,
-             [revision](raft::group_configuration cfg) {
+             [this, revision](raft::group_configuration cfg) {
+                 /**
+                  * Optimization of cancelling configuration change
+                  *
+                  * When the raft group reconfiguration advanced beyond the
+                  * point where nodes from the old configuration are demoted to
+                  * learners there is no point of cancellation as the resulting
+                  * configuration would require greater quorum then the one
+                  * required to finish current configuration change.
+                  *
+                  */
+                 if (cfg.get_state() == raft::configuration_state::joint) {
+                     if (!cfg.old_config()->learners.empty()) {
+                         vlog(
+                           _ctxlog.info,
+                           "not cancelling partition configuration as old "
+                           "configuration voters are already demoted to "
+                           "learners: {}",
+                           cfg);
+                         return result<group_configuration>(
+                           errc::invalid_configuration_update);
+                     }
+                 }
                  cfg.cancel_configuration_change(revision);
-                 return cfg;
+                 return result<group_configuration>(cfg);
              })
       .then([this](std::error_code ec) {
           if (!ec) {
@@ -2163,15 +2185,7 @@ ss::future<std::error_code> consensus::replicate_configuration(
     vlog(_ctxlog.debug, "Replicating group configuration {}", cfg);
     return ss::with_gate(
       _bg, [this, u = std::move(u), cfg = std::move(cfg)]() mutable {
-          if (unlikely(cfg.version() < group_configuration::version_t(4))) {
-              if (
-                _features.is_active(
-                  features::feature::raft_improved_configuration)
-                && cfg.get_state() == configuration_state::simple) {
-                  vlog(_ctxlog.debug, "Upgrading configuration version");
-                  cfg.set_version(group_configuration::current_version);
-              }
-          }
+          maybe_upgrade_configuration(cfg);
           auto batches = details::serialize_configuration_as_batches(
             std::move(cfg));
           for (auto& b : batches) {
@@ -2197,6 +2211,17 @@ ss::future<std::error_code> consensus::replicate_configuration(
                 return res.error();
             });
       });
+}
+
+void consensus::maybe_upgrade_configuration(group_configuration& cfg) {
+    if (unlikely(cfg.version() < group_configuration::version_t(4))) {
+        if (
+          _features.is_active(features::feature::raft_improved_configuration)
+          && cfg.get_state() == configuration_state::simple) {
+            vlog(_ctxlog.debug, "Upgrading configuration version");
+            cfg.set_version(group_configuration::current_version);
+        }
+    }
 }
 
 ss::future<result<replicate_result>> consensus::dispatch_replicate(

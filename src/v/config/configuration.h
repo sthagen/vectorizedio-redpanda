@@ -252,8 +252,13 @@ struct configuration final : public config_store {
       cloud_storage_readreplica_manifest_sync_timeout_ms;
     property<std::chrono::milliseconds> cloud_storage_metadata_sync_timeout_ms;
     property<std::chrono::milliseconds> cloud_storage_housekeeping_interval_ms;
+    property<std::chrono::milliseconds> cloud_storage_idle_timeout_ms;
     property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
     property<bool> cloud_storage_enable_compacted_topic_reupload;
+    property<size_t> cloud_storage_recovery_temporary_retention_bytes_default;
+    property<std::optional<size_t>> cloud_storage_segment_size_target;
+    property<std::optional<size_t>> cloud_storage_segment_size_min;
+
     // Azure Blob Storage
     property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
     property<std::optional<ss::sstring>> cloud_storage_azure_container;
@@ -354,11 +359,16 @@ struct configuration final : public config_store {
       controller_log_accummulation_rps_capacity_configuration_operations;
 
     // node and cluster throughput limiting
-    bounded_property<std::optional<uint64_t>>
-      kafka_throughput_limit_node_in_bps;
-    bounded_property<std::optional<uint64_t>>
+    bounded_property<std::optional<int64_t>> kafka_throughput_limit_node_in_bps;
+    bounded_property<std::optional<int64_t>>
       kafka_throughput_limit_node_out_bps;
     bounded_property<std::chrono::milliseconds> kafka_quota_balancer_window;
+    bounded_property<std::chrono::milliseconds>
+      kafka_quota_balancer_node_period;
+    property<double> kafka_quota_balancer_min_shard_thoughput_ratio;
+    bounded_property<int64_t> kafka_quota_balancer_min_shard_thoughput_bps;
+
+    bounded_property<int64_t> node_isolation_heartbeat_timeout;
 
     configuration();
 
