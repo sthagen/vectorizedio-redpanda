@@ -23,6 +23,7 @@
 #include "features/feature_table.h"
 #include "model/metadata.h"
 #include "raft/errc.h"
+#include "raft/group_configuration.h"
 #include "raft/types.h"
 #include "random/generators.h"
 #include "redpanda/application.h"
@@ -236,6 +237,24 @@ members_manager::apply_update(model::record_batch b) {
       },
       [this, update_offset](recommission_node_cmd cmd) mutable {
           auto id = cmd.key;
+          // TODO: remove this part after we introduce simplified raft
+          // configuration handling as this will be commands driven
+          auto raft0_cfg = _raft0->config();
+          if (raft0_cfg.get_state() == raft::configuration_state::joint) {
+              auto it = std::find_if(
+                raft0_cfg.old_config()->learners.begin(),
+                raft0_cfg.old_config()->learners.end(),
+                [id](const raft::vnode& vn) { return vn.id() == id; });
+              /**
+               * If a node is a demoted voter and about to be removed, do not
+               * allow for recommissioning.
+               */
+              if (it != raft0_cfg.old_config()->learners.end()) {
+                  return ss::make_ready_future<std::error_code>(
+                    errc::invalid_node_operation);
+              }
+          }
+
           return dispatch_updates_to_cores(update_offset, cmd)
             .then([this, id, update_offset](std::error_code error) {
                 auto f = ss::now();
@@ -574,7 +593,13 @@ members_manager::dispatch_join_to_seed_server(
     return f.then_wrapped([it, this, req](ss::future<ret_t> fut) {
         try {
             auto r = fut.get0();
-            if (r && r.value().success) {
+            if (r.has_error() || !r.value().success) {
+                vlog(
+                  clusterlog.warn,
+                  "Error joining cluster using {} seed server - {}",
+                  it->addr,
+                  r.has_error() ? r.error().message() : "not allowed to join");
+            } else {
                 return ss::make_ready_future<ret_t>(r);
             }
         } catch (...) {
@@ -764,7 +789,22 @@ members_manager::handle_join_request(join_node_request const req) {
                 co_return ret_t(
                   join_node_reply{false, model::unassigned_node_id});
             }
+            // if node was removed from the cluster doesn't allow it to rejoin
+            // with the same UUID
+            if (_members_table.local()
+                  .get_removed_node_metadata_ref(it->second)
+                  .has_value()) {
+                vlog(
+                  clusterlog.warn,
+                  "Preventing decommissioned node {} with UUID {} from joining "
+                  "the cluster",
+                  it->second,
+                  it->first);
+                co_return ret_t(
+                  join_node_reply{false, model::unassigned_node_id});
+            }
         }
+
         // Proceed to adding the node ID to the controller Raft group.
         // Presumably the node that made this join request started its Raft
         // subsystem with the node ID and is waiting to join the group.

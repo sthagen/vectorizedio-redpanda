@@ -7,6 +7,7 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
+import json
 import subprocess
 import re
 import typing
@@ -262,7 +263,26 @@ class RpkTool:
 
     def delete_topic(self, topic):
         cmd = ["delete", topic]
-        return self._run_topic(cmd)
+        output = self._run_topic(cmd)
+        table = parse_rpk_table(output)
+        expected_columns = ["TOPIC", "STATUS"]
+        expected = ",".join(expected_columns)
+        found = ",".join(map(lambda x: x.name, table.columns))
+        if expected != found:
+            raise RpkException(f"expected: {expected}; found: {found}")
+
+        if len(table.rows) != 1:
+            raise RpkException(f"expected one row; found {len(table.rows)}")
+
+        if table.rows[0][1] != "OK":
+            raise RpkException(f"status isn't ok: {table.rows[0][1]}")
+
+        if table.rows[0][0] != topic:
+            raise RpkException(
+                f"output topic {table.rows[0][0]} doesn't match input topic {topic}"
+            )
+
+        return True
 
     def list_topics(self):
         cmd = ["list"]
@@ -645,6 +665,48 @@ class RpkTool:
             self._rpk_binary(), 'wasm', 'generate', '--skip-version', directory
         ]
         return self._execute(cmd)
+
+    def self_test_start(self,
+                        disk_duration_ms=None,
+                        network_duration_ms=None,
+                        only_disk=False,
+                        only_network=False,
+                        only_connectivity=False,
+                        node_ids=None):
+        cmd = [
+            self._rpk_binary(), '--api-urls',
+            self._admin_host(), 'cluster', 'self-test', 'start', '--no-confirm'
+        ]
+        if disk_duration_ms is not None:
+            cmd += ['--disk-duration-ms', str(disk_duration_ms)]
+        if network_duration_ms is not None:
+            cmd += ['--network-duration-ms', str(network_duration_ms)]
+        if only_disk is True:
+            cmd += ['--only-disk-test']
+        if only_network is True:
+            cmd += ['--only-network-test']
+        if only_connectivity is True:
+            cmd += ['--only-connectivity-test']
+        if node_ids is not None:
+            ids = ",".join([str(x) for x in node_ids])
+            cmd += ['--participants-node-ids', ids]
+        return self._execute(cmd)
+
+    def self_test_stop(self):
+        cmd = [
+            self._rpk_binary(), '--api-urls',
+            self._admin_host(), 'cluster', 'self-test', 'stop'
+        ]
+        return self._execute(cmd)
+
+    def self_test_status(self, output_format='json'):
+        cmd = [
+            self._rpk_binary(), '--api-urls',
+            self._admin_host(), 'cluster', 'self-test', 'status', '--format',
+            output_format
+        ]
+        output = self._execute(cmd)
+        return json.loads(output) if output_format == 'json' else output
 
     def _run_topic(self, cmd, stdin=None, timeout=None):
         cmd = [self._rpk_binary(), "topic"] + self._kafka_conn_settings() + cmd

@@ -45,7 +45,7 @@ function install_system_deps() {
 function install_omb() {
   git -C /opt clone https://github.com/redpanda-data/openmessaging-benchmark.git
   cd /opt/openmessaging-benchmark
-  git reset --hard 6eba1030cb7c199e03f76676b6c2df9dcc3b219d
+  git reset --hard 2674d62ca2b6fd7f22536e924c0df8a8fa21350d
   mvn clean package -DskipTests
 }
 
@@ -99,7 +99,7 @@ function install_client_swarm() {
   pushd /tmp
   git clone https://github.com/redpanda-data/client-swarm.git
   pushd client-swarm
-  git reset --hard a03a8ae &&
+  git reset --hard 9ef8e93 &&
     cargo build --release &&
     cp target/release/client-swarm /usr/local/bin &&
     popd

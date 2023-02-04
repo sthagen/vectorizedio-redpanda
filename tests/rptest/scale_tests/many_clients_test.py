@@ -40,6 +40,15 @@ class ManyClientsTest(RedpandaTest):
             # Enable segment size jitter as this is a stress test and does not
             # rely on exact segment counts.
             'log_segment_size_jitter_percent': 5,
+            # This limit caps the produce throughput to a sustainable rate for a RP
+            # cluster that has 384MB of memory per shard. It is set here to
+            # since our current backpressure mechanisms will allow producers to
+            # produce at a much higher rate and cause RP to run out of memory.
+            'target_quota_byte_rate':
+            31460000,  # 30MiB/s of throughput per shard
+            # Same intention as above but utilizing node-wide throughput limit
+            'kafka_throughput_limit_node_in_bps':
+            104857600,  # 100MiB/s per node
         }
         super().__init__(*args, **kwargs)
 
@@ -82,9 +91,12 @@ class ManyClientsTest(RedpandaTest):
                                  group="testgroup",
                                  save_msgs=False)
 
-        producer = ProducerSwarm(self.test_context, self.redpanda, TOPIC_NAME,
-                                 PRODUCER_COUNT, RECORDS_PER_PRODUCER,
-                                 PRODUCER_TIMEOUT_MS)
+        producer = ProducerSwarm(self.test_context,
+                                 self.redpanda,
+                                 TOPIC_NAME,
+                                 PRODUCER_COUNT,
+                                 RECORDS_PER_PRODUCER,
+                                 timeout_ms=PRODUCER_TIMEOUT_MS)
         producer.start()
         consumer_a.start()
         consumer_b.start()

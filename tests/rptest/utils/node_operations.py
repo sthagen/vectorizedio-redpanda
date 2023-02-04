@@ -124,11 +124,16 @@ class NodeDecommissionWaiter():
                 decommission_status = self.admin.get_decommission_status(
                     self.node_id, self._not_decommissioned_node())
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400:
-                    time.sleep(1)
-                    continue
-                else:
-                    raise e
+                self.logger.info(
+                    f"unable to get decommission status, HTTP error",
+                    exc_info=True)
+                time.sleep(1)
+                continue
+            except Exception as e:
+                self.logger.warn(f"unable to get decommission status",
+                                 exc_info=True)
+                time.sleep(1)
+                continue
 
             self.logger.debug(
                 f"Node {self.node_id} decommission status: {decommission_status}"
@@ -231,6 +236,15 @@ class NodeOpsExecutor():
         self.logger.info(
             f"executor - waiting for node {node_id} to be removed")
 
+        # wait for node to be removed of decommissioning to stop making progress
+        waiter = NodeDecommissionWaiter(self.redpanda,
+                                        node_id=node_id,
+                                        logger=self.logger,
+                                        progress_timeout=60)
+
+        waiter.wait_for_removal()
+
+        # just confirm if node removal was propagated to the the majority of nodes
         def is_node_removed(node_to_query, node_id):
             try:
                 brokers = self.get_statuses(node_to_query)
@@ -354,6 +368,9 @@ class NodeOpsExecutor():
             if operation.wait_for_finish:
                 self.wait_for_rebalanced(operation.node)
         elif operation.type == OperationType.DE_RECOMMISSION:
+            # If node is empty decommission will finish immediately and we won't
+            # be able to recommission it
+            self.wait_for_rebalanced(operation.node)
             self.decommission(operation.node)
 
             self.recommission(operation.node)
