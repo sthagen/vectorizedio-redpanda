@@ -89,7 +89,7 @@ configuration::configuration()
       {.needs_restart = needs_restart::no,
        .example = "3600000",
        .visibility = visibility::user},
-      std::nullopt,
+      std::chrono::weeks{2},
       {.min = 60s})
   , log_segment_ms_min(
       *this,
@@ -751,7 +751,7 @@ configuration::configuration()
       *this,
       "raft_io_timeout_ms",
       "Raft I/O timeout",
-      {.visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10'000ms)
   , join_retry_timeout_ms(
       *this,
@@ -887,6 +887,12 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       {"SCRAM"},
       validate_sasl_mechanisms)
+  , sasl_kerberos_config(
+      *this,
+      "sasl_kerberos_config",
+      "The location of the Kerberos krb5.conf file for Redpanda",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      "/etc/krb5.conf")
   , sasl_kerberos_keytab(
       *this,
       "sasl_kerberos_keytab",
@@ -902,7 +908,7 @@ configuration::configuration()
   , sasl_kerberos_principal_mapping(
       *this,
       "sasl_kerberos_principal_mapping",
-      "Rules for mapping Kerberos Service Principal Name (SPN) to Redpanda",
+      "Rules for mapping Kerberos Principal Names to Redpanda User Principals",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       {"DEFAULT"},
       security::validate_kerberos_mapping_rules)
@@ -1244,11 +1250,28 @@ configuration::configuration()
   , cloud_storage_idle_timeout_ms(
       *this,
       "cloud_storage_idle_timeout_ms",
-      "Timeout used to detect idle state of the cloud storage API. If no API "
-      "requests are made for at least idle timeout milliseconds the cloud "
-      "storage is considered idle.",
+      "Timeout used to detect idle state of the cloud storage API. If the "
+      "average cloud storage request rate is below this threshold for a "
+      "configured amount of time the cloud storage is considered idle and the "
+      "housekeeping jobs are started.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
+  , cloud_storage_idle_threshold_rps(
+      *this,
+      "cloud_storage_idle_threshold_rps",
+      "The cloud storage request rate threshold for idle state detection. If "
+      "the average request rate for the configured period is lower than this "
+      "threshold the cloud storage is considered being idle.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1.0)
+  , cloud_storage_enable_segment_merging(
+      *this,
+      "cloud_storage_enable_segment_merging",
+      "Enables adjacent segment merging. The segments are reuploaded if there "
+      "is an opportunity for that and if it will improve the tiered-storage "
+      "performance",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , cloud_storage_max_segments_pending_deletion_per_partition(
       *this,
       "cloud_storage_max_segments_pending_deletion_per_partition",
@@ -1711,6 +1734,26 @@ configuration::configuration()
       "in controller configuration operations limit",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt)
+  , kafka_throughput_limit_cluster_in_bps(
+      *this,
+      "kafka_throughput_limit_cluster_in_bps",
+      "Cluster wide throughput ingress limit - maximum kafka traffic "
+      "throughput allowed on the ingress side of the entire cluster, in "
+      "bytes/s. Default is no limit. In the current version, it is not yet "
+      "guaranteed to limit the throughput.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt,
+      {.min = 1})
+  , kafka_throughput_limit_cluster_out_bps(
+      *this,
+      "kafka_throughput_limit_cluster_out_bps",
+      "Cluster wide throughput egress limit - maximum kafka traffic "
+      "throughput allowed on the egress side of the entire cluster, in "
+      "bytes/s. Default is no limit. In the current version, it is not yet "
+      "guaranteed to limit the throughput.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt,
+      {.min = 1})
   , kafka_throughput_limit_node_in_bps(
       *this,
       "kafka_throughput_limit_node_in_bps",
@@ -1728,7 +1771,7 @@ configuration::configuration()
       "limit.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt,
-      {.min = ss::smp::count})
+      {.min = 1})
   , kafka_quota_balancer_window(
       *this,
       "kafka_quota_balancer_window_ms",

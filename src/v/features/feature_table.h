@@ -14,6 +14,7 @@
 #include "cluster/types.h"
 #include "features/feature_state.h"
 #include "security/license.h"
+#include "storage/record_batch_builder.h"
 #include "utils/waiter_queue.h"
 
 #include <array>
@@ -52,6 +53,7 @@ enum class feature : std::uint64_t {
     partition_move_revert_cancel = 1ULL << 18U,
     node_isolation = 1ULL << 19U,
     group_offset_retention = 1ULL << 20U,
+    rpc_transport_unknown_errc = 1ULL << 21U,
 
     // Dummy features for testing only
     test_alpha = 1ULL << 62U,
@@ -211,7 +213,7 @@ constexpr static std::array feature_schema{
     cluster::cluster_version{9},
     "kafka_gssapi",
     feature::kafka_gssapi,
-    feature_spec::available_policy::explicit_only,
+    feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
   feature_spec{
     cluster::cluster_version{9},
@@ -229,6 +231,12 @@ constexpr static std::array feature_schema{
     cluster::cluster_version{9},
     "group_offset_retention",
     feature::group_offset_retention,
+    feature_spec::available_policy::always,
+    feature_spec::prepare_policy::always},
+  feature_spec{
+    cluster::cluster_version{9},
+    "rpc_transport_unknown_errc",
+    feature::rpc_transport_unknown_errc,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
 
@@ -310,6 +318,15 @@ public:
      */
     ss::future<> await_feature(feature f) { return await_feature(f, _as); };
 
+    /**
+     * Like await_feature, but runs the given function once the feature is
+     * successfully activated.
+     *
+     * If the feature never activates (i.e. if shutting down while waiting),
+     * the given function is not run.
+     */
+    ss::future<> await_feature_then(feature f, std::function<void(void)> fn);
+
     ss::future<> await_feature_preparing(feature f, ss::abort_source& as);
 
     ss::future<> stop();
@@ -344,6 +361,61 @@ public:
     // feature table to the desired version synchronously, early in the
     // lifetime of a node.
     void bootstrap_active_version(cluster::cluster_version);
+
+    // During upgrades from Redpanda <= 22.3 where the feature table snapshot
+    // does not contain original_version, we infer it from a bootstrap event.
+    void bootstrap_original_version(cluster::cluster_version);
+
+    void abort_for_tests() { _as.request_abort(); }
+
+    /*
+     * The version fence is the structure encoded into a version fence batch
+     * type and is intended to hold information that is useful for partitioning
+     * the contents of a log with respect the time at which version and feature
+     * metadata events occurred.
+     */
+    struct version_fence
+      : serde::
+          envelope<version_fence, serde::version<0>, serde::compat_version<0>> {
+        cluster::cluster_version active_version;
+    };
+
+    static constexpr std::string_view version_fence_batch_key = "state";
+    static version_fence decode_version_fence(model::record_batch batch);
+
+    /*
+     * Build a version fence that the caller should append to a log.
+     *
+     * This call will fail if the active version is not at least as new as the
+     * specified minimum. It is expected that the caller wait until this
+     * condition is guaranteed, such as waiting on a feature that becomes active
+     * at desired cluster version.
+     */
+    model::record_batch
+    encode_version_fence(cluster::cluster_version min_expected) const {
+        /*
+         * TODO: Right now the caller needs to provide linking against storage
+         * and cluster for batch builder tooling. If it is decided that this is
+         * the best place to build the version fence batch then this function
+         * can be moved out of the header into feature_table.cc. But doing that
+         * will require moving record_batch_builder from storage:: to a place
+         * like model:: which is simple and mechanical but quite a large change
+         * to commit to up front.
+         */
+        version_fence f;
+        vassert(
+          _active_version >= min_expected,
+          "Cannot build version fence for active version {} < min version {}",
+          _active_version,
+          min_expected);
+        f.active_version = _active_version;
+        storage::record_batch_builder builder(
+          model::record_batch_type::version_fence, model::offset(0));
+        builder.add_raw_kv(
+          serde::to_iobuf(ss::sstring(version_fence_batch_key)),
+          serde::to_iobuf(f));
+        return std::move(builder).build();
+    }
 
 private:
     // Only for use by our friends feature backend & manager

@@ -429,10 +429,47 @@ FIXTURE_TEST(timeout_test_cleanup_resources, rpc_integration_fixture) {
     BOOST_REQUIRE_EQUAL(
       echo_resp.get0().error(), rpc::errc::client_request_timeout);
     // Verify that the resources are released correctly after timeout.
-    tests::cooperative_spin_wait_with_timeout(5s, [&] {
-        return lock.try_get_units().has_value();
-    }).get();
+    BOOST_REQUIRE(lock.try_get_units().has_value());
     client.stop().get();
+}
+
+FIXTURE_TEST(test_cleanup_on_timeout_before_sending, rpc_integration_fixture) {
+    configure_server();
+    register_services();
+    start_server();
+
+    rpc::client<echo::echo_client_protocol> client(client_config());
+    client.connect(model::no_timeout).get();
+    auto stop_client = ss::defer([&] { client.stop().get(); });
+
+    size_t num_reqs = 10;
+
+    // Dispatch several requests with zero timeout. Presumably, some of them
+    // will timeout before even sending a message to the server. Even in this
+    // case resource units must be returned before the request finishes.
+    std::vector<ss::future<>> requests;
+    for (size_t i = 0; i < num_reqs; ++i) {
+        auto lock = ss::make_lw_shared<::mutex>();
+
+        auto units = lock->try_get_units();
+        BOOST_REQUIRE(units);
+        std::vector<ssx::semaphore_units> units_vec;
+        units_vec.push_back(std::move(*units));
+        auto opts = rpc::client_opts(rpc::clock_type::now());
+        opts.resource_units = ss::make_foreign(
+          ss::make_lw_shared(std::move(units_vec)));
+
+        auto f = client.sleep_for(echo::sleep_req{.secs = 1}, std::move(opts))
+                   .then([lock, i](auto result) {
+                       info("finished request {}", i);
+                       BOOST_REQUIRE_EQUAL(
+                         result.error(), rpc::errc::client_request_timeout);
+                       BOOST_REQUIRE(lock->ready());
+                   });
+        requests.push_back(std::move(f));
+    }
+
+    ss::when_all_succeed(requests.begin(), requests.end()).get();
 }
 
 FIXTURE_TEST(rpc_mixed_compression, rpc_integration_fixture) {
@@ -514,14 +551,14 @@ FIXTURE_TEST(missing_method_test, rpc_integration_fixture) {
     auto stop = ss::defer([&t] { t.stop().get(); });
     auto client = echo::echo_client_protocol(t);
 
-    const auto check_missing = [&] {
+    const auto check_missing = [&](rpc::errc expected_errc) {
         auto f = t.send_typed<echo::echo_req, echo::echo_resp>(
           echo::echo_req{.str = "testing..."},
           {"missing_method_test::missing", 1234},
           rpc::client_opts(rpc::no_timeout));
-        return f.then([&](auto ret) {
+        return f.then([&, expected_errc](auto ret) {
             BOOST_REQUIRE(ret.has_error());
-            BOOST_REQUIRE_EQUAL(ret.error(), rpc::errc::method_not_found);
+            BOOST_REQUIRE_EQUAL(ret.error(), expected_errc);
         });
     };
 
@@ -540,23 +577,34 @@ FIXTURE_TEST(missing_method_test, rpc_integration_fixture) {
      * missing method error can be handled in any situation and that the
      * connection remains in a healthy state.
      */
-    std::vector<std::function<ss::future<>()>> request_factory;
-    for (int i = 0; i < 200; i++) {
-        request_factory.emplace_back(check_missing);
-        request_factory.emplace_back(check_success);
-    }
-    std::shuffle(
-      request_factory.begin(),
-      request_factory.end(),
-      random_generators::internal::gen);
+    const auto verify_bad_method_errors = [&](rpc::errc expected_errc) {
+        std::vector<std::function<ss::future<>()>> request_factory;
+        for (int i = 0; i < 200; i++) {
+            request_factory.emplace_back(
+              [&, expected_errc] { return check_missing(expected_errc); });
+            request_factory.emplace_back(check_success);
+        }
+        std::shuffle(
+          request_factory.begin(),
+          request_factory.end(),
+          random_generators::internal::gen);
 
-    // dispatch the requests
-    std::vector<ss::future<>> requests;
-    for (const auto& factory : request_factory) {
-        requests.emplace_back(factory());
-    }
+        // dispatch the requests
+        std::vector<ss::future<>> requests;
+        for (const auto& factory : request_factory) {
+            requests.emplace_back(factory());
+        }
 
-    ss::when_all_succeed(requests.begin(), requests.end()).get();
+        ss::when_all_succeed(requests.begin(), requests.end()).get();
+    };
+    // If the server is configured to allow use of service_unavailable, while
+    // the server hasn't added all services, we should see a retriable error
+    // instead of method_not_found.
+    server().set_use_service_unavailable();
+    verify_bad_method_errors(rpc::errc::exponential_backoff);
+
+    server().set_all_services_added();
+    verify_bad_method_errors(rpc::errc::method_not_found);
 }
 
 FIXTURE_TEST(corrupted_header_at_client_test, rpc_integration_fixture) {

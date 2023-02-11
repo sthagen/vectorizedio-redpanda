@@ -14,6 +14,8 @@
 #include "cluster/types.h"
 #include "features/logger.h"
 
+#include <seastar/core/abort_source.hh>
+
 // The feature table is closely related to cluster and uses many types from it
 using namespace cluster;
 
@@ -63,6 +65,8 @@ std::string_view to_string_view(feature f) {
         return "node_isolation";
     case feature::group_offset_retention:
         return "group_offset_retention";
+    case feature::rpc_transport_unknown_errc:
+        return "rpc_transport_unknown_errc";
 
     /*
      * testing features
@@ -241,6 +245,20 @@ void feature_table::bootstrap_active_version(cluster_version v) {
     on_update();
 }
 
+void feature_table::bootstrap_original_version(cluster_version v) {
+    if (ss::this_shard_id() == ss::shard_id{0}) {
+        vlog(
+          featureslog.info,
+          "Set original_version from bootstrap version {}",
+          v);
+    }
+
+    _original_version = v;
+
+    // No on_update() call needed: bootstrap version is only advisory and
+    // does not drive the feature state machines.
+}
+
 /**
  * Call this after changing any state.
  *
@@ -358,6 +376,25 @@ ss::future<> feature_table::await_feature(feature f, ss::abort_source& as) {
     }
 }
 
+ss::future<>
+feature_table::await_feature_then(feature f, std::function<void(void)> fn) {
+    try {
+        co_await await_feature(f);
+        fn();
+    } catch (ss::abort_requested_exception&) {
+        // Shutting down
+    } catch (...) {
+        // Should never happen, abort is the only exception that await_feature
+        // can throw, other than perhaps bad_alloc.
+        vlog(
+          featureslog.error,
+          "Unexpected error awaiting {} feature: {} {}",
+          to_string_view(f),
+          std::current_exception(),
+          ss::current_backtrace());
+    }
+}
+
 /**
  * Wait until this feature hits 'preparing' state, which is the trigger
  * for any data migration work to start.  This will also return if
@@ -421,6 +458,23 @@ void feature_table::testing_activate_all() {
         }
     }
     on_update();
+}
+
+feature_table::version_fence
+feature_table::decode_version_fence(model::record_batch batch) {
+    auto records = batch.copy_records();
+    if (records.empty()) {
+        throw std::runtime_error("Cannot decode empty version fence batch");
+    }
+    auto& rec = records.front();
+    auto key = serde::from_iobuf<ss::sstring>(rec.release_key());
+    if (key != version_fence_batch_key) {
+        throw std::runtime_error(fmt::format(
+          "Version fence batch does not contain expected key {}: found {}",
+          version_fence_batch_key,
+          key));
+    }
+    return serde::from_iobuf<version_fence>(rec.release_value());
 }
 
 } // namespace features

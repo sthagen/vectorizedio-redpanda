@@ -151,6 +151,9 @@ quota_t node_to_shard_quota(const std::optional<quota_t> node_quota) {
 snc_quota_manager::snc_quota_manager()
   : _max_kafka_throttle_delay(
     config::shard_local_cfg().max_kafka_throttle_delay_ms.bind())
+  , _kafka_throughput_limit_cluster_bps{
+      config::shard_local_cfg().kafka_throughput_limit_cluster_in_bps.bind(),
+      config::shard_local_cfg().kafka_throughput_limit_cluster_out_bps.bind()}
   , _kafka_throughput_limit_node_bps{
       config::shard_local_cfg().kafka_throughput_limit_node_in_bps.bind(),
       config::shard_local_cfg().kafka_throughput_limit_node_out_bps.bind()}
@@ -173,6 +176,10 @@ snc_quota_manager::snc_quota_manager()
   , _probe(*this)
 {
     update_shard_quota_minimum();
+    _kafka_throughput_limit_cluster_bps.in.watch(
+      [this] { update_node_quota_default(); });
+    _kafka_throughput_limit_cluster_bps.eg.watch(
+      [this] { update_node_quota_default(); });
     _kafka_throughput_limit_node_bps.in.watch(
       [this] { update_node_quota_default(); });
     _kafka_throughput_limit_node_bps.eg.watch(
@@ -192,6 +199,10 @@ snc_quota_manager::snc_quota_manager()
             // because the timer is never armed on the others
             arm_balancer_timer();
         }
+        // if the balancer is disabled, this is where the quotas are reset to
+        // default. This needs to be called on every shard because the effective
+        // balance is updated directly in this case.
+        update_node_quota_default();
     });
     _kafka_quota_balancer_min_shard_throughput_ratio.watch(
       [this] { update_shard_quota_minimum(); });
@@ -244,15 +255,34 @@ delay_t eval_delay(const bottomless_token_bucket& tb) noexcept {
     return delay_t(muldiv(-tb.tokens(), delay_t::period::den, tb.quota()));
 }
 
+std::optional<quota_t> optional_min(
+  const std::optional<quota_t> lhs, const std::optional<quota_t> rhs) {
+    if (lhs && rhs) {
+        return std::min(*lhs, *rhs);
+    } else if (lhs) {
+        return lhs;
+    } else if (rhs) {
+        return rhs;
+    } else {
+        return std::nullopt;
+    }
+}
+
 } // namespace
 
 ingress_egress_state<std::optional<quota_t>>
 snc_quota_manager::calc_node_quota_default() const {
     // here will be the code to merge node limit
     // and node share of cluster limit; so far it's node limit only
+    // Ignore _shard_quota_minimum because it only applies when quotas
+    // are adjusted during balancing
     const ingress_egress_state<std::optional<quota_t>> default_quota{
-      .in = _kafka_throughput_limit_node_bps.in(),
-      .eg = _kafka_throughput_limit_node_bps.eg()};
+      .in = optional_min(
+        _kafka_throughput_limit_node_bps.in(),
+        _kafka_throughput_limit_cluster_bps.in()),
+      .eg = optional_min(
+        _kafka_throughput_limit_node_bps.eg(),
+        _kafka_throughput_limit_cluster_bps.eg())};
     vlog(klog.trace, "qm - Default node TP quotas: {}", default_quota);
     return default_quota;
 }
@@ -302,16 +332,29 @@ void snc_quota_manager::update_node_quota_default() {
     const ingress_egress_state<std::optional<quota_t>> new_node_quota_default
       = calc_node_quota_default();
     if (ss::this_shard_id() == quota_balancer_shard) {
-        // downstream updates:
-        // - shard effective quota (via _shard_quotas_update):
+        ingress_egress_state<std::optional<quota_t>> qold;
+        if (_kafka_quota_balancer_node_period() == 0ms) {
+            // set effective shard quotas to default shard quotas only if
+            // the balancer is off. This resets all the uneven distribution of
+            // effective quotas done by the balancer to the uniform  default
+            // once the balancer is turned off, like if the node default quota
+            // were not enabled
+            qold = {std::nullopt, std::nullopt};
+        } else {
+            // the balancer is on, so the update will be calculated on shard0
+            // and distributed between the shards synchronously to balancer runs
+            // based on both old and new values for the default node quota
+            qold = _node_quota_default;
+        }
+
+        // dependent update: effective shard quotas
         ssx::spawn_with_gate(
-          _balancer_gate,
-          [this, qold = _node_quota_default, qnew = new_node_quota_default] {
+          _balancer_gate, [this, qold, qnew = new_node_quota_default] {
               return quota_balancer_update(qold, qnew);
           });
     }
     _node_quota_default = new_node_quota_default;
-    // - shard minimum quota:
+    // dependent update: shard minimum quota
     update_shard_quota_minimum();
 }
 
@@ -340,11 +383,11 @@ void snc_quota_manager::arm_balancer_timer() {
         // and on the first iteration
         if (
           _balancer_timer_last_ran.time_since_epoch()
-          != ss::lowres_clock::duration::zero()) {
+          != ss::lowres_clock::duration{}) {
             vlog(
               klog.warn,
-              "qb - Quota balancer is invoked too often ({}), "
-              "enforcing minimum sleep time",
+              "qb - Quota balancer is invoked too often ({}), enforcing "
+              "minimum sleep time. Consider increasing the balancer period.",
               arm_until - now);
         }
         arm_until = closest_arm_until;
@@ -450,7 +493,7 @@ ss::future<> snc_quota_manager::quota_balancer_step() {
     }
 }
 
-namespace {
+namespace detail {
 
 /// Split \p value between the elements of vector \p target in full, adding them
 /// to the elements already in the vector.
@@ -464,10 +507,10 @@ void dispense_equally(std::vector<quota_t>& target, const quota_t value) {
         v += share.quot;
         if (share.rem > 0) {
             v += 1;
-            share.quot -= 1;
+            share.rem -= 1;
         } else if (share.rem < 0) {
             v -= 1;
-            share.quot += 1;
+            share.rem += 1;
         }
     }
 }
@@ -583,7 +626,8 @@ void dispense_negative_deltas(
     }
 }
 
-} // namespace
+} // namespace detail
+using namespace detail;
 
 ss::future<> snc_quota_manager::quota_balancer_update(
   const ingress_egress_state<std::optional<quota_t>> old_node_quota_default,

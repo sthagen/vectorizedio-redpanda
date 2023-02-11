@@ -7,6 +7,7 @@ rp_test(
     types_conversion_tests.cc
     topic_utils_test.cc
     handler_interface_test.cc
+    quota_managers_test.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
   LIBRARIES Boost::unit_test_framework v::kafka v::coproc
   LABELS kafka
@@ -30,7 +31,8 @@ set(srcs
   fetch_session_test.cc
   alter_config_test.cc
   produce_consume_test.cc
-  group_metadata_serialization_test.cc)
+  group_metadata_serialization_test.cc
+  partition_reassignments_test.cc)
 
 rp_test(
   FIXTURE_TEST

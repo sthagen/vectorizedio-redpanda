@@ -804,7 +804,8 @@ void application::configure_admin_server() {
       std::ref(node_status_table),
       std::ref(self_test_frontend),
       _schema_registry.get(),
-      std::ref(topic_recovery_service))
+      std::ref(topic_recovery_service),
+      std::ref(topic_recovery_status_frontend))
       .get();
 }
 
@@ -995,7 +996,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
               .heartbeat_timeout
               = config::shard_local_cfg().raft_heartbeat_timeout_ms.bind(),
               .raft_io_timeout_ms
-              = config::shard_local_cfg().raft_io_timeout_ms()};
+              = config::shard_local_cfg().raft_io_timeout_ms.bind()};
         },
         [] {
             return raft::recovery_memory_quota::configuration{
@@ -1045,7 +1046,10 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           .get();
 
         construct_service(
-          _archival_upload_housekeeping, std::ref(cloud_storage_api))
+          _archival_upload_housekeeping,
+          std::ref(cloud_storage_api),
+          ss::sharded_parameter(
+            [sg = _scheduling_groups.archival_upload()] { return sg; }))
           .get();
         _archival_upload_housekeeping
           .invoke_on_all(&archival::upload_housekeeping_service::start)
@@ -1511,7 +1515,8 @@ void application::wire_up_bootstrap_services() {
           log_cfg.reclaim_opts.background_reclaimer_sg
             = _scheduling_groups.cache_background_reclaim_sg();
           return log_cfg;
-      })
+      },
+      std::ref(feature_table))
       .get();
 
     // Hook up local_monitor to update storage_resources when disk state changes
@@ -1765,28 +1770,26 @@ void application::start_runtime_services(
   cluster::cluster_discovery& cd, ::stop_signal& app_signal) {
     ssx::background = feature_table.invoke_on_all(
       [this](features::feature_table& ft) {
-          return ft.await_feature(features::feature::rpc_v2_by_default)
-            .then([this] {
+          return ft.await_feature_then(
+            features::feature::rpc_v2_by_default, [this] {
                 if (ss::this_shard_id() == 0) {
-                    vlog(_log.info, "Activating RPC protocol v2");
+                    vlog(_log.debug, "Activating RPC protocol v2");
                 }
                 _connection_cache.local().set_default_transport_version(
                   rpc::transport_version::v2);
-            })
-            .handle_exception([this](const std::exception_ptr& e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (ss::abort_requested_exception&) {
-                    // Shutting down
-                } catch (...) {
-                    // Should never happen, abort is the only exception that
-                    // await_feature can throw, other than perhaps bad_alloc.
+            });
+      });
+    ssx::background = feature_table.invoke_on_all(
+      [this](features::feature_table& ft) {
+          return ft.await_feature_then(
+            features::feature::rpc_transport_unknown_errc, [this] {
+                if (ss::this_shard_id() == 0) {
                     vlog(
-                      _log.error,
-                      "Unexpected error awaiting RPCv2 feature: {} {}",
-                      std::current_exception(),
-                      ss::current_backtrace());
+                      _log.debug, "All nodes support unknown RPC error codes");
                 }
+                // Redpanda versions <= v22.3.x don't properly parse error
+                // codes they don't know about.
+                _rpc.local().set_use_service_unavailable();
             });
       });
 
@@ -1918,6 +1921,9 @@ void application::start_runtime_services(
               smp_service_groups.cluster_smp_sg(),
               std::ref(topic_recovery_service)));
           s.add_services(std::move(runtime_services));
+
+          // Done! Disallow unknown method errors.
+          s.set_all_services_added();
       })
       .get();
 

@@ -56,7 +56,8 @@ struct mux_state_machine_fixture {
         _storage
           .start(
             [kv_conf]() { return kv_conf; },
-            [this]() { return default_log_cfg(); })
+            [this]() { return default_log_cfg(); },
+            std::ref(_feature_table))
           .get0();
         _storage.invoke_on_all(&storage::api::start).get0();
         _connections.start().get0();
@@ -81,7 +82,8 @@ struct mux_state_machine_fixture {
                   = config::mock_binding<std::chrono::milliseconds>(100ms),
                   .heartbeat_timeout
                   = config::mock_binding<std::chrono::milliseconds>(2000ms),
-                  .raft_io_timeout_ms = 30s,
+                  .raft_io_timeout_ms
+                  = config::mock_binding<std::chrono::milliseconds>(30s),
                 };
             },
             [] {

@@ -27,8 +27,10 @@
 #include "raft/types.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
+#include "storage/ntp_config.h"
 #include "storage/parser.h"
 #include "utils/human.h"
+#include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
@@ -49,6 +51,18 @@
 #include <stdexcept>
 
 namespace archival {
+
+static std::unique_ptr<adjacent_segment_merger>
+maybe_make_adjacent_segment_merger(
+  ntp_archiver& self, retry_chain_logger& log, const storage::ntp_config& cfg) {
+    std::unique_ptr<adjacent_segment_merger> result = nullptr;
+    if (cfg.is_archival_enabled()) {
+        result = std::make_unique<adjacent_segment_merger>(self, log, true);
+        result->set_enabled(config::shard_local_cfg()
+                              .cloud_storage_enable_segment_merging.value());
+    }
+    return result;
+}
 
 ntp_archiver::ntp_archiver(
   const storage::ntp_config& ntp,
@@ -79,12 +93,18 @@ ntp_archiver::ntp_archiver(
       cloud_storage::remote::make_partition_manifest_tags(_ntp, _rev))
   , _tx_tags(cloud_storage::remote::make_tx_manifest_tags(_ntp, _rev))
   , _local_segment_merger(
-      std::make_unique<adjacent_segment_merger>(*this, _rtclog, true)) {
+      maybe_make_adjacent_segment_merger(*this, _rtclog, parent.log().config()))
+  , _segment_merging_enabled(
+      config::shard_local_cfg().cloud_storage_enable_segment_merging.bind()) {
     _start_term = _parent.term();
     // Override bucket for read-replica
     if (_parent.is_read_replica_mode_enabled()) {
         _bucket_override = _parent.get_read_replica_bucket();
     }
+
+    _segment_merging_enabled.watch([this] {
+        _local_segment_merger->set_enabled(_segment_merging_enabled());
+    });
 
     vlog(
       archival_log.debug,
@@ -528,9 +548,10 @@ bool ntp_archiver::can_update_archival_metadata() const {
 ss::future<> ntp_archiver::stop() {
     _leader_cond.broken();
     if (_local_segment_merger) {
-        co_await dynamic_cast<adjacent_segment_merger*>(
-          _local_segment_merger.get())
-          ->stop();
+        if (!_local_segment_merger->interrupted()) {
+            _local_segment_merger->interrupt();
+        }
+        co_await _local_segment_merger.get()->stop();
     }
     _as.request_abort();
     co_await _gate.close();
@@ -594,6 +615,7 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest(
       ctxlog.debug,
       "Uploading manifest, path: {}",
       manifest().get_manifest_path());
+    auto units = co_await _parent.archival_meta_stm()->acquire_manifest_lock();
     co_return co_await _remote.upload_manifest(
       get_bucket_name(), manifest(), fib, _manifest_tags);
 }
@@ -1231,9 +1253,6 @@ ss::future<> ntp_archiver::housekeeping() {
             auto units = co_await ss::get_units(_mutex, 1, _as);
             co_await apply_retention();
             co_await garbage_collect();
-        }
-
-        if (can_update_archival_metadata()) {
             co_await upload_manifest();
         }
     } catch (std::exception& e) {
@@ -1391,10 +1410,7 @@ std::vector<std::reference_wrapper<housekeeping_job>>
 ntp_archiver::get_housekeeping_jobs() {
     std::vector<std::reference_wrapper<housekeeping_job>> res;
     if (_local_segment_merger) {
-        res.push_back(std::ref(*_local_segment_merger));
-    }
-    if (_remote_segment_merger) {
-        res.push_back(std::ref(*_remote_segment_merger));
+        res.emplace_back(std::ref(*_local_segment_merger));
     }
     return res;
 }

@@ -10,44 +10,34 @@ import io
 import json
 import os
 import pprint
+import time
+from collections import defaultdict, deque, namedtuple
 from queue import Queue
 from threading import Thread
-import time
-from collections import namedtuple, defaultdict, deque
-from typing import NamedTuple, Optional, Callable, Sequence, Tuple
+from typing import Callable, NamedTuple, Optional, Sequence
 
+import requests
 from ducktape.cluster.cluster import ClusterNode
+from ducktape.mark import parametrize
 from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
-import requests
-
 from rptest.archival.s3_client import S3Client
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
+from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import FileToChecksumSize, RedpandaService, SISettings
+from rptest.services.redpanda import (CloudStorageType, FileToChecksumSize,
+                                      RedpandaService, SISettings)
 from rptest.services.rpk_producer import RpkProducer
 from rptest.tests.redpanda_test import RedpandaTest
-from rptest.utils.si_utils import (
-    SegmentReader,
-    parse_s3_manifest_path,
-    parse_s3_segment_path,
-    verify_file_layout,
-    gen_manifest_path,
-    get_on_disk_size_per_ntp,
-    get_expected_ntp_restored_size,
-    is_close_size,
-    EMPTY_SEGMENT_SIZE,
-    default_log_segment_size,
-    NTP,
-    MISSING_DATA_ERRORS,
-    TRANSIENT_ERRORS,
-    PathMatcher,
-    S3Snapshot,
-)
-from rptest.services.admin import Admin
 from rptest.util import wait_until_result
+from rptest.utils.si_utils import (
+    EMPTY_SEGMENT_SIZE, MISSING_DATA_ERRORS, NTP, TRANSIENT_ERRORS,
+    PathMatcher, S3Snapshot, SegmentReader, default_log_segment_size,
+    gen_manifest_path, get_expected_ntp_restored_size,
+    get_on_disk_size_per_ntp, is_close_size, parse_s3_manifest_path,
+    parse_s3_segment_path, verify_file_layout)
 
 CLOUD_STORAGE_SEGMENT_MAX_UPLOAD_INTERVAL_SEC = 10
 
@@ -969,12 +959,27 @@ class AdminApiBasedRestore(FastCheck):
     def _assert_temporary_retention_is_reverted(self):
         self._assert_retention('-1')
 
+    def _assert_status(self):
+        def wait_for_status():
+            r = self.admin.get_topic_recovery_status()
+            assert r.status_code == requests.status_codes.codes['ok']
+            if r.json()['state'] == 'inactive':
+                return False
+            return r.json()
+
+        status = wait_until_result(wait_for_status, timeout_sec=60)
+        self.logger.info(f'got status: {status}')
+        assert status['request']['topic_names_pattern'] == 'none'
+        assert status['request']['retention_bytes'] == -1
+        assert status['request']['retention_ms'] == 500000
+
     def restore_redpanda(self, *_):
         payload = {'retention_ms': 500000}
         response = self.admin.initiate_topic_scan_and_recovery(payload=payload)
         assert response.status_code == requests.status_codes.codes[
             'ok'], f'request status code: {response.status_code}'
         self._assert_duplicate_request_is_rejected()
+        self._assert_status()
 
     def after_restart_validation(self):
         super().after_restart_validation()
@@ -1475,7 +1480,9 @@ class TopicRecoveryTest(RedpandaTest):
         self.do_run(test_case)
 
     @cluster(num_nodes=4, log_allow_list=TRANSIENT_ERRORS)
-    def test_admin_api_recovery(self):
+    @parametrize(cloud_storage_type=CloudStorageType.ABS)
+    @parametrize(cloud_storage_type=CloudStorageType.S3)
+    def test_admin_api_recovery(self, cloud_storage_type):
         topics = [
             TopicSpec(name='panda-topic',
                       partition_count=1,

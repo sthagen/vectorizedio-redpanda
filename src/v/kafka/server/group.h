@@ -157,6 +157,13 @@ public:
         kafka::leader_epoch committed_leader_epoch;
         model::timestamp commit_timestamp;
         std::optional<model::timestamp> expiry_timestamp;
+        /*
+         * this is an offset that was written prior to upgrading to redpanda
+         * with offset retention support. because these offsets did not
+         * persistent retention metadata we act conservatively and skip
+         * automatic reclaim. offset delete api can be used to remove them.
+         */
+        bool non_reclaimable{false};
 
         friend std::ostream& operator<<(std::ostream&, const offset_metadata&);
     };
@@ -277,6 +284,11 @@ public:
     /// Check if a member id refers to the group leader.
     bool is_leader(const kafka::member_id& member_id) const {
         return _leader && _leader.value() == member_id;
+    }
+
+    /// Check if this is a consumer_group or not
+    bool is_consumer_group() const {
+        return _protocol_type == consumer_group_protocol_type;
     }
 
     /// Get the group's configured protocol type (if any).
@@ -657,6 +669,14 @@ public:
     std::vector<model::topic_partition>
     delete_expired_offsets(std::chrono::seconds retention_period);
 
+    /*
+     *  Delete group offsets that do not have subscriptions.
+     *
+     *  Returns the set of offsets that were deleted.
+     */
+    std::vector<model::topic_partition>
+    delete_offsets(std::vector<model::topic_partition> offsets);
+
 private:
     using member_map = absl::node_hash_map<kafka::member_id, member_ptr>;
     using protocol_support = absl::node_hash_map<kafka::protocol_name, int>;
@@ -784,6 +804,8 @@ private:
 
     cluster::abort_origin
     get_abort_origin(const model::producer_identity&, model::tx_seq) const;
+
+    bool has_offsets() const;
 
     bool has_pending_transaction(const model::topic_partition& tp) {
         if (std::any_of(

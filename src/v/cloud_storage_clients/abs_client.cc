@@ -547,6 +547,26 @@ ss::future<> abs_client::do_delete_object(
     }
 }
 
+ss::future<result<abs_client::delete_objects_result, error_outcome>>
+abs_client::delete_objects(
+  const bucket_name& bucket,
+  std::vector<object_key> keys,
+  ss::lowres_clock::duration timeout) {
+    abs_client::delete_objects_result delete_objects_result;
+    for (const auto& key : keys) {
+        try {
+            auto res = co_await delete_object(bucket, key, timeout);
+            if (res.has_error()) {
+                delete_objects_result.undeleted_keys.push_back(
+                  {key, fmt::format("{}", res.error())});
+            }
+        } catch (const std::exception& ex) {
+            delete_objects_result.undeleted_keys.push_back({key, ex.what()});
+        }
+    }
+    co_return delete_objects_result;
+}
+
 ss::future<result<abs_client::list_bucket_result, error_outcome>>
 abs_client::list_objects(
   const bucket_name& name,

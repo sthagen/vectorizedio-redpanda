@@ -18,6 +18,7 @@
 #include "kafka/protocol/delete_groups.h"
 #include "kafka/protocol/describe_groups.h"
 #include "kafka/protocol/offset_commit.h"
+#include "kafka/protocol/offset_delete.h"
 #include "kafka/protocol/offset_fetch.h"
 #include "kafka/protocol/request_reader.h"
 #include "kafka/server/group_metadata.h"
@@ -25,9 +26,11 @@
 #include "model/fundamental.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "raft/types.h"
 #include "resource_mgmt/io_priority.h"
 #include "ssx/future-util.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
 
@@ -251,8 +254,12 @@ ss::future<size_t> group_manager::delete_expired_offsets(
     /*
      * delete expired offsets from the group
      */
-    const auto offsets = group->delete_expired_offsets(retention_period);
+    auto offsets = group->delete_expired_offsets(retention_period);
+    return delete_offsets(group, std::move(offsets));
+}
 
+ss::future<size_t> group_manager::delete_offsets(
+  group_ptr group, std::vector<model::topic_partition> offsets) {
     /*
      * build tombstones to persistent offset deletions. the group itself may
      * also be set to dead state in which case we may be able to delete the
@@ -277,6 +284,7 @@ ss::future<size_t> group_manager::delete_expired_offsets(
     if (group->in_state(group_state::dead)) {
         auto it = _groups.find(group->id());
         if (it != _groups.end() && it->second == group) {
+            co_await it->second->shutdown();
             _groups.erase(it);
             if (group->generation() > 0) {
                 vlog(
@@ -407,6 +415,12 @@ ss::future<> group_manager::do_detach_partition(model::ntp ntp) {
             continue;
         }
         ++g_it;
+    }
+    // if p has background work that won't complete without an abort being
+    // requested, then do that now because once the partition is removed from
+    // the _partitions container it won't be available in group_manager::stop.
+    if (!p->as.abort_requested()) {
+        p->as.request_abort();
     }
     _partitions.erase(ntp);
     _partitions.rehash(0);
@@ -657,6 +671,21 @@ ss::future<> group_manager::recover_partition(
   model::term_id term,
   ss::lw_shared_ptr<attached_partition> p,
   group_recovery_consumer_state ctx) {
+    /*
+     * write the offset retention feature fence. this is done in the background
+     * because we need to await the offset retention feature. however, if that
+     * is done  inline here then we'll prevent consumer group partition from
+     * recovering and operating during a mix-version rolling upgrade.
+     */
+    if (!ctx.has_offset_retention_feature_fence) {
+        vlog(
+          klog.info,
+          "Scheduling write of offset retention feature fence for partition {}",
+          p->partition);
+        ssx::spawn_with_gate(
+          _gate, [this, term, p] { return write_version_fence(term, p); });
+    }
+
     static constexpr size_t group_batch_size = 64;
     for (auto& [_, group] : _groups) {
         if (group->partition()->ntp() == p->partition->ntp()) {
@@ -712,6 +741,7 @@ ss::future<> group_manager::do_recover_group(
                 .metadata = meta.metadata.metadata,
                 .commit_timestamp = meta.metadata.commit_timestamp,
                 .expiry_timestamp = expiry_timestamp,
+                .non_reclaimable = meta.metadata.non_reclaimable,
               });
         }
 
@@ -738,6 +768,92 @@ ss::future<> group_manager::do_recover_group(
         }
     }
     co_return;
+}
+
+ss::future<> group_manager::write_version_fence(
+  model::term_id term, ss::lw_shared_ptr<attached_partition> p) {
+    // how long to delay retrying a fence write if an error occurs
+    constexpr auto fence_write_retry_delay = 10s;
+
+    co_await _feature_table.local().await_feature(
+      features::feature::group_offset_retention, p->as);
+
+    while (true) {
+        if (p->as.abort_requested() || _gate.is_closed()) {
+            break;
+        }
+
+        // cluster v9 is where offset retention is enabled
+        auto batch = _feature_table.local().encode_version_fence(
+          cluster::cluster_version{9});
+        auto reader = model::make_memory_record_batch_reader(std::move(batch));
+
+        try {
+            auto result = co_await p->partition->raft()->replicate(
+              term,
+              std::move(reader),
+              raft::replicate_options(raft::consistency_level::quorum_ack));
+
+            if (result) {
+                vlog(
+                  klog.info,
+                  "Prepared partition {} for consumer offset retention feature "
+                  "during upgrade",
+                  p->partition->ntp());
+                co_return;
+
+            } else if (result.error() == raft::errc::shutting_down) {
+                vlog(
+                  klog.debug,
+                  "Cannot write offset retention version fence for partition "
+                  "{}: shutting down",
+                  p->partition->ntp());
+                co_return;
+
+            } else if (result.error() == raft::errc::not_leader) {
+                vlog(
+                  klog.debug,
+                  "Cannot write offset retention version fence for partition "
+                  "{}: not leader",
+                  p->partition->ntp());
+                co_return;
+
+            } else {
+                vlog(
+                  klog.warn,
+                  "Could not write offset retention feature fence for "
+                  "partition {}: {} {}",
+                  p->partition->ntp(),
+                  result.error().message(),
+                  result.error());
+            }
+        } catch (const ss::gate_closed_exception&) {
+            vlog(
+              klog.debug,
+              "Cannot write offset retention version fence for partition {}: "
+              "partition shutting down",
+              p->partition->ntp());
+            co_return;
+
+        } catch (const ss::abort_requested_exception&) {
+            vlog(
+              klog.debug,
+              "Cannot write offset retention version fence for partition {}: "
+              "partition abort requested",
+              p->partition->ntp());
+            co_return;
+
+        } catch (...) {
+            vlog(
+              klog.error,
+              "Exception occurred writing offset retention feature fence for "
+              "partition {}: {}",
+              p->partition,
+              std::current_exception());
+        }
+
+        co_await ss::sleep_abortable(fence_write_retry_delay, p->as);
+    }
 }
 
 group::join_group_stages group_manager::join_group(join_group_request&& r) {
@@ -1181,6 +1297,59 @@ group_manager::offset_fetch(offset_fetch_request&& r) {
     }
 
     return group->handle_offset_fetch(std::move(r)).finally([group] {});
+}
+
+ss::future<offset_delete_response>
+group_manager::offset_delete(offset_delete_request&& r) {
+    auto error = validate_group_status(
+      r.ntp, r.data.group_id, offset_delete_api::key);
+    if (error != error_code::none) {
+        co_return offset_delete_response(error);
+    }
+
+    auto group = get_group(r.data.group_id);
+    if (!group || group->in_state(group_state::dead)) {
+        co_return offset_delete_response(error_code::group_id_not_found);
+    }
+
+    if (!group->in_state(group_state::empty) && !group->is_consumer_group()) {
+        co_return offset_delete_response(error_code::non_empty_group);
+    }
+
+    std::vector<model::topic_partition> requested_deletions;
+    for (const auto& topic : r.data.topics) {
+        for (const auto& partition : topic.partitions) {
+            requested_deletions.emplace_back(
+              topic.name, partition.partition_index);
+        }
+    }
+
+    auto deleted_offsets = group->delete_offsets(requested_deletions);
+    co_await delete_offsets(group, deleted_offsets);
+
+    absl::flat_hash_set<model::topic_partition> deleted_offsets_set;
+    for (auto& tp : deleted_offsets) {
+        deleted_offsets_set.insert(std::move(tp));
+    }
+
+    absl::
+      flat_hash_map<model::topic, std::vector<offset_delete_response_partition>>
+        response_data;
+    for (const auto& tp : requested_deletions) {
+        auto error = kafka::error_code::none;
+        if (!deleted_offsets_set.contains(tp)) {
+            error = kafka::error_code::group_subscribed_to_topic;
+        }
+        response_data[tp.topic].emplace_back(offset_delete_response_partition{
+          .partition_index = tp.partition, .error_code = error});
+    }
+
+    offset_delete_response response(kafka::error_code::none);
+    for (auto& [t, ps] : response_data) {
+        response.data.topics.emplace_back(
+          offset_delete_response_topic{.name = t, .partitions = std::move(ps)});
+    }
+    co_return response;
 }
 
 std::pair<error_code, std::vector<listed_group>>

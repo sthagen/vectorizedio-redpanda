@@ -34,17 +34,17 @@ func NewStatusCommand(fs afero.Fs) *cobra.Command {
 	var format string
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Queries status of current self test run or returns last results",
-		Long: `Returns self-test current or previous state.
+		Short: "Queries the status of the currently running or last completed self-test run",
+		Long: `Returns the status of the currently running or last completed self-test run.
 
 Use this command after invoking 'self-test start' to determine the status of
 the jobs launched. Possible results are:
 
 * One or more jobs still running
-  * Node ids of redpanda nodes that are still running self-tests.
+  * Returns the IDs of Redpanda nodes still running self-tests.
 
 * No jobs running:
-  * Last cached results on all nodes returned.
+  * Returns cached results for all nodes of the last completed test.
 `,
 		Args: cobra.ExactArgs(0),
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -90,6 +90,11 @@ the jobs launched. Possible results are:
 				tw.PrintColumn(header)
 				tw.PrintColumn(strings.Repeat("=", len(header)))
 				tableResults := makeReportTable(report)
+				if len(tableResults) == 0 {
+					tw.PrintColumn("INFO", "No cached results for node")
+					tw.Line()
+					continue
+				}
 				for _, row := range tableResults {
 					all := rowDataAsInterface(row[1:])
 					tw.PrintColumn(row[0], all...)

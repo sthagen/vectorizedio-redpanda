@@ -484,7 +484,7 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
 
     auto batch = std::move(b).build();
     auto ec = co_await do_replicate_commands(std::move(batch), deadline, as);
-    if (!ec) {
+    if (ec) {
         co_return ec;
     }
 
@@ -508,6 +508,9 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
 }
 
 ss::future<> archival_metadata_stm::apply(model::record_batch b) {
+    // Block manifest serialization during mutation of the
+    // manifest since it's asynchronous.
+    auto units = co_await _manifest_lock.get_units();
     if (b.header().type != model::record_batch_type::archival_metadata) {
         _insync_offset = b.last_offset();
         co_return;
