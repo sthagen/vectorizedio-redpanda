@@ -236,6 +236,7 @@ class StatusThread(threading.Thread):
 
     def __init__(self, parent: Service, node, status_cls, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.daemon = True
 
         self._parent = parent
         self._node = node
@@ -583,7 +584,8 @@ class KgoVerifierProducer(KgoVerifierService):
                  fake_timestamp_ms=None,
                  use_transactions=False,
                  transaction_abort_rate=None,
-                 msgs_per_transaction=None):
+                 msgs_per_transaction=None,
+                 rate_limit_bps=None):
         super(KgoVerifierProducer,
               self).__init__(context, redpanda, topic, msg_size, custom_node,
                              debug_logs, trace_logs)
@@ -594,6 +596,7 @@ class KgoVerifierProducer(KgoVerifierService):
         self._use_transactions = use_transactions
         self._transaction_abort_rate = transaction_abort_rate
         self._msgs_per_transaction = msgs_per_transaction
+        self._rate_limit_bps = rate_limit_bps
 
     @property
     def produce_status(self):
@@ -656,6 +659,9 @@ class KgoVerifierProducer(KgoVerifierService):
 
             if self._transaction_abort_rate is not None:
                 cmd = cmd + f' --transaction-abort-rate {self._transaction_abort_rate}'
+
+        if self._rate_limit_bps is not None:
+            cmd = cmd + f' --produce-throughput-bps {self._rate_limit_bps}'
 
         self.spawn(cmd, node)
 

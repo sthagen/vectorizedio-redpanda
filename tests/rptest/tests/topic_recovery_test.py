@@ -310,7 +310,7 @@ class NoDataCase(BaseCase):
 
 
 class EmptySegmentsCase(BaseCase):
-    """Restore topic that has segments in S3, but segments have only non-data 
+    """Restore topic that has segments in S3, but segments have only non-data
     batches (raft configuration, raft configuration).
     """
 
@@ -963,9 +963,14 @@ class AdminApiBasedRestore(FastCheck):
         def wait_for_status():
             r = self.admin.get_topic_recovery_status()
             assert r.status_code == requests.status_codes.codes['ok']
-            if r.json()['state'] == 'inactive':
+            response = r.json()
+            self.logger.debug(f'response {response}')
+            if isinstance(response, dict):
                 return False
-            return r.json()
+            for entry in r.json():
+                if entry['state'] != 'inactive':
+                    return entry
+            return False
 
         status = wait_until_result(wait_for_status, timeout_sec=60)
         self.logger.info(f'got status: {status}')
@@ -1055,7 +1060,7 @@ class TopicRecoveryTest(RedpandaTest):
             checksummer = lambda: queue.put(
                 NodeChecksums(node, self._get_data_log_segment_checksums(node))
             )
-            Thread(target=checksummer).start()
+            Thread(target=checksummer, daemon=True).start()
             self.logger.debug(
                 f"Started checksum thread for {node.account.hostname}..")
         for i in range(num_nodes):

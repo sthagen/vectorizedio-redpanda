@@ -432,6 +432,7 @@ class AdminOperationsFuzzer():
     def start(self):
         self.thread = threading.Thread(target=lambda: self.thread_loop(),
                                        args=())
+        self.thread.daemon = True
         # pre-populate cluster with users and topics
         for i in range(0, self.initial_entities):
             tp = CreateTopicOperation(self.prefix, 1, self.min_replication,
@@ -556,6 +557,9 @@ class AdminOperationsFuzzer():
         return (op, actions[op]())
 
     def stop(self):
+        if self._stopping.is_set():
+            return
+
         self.redpanda.logger.info(
             f"operations history: {json.dumps(self.history)}")
         self._stopping.set()

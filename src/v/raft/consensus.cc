@@ -1328,9 +1328,11 @@ ss::future<> consensus::do_start() {
                 _hbeat = clock_type::time_point::min();
                 auto conf = _configuration_manager.get_latest().brokers();
                 if (!conf.empty() && _self.id() == conf.begin()->id()) {
-                    // for single node scenarios arm immediate election,
-                    // use standard election timeout otherwise.
-                    if (conf.size() > 1) {
+                    // Arm immediate election for single node scenarios
+                    // or for the very first start of the preferred leader
+                    // in a multi-node group.  Otherwise use standard election
+                    // timeout.
+                    if (conf.size() > 1 && _term > model::term_id{0}) {
                         next_election += _jit.next_duration();
                     }
                 } else {
@@ -2227,6 +2229,15 @@ void consensus::maybe_upgrade_configuration(group_configuration& cfg) {
     }
 }
 
+void consensus::update_confirmed_term() {
+    auto prev_confirmed = _confirmed_term;
+    _confirmed_term = _term;
+
+    if (prev_confirmed != _term && is_elected_leader()) {
+        trigger_leadership_notification();
+    }
+}
+
 ss::future<result<replicate_result>> consensus::dispatch_replicate(
   append_entries_request req,
   std::vector<ssx::semaphore_units> u,
@@ -2589,7 +2600,7 @@ consensus::do_maybe_update_leader_commit_idx(ssx::semaphore_units u) {
         return model::offset{};
     });
     if (get_term(majority_match) == _term) {
-        _confirmed_term = _term;
+        update_confirmed_term();
     }
     /**
      * we have to make sure that we do not advance committed_index beyond the
@@ -2605,7 +2616,7 @@ consensus::do_maybe_update_leader_commit_idx(ssx::semaphore_units u) {
     majority_match = std::min(majority_match, _flushed_offset);
 
     if (majority_match > _commit_index && get_term(majority_match) == _term) {
-        _confirmed_term = _term;
+        update_confirmed_term();
         _commit_index = majority_match;
         vlog(_ctxlog.trace, "Leader commit index updated {}", _commit_index);
 
@@ -3338,14 +3349,7 @@ size_t consensus::get_follower_count() const {
 
 ss::future<std::optional<storage::timequery_result>>
 consensus::timequery(storage::timequery_config cfg) {
-    return _log.timequery(cfg).then(
-      [this](std::optional<storage::timequery_result> res) {
-          if (res) {
-              // do not return offset that is earlier raft start offset
-              res->offset = std::max(res->offset, start_offset());
-          }
-          return res;
-      });
+    return _log.timequery(cfg);
 }
 
 } // namespace raft

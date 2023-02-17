@@ -141,7 +141,6 @@ class ScaleParameters:
         self.local_retention_after_warmup = self.retention_bytes
 
         if tiered_storage_enabled:
-            redpanda.disable_cloud_storage_diagnostics()
             # When testing with tiered storage, the tuning goals of the test
             # parameters are different: we want to stress the number of
             # uploaded segments.
@@ -154,7 +153,12 @@ class ScaleParameters:
             # so the test doesn't take too much space on disk.
             self.local_retention_bytes = min(self.retention_bytes,
                                              self.segment_size * 24)
-            self.retention_bytes = 7 * 128 * self.segment_size
+
+            # One of the goals of this test with tiered storage enabled is to
+            # test with a large number of managed cloud segments.
+            # TODO: consider a variant of this test (or another test) that
+            # tests cloud retention.
+            self.retention_bytes = -1
 
             # Set a max upload interval such that won't swamp S3 -- we should
             # already be uploading somewhat frequently given the segment size.
@@ -169,6 +173,8 @@ class ScaleParameters:
                 cloud_storage_housekeeping_interval_ms=
                 cloud_storage_housekeeping_interval_ms,
             )
+        else:
+            self.si_settings = None
 
         # The expect_bandwidth is just for calculating sensible
         # timeouts when waiting for traffic: it is not a scientific
@@ -456,11 +462,15 @@ class ManyPartitionsTest(PreallocNodesTest):
         because we expect the number of items in our bucket to be quite large,
         and for associated ListObjects calls to take a long time.
         """
-        num_segments = self.redpanda.metric_sum(
-            "redpanda_cloud_storage_segments",
-            metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS)
-        self.logger.info(
-            f"Cluster metrics report {num_segments} cloud segments")
+        try:
+            num_segments = self.redpanda.metric_sum(
+                "redpanda_cloud_storage_segments",
+                metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS)
+            self.logger.info(
+                f"Cluster metrics report {num_segments} / {target_segments} cloud segments"
+            )
+        except:
+            return False
         return num_segments >= target_segments
 
     def setUp(self):
@@ -588,8 +598,10 @@ class ManyPartitionsTest(PreallocNodesTest):
         warmup_segment_size = 32 * 1024
         warmup_message_size = 32 * 1024
         target_cloud_segments = 24 * 7 * scale.partition_limit
-        warmup_total_size = max(STRESS_DATA_SIZE,
-                                target_cloud_segments * warmup_segment_size)
+
+        # Be somewhat lenient in generating the desired number of segments.
+        warmup_total_size = int(1.5 * target_cloud_segments *
+                                warmup_segment_size)
 
         # Uploads of tiny segments usually progress at a few thousand
         # per second.  This is dominated by the S3 PUT latency combined
@@ -612,6 +624,7 @@ class ManyPartitionsTest(PreallocNodesTest):
                 f"Tiered storage warmup: waiting {expect_runtime}s for {target_cloud_segments} to be created"
             )
             msg_count = int(warmup_total_size / warmup_message_size)
+            producer = None
             try:
                 producer = KgoVerifierProducer(
                     self.test_context,
@@ -625,11 +638,9 @@ class ManyPartitionsTest(PreallocNodesTest):
                     target_cloud_segments),
                            timeout_sec=expect_runtime,
                            backoff_sec=5)
+            finally:
                 producer.stop()
                 producer.wait(timeout_sec=expect_runtime)
-            except:
-                raise
-            finally:
                 self.free_preallocated_nodes()
         finally:
             self.logger.info(
@@ -760,10 +771,13 @@ class ManyPartitionsTest(PreallocNodesTest):
             "Write+randread stress test complete, verifying sequentially")
 
         # When tiered storage is enabled, don't consume the entire topic, as
-        # that could entail millions of segments from the cloud.
+        # that could entail millions of segments from the cloud. At least
+        # ensure we read enough to download a few segments per partition.
         max_msgs = None
         if scale.tiered_storage_enabled:
-            max_msgs = 10000
+            # FIXME: use an even larger workload
+            # https://github.com/redpanda-data/redpanda/issues/8822
+            max_msgs = 10 * scale.partition_limit
 
         seq_consumer = KgoVerifierSeqConsumer(
             self.test_context,
@@ -1038,7 +1052,7 @@ class ManyPartitionsTest(PreallocNodesTest):
                               cleanup=lambda: self.free_preallocated_nodes(),
                               **repeater_kwargs) as repeater:
             repeater_await_bytes = 1E9
-            if scale.tiered_storage_enabled or not self.dedicated_nodes:
+            if scale.tiered_storage_enabled or not self.redpanda.dedicated_nodes:
                 # Be much more lenient when tiered storage is enabled, since
                 # the repeater incurs reads.
                 repeater_await_bytes = 1E8

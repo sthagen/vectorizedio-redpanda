@@ -631,6 +631,13 @@ class RedpandaService(Service):
         # inspecting storage internals (e.g. number of segments after writing a certain
         # amount of data).
         'log_segment_size_jitter_percent': 0,
+
+        # This is high enough not to interfere with the logic in any tests, while also
+        # providing some background coverage of the connection limit code (i.e. that it
+        # doesn't crash, it doesn't limit when it shouldn't)
+        'kafka_connections_max': 2048,
+        'kafka_connections_max_per_ip': 1024,
+        'kafka_connections_max_overrides': ["1.2.3.4:5"],
     }
 
     logs = {
@@ -673,7 +680,7 @@ class RedpandaService(Service):
                  skip_if_no_redpanda_log: bool = False,
                  pandaproxy_config: Optional[PandaproxyConfig] = None,
                  schema_registry_config: Optional[SchemaRegistryConfig] = None,
-                 enable_kerberos_listener=False):
+                 disable_cloud_storage_diagnostics=False):
         super(RedpandaService, self).__init__(context, num_nodes=num_brokers)
         self._context = context
         self._extra_rp_conf = extra_rp_conf or dict()
@@ -681,7 +688,6 @@ class RedpandaService(Service):
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
         self._pandaproxy_config = pandaproxy_config
         self._schema_registry_config = schema_registry_config
-        self._enable_kerberos_listener = enable_kerberos_listener
 
         if superuser is None:
             superuser = self.SUPERUSER_CREDENTIALS
@@ -739,7 +745,11 @@ class RedpandaService(Service):
             self.set_si_settings(si_settings)
         else:
             self._si_settings = None
-        self._disable_cloud_storage_diagnostics = False
+
+        # Disable saving cloud storage diagnostics. This may be useful for
+        # tests that generate millions of objecst, as collecting diagnostics
+        # may take a significant amount of time.
+        self._disable_cloud_storage_diagnostics = disable_cloud_storage_diagnostics
 
         self.cloud_storage_client: Optional[S3Client] = None
 
@@ -1619,14 +1629,6 @@ class RedpandaService(Service):
         if crashes:
             raise NodeCrash(crashes)
 
-    def disable_cloud_storage_diagnostics(self):
-        """
-        Disable saving cloud storage diagnostics. This may be useful for tests
-        that generate millions of objecst, as collecting diagnostics may take a
-        significant amount of time.
-        """
-        self._disable_cloud_storage_diagnostica = True
-
     def cloud_storage_diagnostics(self):
         """
         When a cloud storage test fails, it is often useful to know what
@@ -1673,6 +1675,9 @@ class RedpandaService(Service):
             if key.endswith('manifest.json') and manifest_dump_limit > 0:
                 manifests_to_dump.append(key)
                 manifest_dump_limit -= 1
+
+            if manifest_dump_limit == 0 and key_dump_limit == 0:
+                break
 
         archive_basename = "cloud_diagnostics.zip"
         archive_path = os.path.join(
@@ -1958,7 +1963,7 @@ class RedpandaService(Service):
         # we need to look for redpanda pid. pids() method returns pids of both
         # nodejs server and redpanda
         try:
-            cmd = "ps ax | grep -i 'redpanda' | grep -v grep | awk '{print $1}'"
+            cmd = "ps ax | grep -i 'redpanda' | grep -v grep | grep -v 'version' | awk '{print $1}'"
             for p in node.account.ssh_capture(cmd,
                                               allow_fail=True,
                                               callback=int):
@@ -2029,26 +2034,24 @@ class RedpandaService(Service):
         # resolution
         fqdn = self.get_node_fqdn(node)
 
-        conf = self.render(
-            "redpanda.yaml",
-            node=node,
-            data_dir=RedpandaService.DATA_DIR,
-            nodes=node_info,
-            node_id=node_id,
-            include_seed_servers=include_seed_servers,
-            seed_servers=self._seed_servers,
-            node_ip=node_ip,
-            enable_kerberos_listener=self._enable_kerberos_listener,
-            kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
-            kafka_kerberos_port=self.KAFKA_KERBEROS_PORT,
-            fqdn=fqdn,
-            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
-            pandaproxy_config=self._pandaproxy_config,
-            schema_registry_config=self._schema_registry_config,
-            superuser=self._superuser,
-            sasl_enabled=self.sasl_enabled(),
-            endpoint_authn_method=self.endpoint_authn_method(),
-            auto_auth=self._security.auto_auth)
+        conf = self.render("redpanda.yaml",
+                           node=node,
+                           data_dir=RedpandaService.DATA_DIR,
+                           nodes=node_info,
+                           node_id=node_id,
+                           include_seed_servers=include_seed_servers,
+                           seed_servers=self._seed_servers,
+                           node_ip=node_ip,
+                           kafka_alternate_port=self.KAFKA_ALTERNATE_PORT,
+                           kafka_kerberos_port=self.KAFKA_KERBEROS_PORT,
+                           fqdn=fqdn,
+                           admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
+                           pandaproxy_config=self._pandaproxy_config,
+                           schema_registry_config=self._schema_registry_config,
+                           superuser=self._superuser,
+                           sasl_enabled=self.sasl_enabled(),
+                           endpoint_authn_method=self.endpoint_authn_method(),
+                           auto_auth=self._security.auto_auth)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)

@@ -20,6 +20,8 @@
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/types.h"
 
+#include <seastar/util/defer.hh>
+
 namespace cluster {
 
 static bool is_id_allocator_topic(model::ntp ntp) {
@@ -388,11 +390,40 @@ ss::future<> partition::stop() {
 
 ss::future<std::optional<storage::timequery_result>>
 partition::timequery(storage::timequery_config cfg) {
+    const bool is_read_replica
+      = _raft->log_config().is_read_replica_mode_enabled();
+    const bool query_before_raft_log_start = _raft->log().start_timestamp()
+                                             > cfg.time;
+
     std::optional<storage::timequery_result> result;
-    bool is_read_replica = _raft->log_config().is_read_replica_mode_enabled();
-    if (
-      _cloud_storage_partition && _cloud_storage_partition->is_data_available()
-      && (is_read_replica || _raft->log().start_timestamp() >= cfg.time)) {
+
+    if (is_read_replica || query_before_raft_log_start) {
+        // We have data in the remote partition, and all the data in the raft
+        // log is ahead of the query timestamp or the topic is a read replica,
+        // so proceed to query the remote partition to try and find the earliest
+        // data that has timestamp >= the query time.
+        co_return co_await cloud_storage_timequery(cfg);
+    }
+
+    result = co_await local_timequery(cfg);
+
+    // It's possible that during the query, our local log was GCed, and the
+    // result may not actually reflect the correct offset for this
+    // partition. If the local log doesn't look like it can serve the query
+    // anymore, query the remote log.
+    if (_raft->log().start_timestamp() > cfg.time) {
+        co_return co_await cloud_storage_timequery(cfg);
+    } else {
+        co_return result;
+    }
+}
+
+ss::future<std::optional<storage::timequery_result>>
+partition::cloud_storage_timequery(storage::timequery_config cfg) {
+    const bool may_read_from_cloud
+      = _cloud_storage_partition
+        && _cloud_storage_partition->is_data_available();
+    if (may_read_from_cloud) {
         // We have data in the remote partition, and all the data in the raft
         // log is ahead of the query timestamp or the topic is a read replica,
         // so proceed to query the remote partition to try and find the earliest
@@ -406,15 +437,25 @@ partition::timequery(storage::timequery_config cfg) {
 
         // remote_partition pre-translates offsets for us, so no call into
         // the offset translator here
-        auto cloud_result = co_await _cloud_storage_partition->timequery(cfg);
-        if (cloud_result) {
-            co_return cloud_result;
+        auto result = co_await _cloud_storage_partition->timequery(cfg);
+        if (result) {
+            vlog(
+              clusterlog.debug,
+              "timequery (cloud) {} t={} max_offset(r)={} result(r)={}",
+              _raft->ntp(),
+              cfg.time,
+              cfg.max_offset,
+              result->offset);
         }
 
-        // Fall-through: if cfg.time is ahead of the end of the remote_partition
-        // data, search for it in the local data.
+        co_return result;
     }
 
+    co_return std::nullopt;
+}
+
+ss::future<std::optional<storage::timequery_result>>
+partition::local_timequery(storage::timequery_config cfg) {
     vlog(
       clusterlog.debug,
       "timequery (raft) {} t={} max_offset(k)={}",
@@ -422,10 +463,10 @@ partition::timequery(storage::timequery_config cfg) {
       cfg.time,
       cfg.max_offset);
 
-    // Translate input (kafka) offset into raft offset
     cfg.max_offset = _raft->get_offset_translator_state()->to_log_offset(
       cfg.max_offset);
-    result = co_await _raft->timequery(cfg);
+
+    auto result = co_await _raft->timequery(cfg);
     if (result) {
         vlog(
           clusterlog.debug,
@@ -475,7 +516,8 @@ ss::future<> partition::update_configuration(topic_properties properties) {
     auto& old_ntp_config = _raft->log().config();
     auto new_ntp_config = properties.get_ntp_cfg_overrides();
 
-    // Before applying change, consider whether it changes cloud storage mode
+    // Before applying change, consider whether it changes cloud storage
+    // mode
     bool cloud_storage_changed = false;
     bool new_archival = new_ntp_config.shadow_indexing_mode
                         && model::is_archival_enabled(
@@ -491,8 +533,8 @@ ss::future<> partition::update_configuration(topic_properties properties) {
     co_await _raft->log().update_configuration(new_ntp_config);
 
     // If this partition's cloud storage mode changed, rebuild the archiver.
-    // This must happen after raft update, because it reads raft's ntp_config
-    // to decide whether to construct an archiver.
+    // This must happen after raft update, because it reads raft's
+    // ntp_config to decide whether to construct an archiver.
     if (cloud_storage_changed) {
         vlog(
           clusterlog.debug,
@@ -534,8 +576,8 @@ partition::get_term_last_offset(model::term_id term) const {
     if (!o) {
         return std::nullopt;
     }
-    // Kafka defines leader epoch last offset as a first offset of next leader
-    // epoch
+    // Kafka defines leader epoch last offset as a first offset of next
+    // leader epoch
     return model::next_offset(*o);
 }
 
@@ -545,8 +587,8 @@ partition::get_cloud_term_last_offset(model::term_id term) const {
     if (!o) {
         return std::nullopt;
     }
-    // Kafka defines leader epoch last offset as a first offset of next leader
-    // epoch
+    // Kafka defines leader epoch last offset as a first offset of next
+    // leader epoch
     return model::next_offset(kafka::offset_cast(*o));
 }
 
@@ -615,6 +657,49 @@ void partition::set_topic_config(
     if (_archiver) {
         _archiver->notify_topic_config();
     }
+}
+
+ss::future<std::error_code>
+partition::transfer_leadership(std::optional<model::node_id> target) {
+    vlog(
+      clusterlog.debug,
+      "Transferring {} leadership to {}",
+      ntp(),
+      target.value_or(model::node_id{-1}));
+
+    // Some state machines need a preparatory phase to efficiently transfer
+    // leadership: invoke this, and hold the lock that they return until
+    // the leadership transfer attempt is complete.
+    ss::basic_rwlock<>::holder stm_prepare_lock;
+    if (_rm_stm) {
+        stm_prepare_lock = co_await _rm_stm->prepare_transfer_leadership();
+    } else if (_tm_stm) {
+        stm_prepare_lock = co_await _tm_stm->prepare_transfer_leadership();
+    }
+
+    std::optional<ss::deferred_action<std::function<void()>>> complete_archiver;
+    auto archival_timeout
+      = config::shard_local_cfg().cloud_storage_graceful_transfer_timeout_ms();
+    if (_archiver && archival_timeout.has_value()) {
+        complete_archiver.emplace(
+          [a = _archiver.get()]() { a->complete_transfer_leadership(); });
+        bool archiver_clean = co_await _archiver->prepare_transfer_leadership(
+          archival_timeout.value());
+        if (!archiver_clean) {
+            // This is legal: if we are very tight on bandwidth to S3, then it
+            // can take longer than the available timeout for an upload of
+            // a large segment to complete.  If this happens, we will leak
+            // an object, but retain a consistent+correct manifest when
+            // the new leader writes it.
+            vlog(
+              clusterlog.warn,
+              "Timed out waiting for {} uploads to complete before "
+              "transferring leadership: proceeding anyway",
+              ntp());
+        }
+    }
+
+    co_return co_await _raft->do_transfer_leadership(target);
 }
 
 std::ostream& operator<<(std::ostream& o, const partition& x) {
