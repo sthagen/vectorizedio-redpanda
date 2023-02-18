@@ -291,7 +291,7 @@ class SISettings:
                  cloud_storage_readreplica_manifest_sync_timeout_ms: Optional[
                      int] = None,
                  bypass_bucket_creation: bool = False,
-                 cloud_storage_housekeeping_interval_ms=None):
+                 cloud_storage_housekeeping_interval_ms: Optional[int] = None):
         self.cloud_storage_type = CloudStorageType.S3
         if hasattr(test_context, 'injected_args') \
         and test_context.injected_args is not None \
@@ -403,10 +403,6 @@ class SISettings:
         elif self.cloud_storage_type == CloudStorageType.ABS:
             return self._cloud_storage_azure_container
 
-    @cloud_storage_bucket.setter
-    def cloud_storage_bucket(self, bucket: str):
-        self._cloud_storage_bucket = bucket
-
     # Call this to update the extra_rp_conf
     def update_rp_conf(self, conf) -> dict[str, Any]:
         if self.cloud_storage_type == CloudStorageType.S3:
@@ -451,7 +447,6 @@ class SISettings:
         if self.cloud_storage_housekeeping_interval_ms:
             conf[
                 'cloud_storage_housekeeping_interval_ms'] = self.cloud_storage_housekeeping_interval_ms
-
         return conf
 
 
@@ -1173,11 +1168,15 @@ class RedpandaService(Service):
         a test failure until the end of the timeout, even if redpanda
         already crashed.
         """
+
+        t_initial = time.time()
+        # How long to delay doing redpanda liveness checks, to make short waits more efficient
+        grace_period = 15
+
         def wrapped():
             r = fn()
-            if not r:
-                # If we're going to wait + retry, check the cluster is
-                # up before doing so.
+            if not r and time.time() > t_initial + grace_period:
+                # Check the cluster is up before waiting + retrying
                 assert self.all_up()
             return r
 
