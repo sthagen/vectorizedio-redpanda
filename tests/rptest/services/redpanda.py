@@ -149,8 +149,12 @@ class MetricsEndpoint(Enum):
 
 
 class CloudStorageType(IntEnum):
+    # Use AWS S3 on dedicated nodes, or minio in docker
     S3 = 1
+    # Use Azure ABS on dedicated nodes, or azurite in docker
     ABS = 2
+    # Auto-select the cloud's storage service on dedicated nodes, or use minio+S3 on docker
+    AUTO = 3
 
 
 def one_or_many(value):
@@ -265,6 +269,7 @@ class SISettings:
 
     These settings are altered in RedpandaTest if running on AWS.
     """
+    GLOBAL_CLOUD_STORAGE_CRED_SOURCE_KEY = "cloud_store_cred_source"
     GLOBAL_S3_ACCESS_KEY = "s3_access_key"
     GLOBAL_S3_SECRET_KEY = "s3_secret_key"
     GLOBAL_S3_REGION_KEY = "s3_region"
@@ -272,10 +277,19 @@ class SISettings:
     GLOBAL_ABS_STORAGE_ACCOUNT = "abs_storage_account"
     GLOBAL_ABS_SHARED_KEY = "abs_shared_key"
 
+    DEDICATED_NODE_KEY = "dedicated_nodes"
+
+    # The account and key to use with local Azurite testing.
+    # These are the default Azurite (Azure emulator) storage account and shared key.
+    # Both are readily available in the docs.
+    ABS_AZURITE_ACCOUNT = "devstoreaccount1"
+    ABS_AZURITE_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
     def __init__(self,
                  test_context,
                  *,
                  log_segment_size: int = 16 * 1000000,
+                 cloud_storage_credentials_source: str = 'config_file',
                  cloud_storage_access_key: str = 'panda-user',
                  cloud_storage_secret_key: str = 'panda-secret',
                  cloud_storage_region: str = 'panda-region',
@@ -292,14 +306,33 @@ class SISettings:
                      int] = None,
                  bypass_bucket_creation: bool = False,
                  cloud_storage_housekeeping_interval_ms: Optional[int] = None):
-        self.cloud_storage_type = CloudStorageType.S3
+
+        self.cloud_storage_type = CloudStorageType.AUTO
         if hasattr(test_context, 'injected_args') \
         and test_context.injected_args is not None \
         and 'cloud_storage_type' in test_context.injected_args:
             self.cloud_storage_type = test_context.injected_args[
                 'cloud_storage_type']
 
+        if self.cloud_storage_type == CloudStorageType.AUTO:
+            dedicated_nodes = test_context.globals.get(self.DEDICATED_NODE_KEY,
+                                                       False)
+            if dedicated_nodes:
+                abs_shared_key = test_context.globals.get(
+                    self.GLOBAL_ABS_SHARED_KEY, None)
+                s3_region = test_context.globals.get(self.GLOBAL_S3_REGION_KEY,
+                                                     None)
+                if abs_shared_key is not None:
+                    self.cloud_storage_type = CloudStorageType.ABS
+                elif s3_region is not None:
+                    self.cloud_storage_type = CloudStorageType.S3
+                else:
+                    raise RuntimeError("Cannot autodetect cloud storage")
+            else:
+                self.cloud_storage_type = CloudStorageType.S3
+
         if self.cloud_storage_type == CloudStorageType.S3:
+            self.cloud_storage_credentials_source = cloud_storage_credentials_source
             self.cloud_storage_access_key = cloud_storage_access_key
             self.cloud_storage_secret_key = cloud_storage_secret_key
             self.cloud_storage_region = cloud_storage_region
@@ -308,10 +341,8 @@ class SISettings:
             self.cloud_storage_api_endpoint = cloud_storage_api_endpoint
             self.cloud_storage_api_endpoint_port = cloud_storage_api_endpoint_port
         elif self.cloud_storage_type == CloudStorageType.ABS:
-            # These are the default Azurite (Azure emulator) storage account and shared key.
-            # Both are readily available in the docs.
-            self.cloud_storage_azure_shared_key = 'Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
-            self.cloud_storage_azure_storage_account = 'devstoreaccount1'
+            self.cloud_storage_azure_shared_key = self.ABS_AZURITE_KEY
+            self.cloud_storage_azure_storage_account = self.ABS_AZURITE_ACCOUNT
 
             self._cloud_storage_azure_container = f'panda-container-{uuid.uuid1()}'
             self.cloud_storage_api_endpoint = f'{self.cloud_storage_azure_storage_account}.blob.localhost'
@@ -367,6 +398,8 @@ class SISettings:
         Update based on the test context, to e.g. consume AWS access keys in
         the globals dictionary.
         """
+        cloud_storage_credentials_source = test_context.globals.get(
+            self.GLOBAL_CLOUD_STORAGE_CRED_SOURCE_KEY, 'config_file')
         cloud_storage_access_key = test_context.globals.get(
             self.GLOBAL_S3_ACCESS_KEY, None)
         cloud_storage_secret_key = test_context.globals.get(
@@ -375,7 +408,15 @@ class SISettings:
             self.GLOBAL_S3_REGION_KEY, None)
 
         # Enable S3 if AWS creds were given at globals
-        if cloud_storage_access_key and cloud_storage_secret_key:
+        if cloud_storage_credentials_source == 'aws_instance_metadata':
+            logger.info("Running on AWS S3, setting IAM roles")
+            self.cloud_storage_credentials_source = cloud_storage_credentials_source
+            self.cloud_storage_access_key = None
+            self.cloud_storage_secret_key = None
+            self.endpoint_url = None  # None so boto auto-gens the endpoint url
+            self.cloud_storage_disable_tls = False  # SI will fail to create archivers if tls is disabled
+            self.cloud_storage_region = cloud_storage_region
+        elif cloud_storage_credentials_source == 'config_file' and cloud_storage_access_key and cloud_storage_secret_key:
             logger.info("Running on AWS S3, setting credentials")
             self.cloud_storage_access_key = cloud_storage_access_key
             self.cloud_storage_secret_key = cloud_storage_secret_key
@@ -393,7 +434,7 @@ class SISettings:
                 logger.info(msg)
                 raise Exception(msg)
             else:
-                logger.debug(
+                logger.info(
                     'No AWS credentials supplied, assuming minio defaults')
 
     @property
@@ -406,6 +447,8 @@ class SISettings:
     # Call this to update the extra_rp_conf
     def update_rp_conf(self, conf) -> dict[str, Any]:
         if self.cloud_storage_type == CloudStorageType.S3:
+            conf[
+                "cloud_storage_credentials_source"] = self.cloud_storage_credentials_source
             conf["cloud_storage_access_key"] = self.cloud_storage_access_key
             conf["cloud_storage_secret_key"] = self.cloud_storage_secret_key
             conf["cloud_storage_region"] = self.cloud_storage_region
@@ -953,6 +996,43 @@ class RedpandaService(Service):
                    backoff_sec=self._startup_poll_interval(first_start),
                    err_msg="Cluster membership did not stabilize")
 
+    def setup_azurite_dns(self):
+        """
+        Azure API relies on <container>.something DNS.  Doing DNS configuration
+        with docker/podman is unstable, as it isn't consistent across operating
+        systems.  Instead do it more crudely but robustly, but editing /etc/hosts.
+        """
+        azurite_ip = socket.gethostbyname("azurite")
+        azurite_dns = f"{self._si_settings.cloud_storage_azure_storage_account}.blob.localhost"
+
+        def update_hosts_file(node_name, path):
+            ducktape_hosts = open(path, "r").read()
+            if azurite_dns not in ducktape_hosts:
+                ducktape_hosts += f"\n{azurite_ip}   {azurite_dns}\n"
+                self.logger.info(
+                    f"Adding Azurite entry to {path} for node {node_name}, new content:"
+                )
+                self.logger.info(ducktape_hosts)
+                with open(path, 'w') as f:
+                    f.write(ducktape_hosts)
+            else:
+                self.logger.debug(
+                    f"Azurite /etc/hosts entry already present on {node_name}:"
+                )
+                self.logger.debug(ducktape_hosts)
+
+        # Edit /etc/hosts on the node where ducktape is running
+        update_hosts_file("ducktape", "/etc/hosts")
+
+        def setup_node_dns(node):
+            tmpfile = f"/tmp/{node.name}_hosts"
+            node.account.copy_from(f"/etc/hosts", tmpfile)
+            update_hosts_file(node.name, tmpfile)
+            node.account.copy_to(tmpfile, f"/etc/hosts")
+
+        # Edit /etc/hosts on Redpanda nodes
+        self._for_nodes(self.nodes, setup_node_dns, parallel=True)
+
     def start(self,
               nodes=None,
               clean_nodes=True,
@@ -980,6 +1060,9 @@ class RedpandaService(Service):
         first_start = self._start_time < 0
         if first_start:
             self._start_time = time.time()
+
+            if self._si_settings and self._si_settings.cloud_storage_type is CloudStorageType.ABS and self._si_settings.cloud_storage_azure_storage_account == SISettings.ABS_AZURITE_ACCOUNT:
+                self.setup_azurite_dns()
 
         self.logger.debug(
             self.who_am_i() +
@@ -1656,7 +1739,7 @@ class RedpandaService(Service):
         # In case it's a big test, do not exhaustively log every object
         # or dump every manifest
         key_dump_limit = 10000
-        manifest_dump_limit = 10
+        manifest_dump_limit = 128
 
         self.logger.info(
             f"Gathering cloud storage diagnostics in bucket {self._si_settings.cloud_storage_bucket}"
