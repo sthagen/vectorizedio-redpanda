@@ -929,6 +929,12 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt,
       security::tls::validate_rules)
+  , kafka_enable_partition_reassignment(
+      *this,
+      "kafka_enable_partition_reassignment",
+      "Enable the Kafka partition reassignment API",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      true)
   , controller_backend_housekeeping_interval_ms(
       *this,
       "controller_backend_housekeeping_interval_ms",
@@ -1627,6 +1633,14 @@ configuration::configuration()
       "the data directory. Redpanda will refuse to start if it is not found.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       false)
+  , memory_abort_on_alloc_failure(
+      *this,
+      "memory_abort_on_alloc_failure",
+      "If true, the redpanda process will terminate immediately when an "
+      "allocation cannot be satisfied due to memory exhasution. If false, an "
+      "exception is thrown instead.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , enable_metrics_reporter(
       *this,
       "enable_metrics_reporter",
@@ -1742,26 +1756,6 @@ configuration::configuration()
       "in controller configuration operations limit",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt)
-  , kafka_throughput_limit_cluster_in_bps(
-      *this,
-      "kafka_throughput_limit_cluster_in_bps",
-      "Cluster wide throughput ingress limit - maximum kafka traffic "
-      "throughput allowed on the ingress side of the entire cluster, in "
-      "bytes/s. Default is no limit. In the current version, it is not yet "
-      "guaranteed to limit the throughput.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      std::nullopt,
-      {.min = 1})
-  , kafka_throughput_limit_cluster_out_bps(
-      *this,
-      "kafka_throughput_limit_cluster_out_bps",
-      "Cluster wide throughput egress limit - maximum kafka traffic "
-      "throughput allowed on the egress side of the entire cluster, in "
-      "bytes/s. Default is no limit. In the current version, it is not yet "
-      "guaranteed to limit the throughput.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      std::nullopt,
-      {.min = 1})
   , kafka_throughput_limit_node_in_bps(
       *this,
       "kafka_throughput_limit_node_in_bps",
