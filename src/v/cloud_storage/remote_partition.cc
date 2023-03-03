@@ -534,8 +534,13 @@ remote_partition::get_term_last_offset(model::term_id term) const {
         }
     }
     // if last segment term is equal to the one we look for return it
-    if (_manifest.rbegin()->second.segment_term == term) {
-        return _manifest.rbegin()->second.committed_kafka_offset();
+    auto last = _manifest.last_segment();
+    vassert(
+      last.has_value(),
+      "The manifest for {} is not expected to be empty",
+      _manifest.get_ntp());
+    if (last->segment_term == term) {
+        return last->committed_kafka_offset();
     }
 
     return std::nullopt;
@@ -599,11 +604,15 @@ ss::future<> remote_partition::stop() {
     // segments are being stopped.
     decltype(_segments) segments_to_stop;
     segments_to_stop.swap(_segments);
-    for (auto& [offset, segment] : segments_to_stop) {
-        vlog(
-          _ctxlog.debug, "remote partition stop {}", segment->base_rp_offset());
-        co_await segment->stop();
-    }
+    co_await ss::max_concurrent_for_each(
+      segments_to_stop, 200, [this](auto& iter) {
+          auto& [offset, segment] = iter;
+          vlog(
+            _ctxlog.debug,
+            "remote partition stop {}",
+            segment->base_rp_offset());
+          return segment->stop();
+      });
 
     // We may have some segment or reader objects enqueued for stop in
     // the shared eviction queue: must flush it, or they can outlive

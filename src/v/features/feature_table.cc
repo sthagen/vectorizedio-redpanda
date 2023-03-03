@@ -108,12 +108,13 @@ std::string_view to_string_view(feature_state::state s) {
 //  22.2.1 -> 5  (22.2.6 later proceeds to version 6)
 //  22.3.1 -> 7  (22.3.6 later proceeds to verison 8)
 //  23.1.1 -> 9
+//  23.2.1 -> 10
 //
 // Although some previous stable branches have included feature version
 // bumps, this is _not_ the intended usage, as stable branches are
 // meant to be safely downgradable within the branch, and new features
 // imply that new data formats may be written.
-static constexpr cluster_version latest_version = cluster_version{9};
+static constexpr cluster_version latest_version = cluster_version{10};
 
 // The earliest version we can upgrade from.  This is the version that
 // a freshly initialized node will start at: e.g. a 23.1 Redpanda joining
@@ -241,7 +242,7 @@ void feature_table::set_active_version(
       && _original_version == invalid_version) {
         // Rely on controller log replay to call us first with
         // the first version the cluster ever agreed upon.
-        _original_version = v;
+        set_original_version(v);
     }
 
     for (auto& fs : _feature_state) {
@@ -295,7 +296,7 @@ void feature_table::bootstrap_original_version(cluster_version v) {
           v);
     }
 
-    _original_version = v;
+    set_original_version(v);
 
     // No on_update() call needed: bootstrap version is only advisory and
     // does not drive the feature state machines.
@@ -517,6 +518,14 @@ feature_table::decode_version_fence(model::record_batch batch) {
           key));
     }
     return serde::from_iobuf<version_fence>(rec.release_value());
+}
+
+void feature_table::set_original_version(cluster::cluster_version v) {
+    _original_version = v;
+    if (v != cluster::invalid_version) {
+        config::shard_local_cfg().notify_original_version(
+          config::legacy_version{v});
+    }
 }
 
 } // namespace features

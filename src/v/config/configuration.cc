@@ -188,7 +188,7 @@ configuration::configuration()
       "Maximum number of partitions which may be allocated to one shard (CPU "
       "core)",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      7000,
+      1000,
       {
         .min = 16,    // Forbid absurdly small values that would prevent most
                       // practical workloads from running
@@ -196,7 +196,8 @@ configuration::configuration()
                       // systems will most likely hit issues far before reaching
                       // this.  This property is principally intended to be
                       // tuned downward from the default, not upward.
-      })
+      },
+      legacy_default<uint32_t>(7000, legacy_version{9}))
   , topic_partitions_reserve_shard0(
       *this,
       "topic_partitions_reserve_shard0",
@@ -1320,6 +1321,20 @@ configuration::configuration()
       "waiting.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       5s)
+  , cloud_storage_backend(
+      *this,
+      "cloud_storage_backend",
+      "Optional cloud storage backend variant used to select API capabilities. "
+      "If not supplied, will be inferred from other configuration parameters.",
+      {.needs_restart = needs_restart::yes,
+       .example = "aws",
+       .visibility = visibility::user},
+      model::cloud_storage_backend::unknown,
+      {model::cloud_storage_backend::aws,
+       model::cloud_storage_backend::google_s3_compat,
+       model::cloud_storage_backend::azure,
+       model::cloud_storage_backend::minio,
+       model::cloud_storage_backend::unknown})
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",

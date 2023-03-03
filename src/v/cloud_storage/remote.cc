@@ -55,7 +55,14 @@ remote::remote(
         [](auto&& cfg) { return cfg.disable_public_metrics; }, conf))),
       *_materialized)
   , _azure_shared_key_binding(
-      config::shard_local_cfg().cloud_storage_azure_shared_key.bind()) {
+      config::shard_local_cfg().cloud_storage_azure_shared_key.bind())
+  , _cloud_storage_backend{
+      cloud_storage_clients::infer_backend_from_configuration(
+        conf, cloud_credentials_source)} {
+    vlog(
+      cst_log.info,
+      "remote initialized with backend {}",
+      _cloud_storage_backend);
     // If the credentials source is from config file, bypass the background
     // op to refresh credentials periodically, and load pool with static
     // credentials right now.
@@ -130,6 +137,7 @@ ss::future<> remote::stop() {
     co_await _materialized->stop();
     co_await _pool.stop();
     co_await _gate.close();
+    co_await _auth_refresh_bg_op.stop();
     cst_log.debug("Stopped remote...");
 }
 
@@ -1055,7 +1063,6 @@ void auth_refresh_bg_op::do_start_auth_refresh_op(
               _client_conf);
             _refresh_credentials.emplace(cloud_roles::make_refresh_credentials(
               _cloud_credentials_source,
-              _gate,
               _as,
               std::move(credentials_update_cb),
               region_name));
@@ -1106,6 +1113,14 @@ cloud_roles::credentials auth_refresh_bg_op::build_static_credentials() const {
           }
       },
       _client_conf);
+}
+
+ss::future<> auth_refresh_bg_op::stop() {
+    if (
+      ss::this_shard_id() == auth_refresh_shard_id
+      && _refresh_credentials.has_value()) {
+        co_await _refresh_credentials.value().stop();
+    }
 }
 
 cloud_storage_clients::object_tag_formatter

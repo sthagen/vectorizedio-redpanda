@@ -27,7 +27,8 @@ from rptest.util import (
     produce_until_segments,
     wait_until_segments,
 )
-from rptest.utils.si_utils import S3Snapshot
+from rptest.utils.si_utils import BucketView
+from rptest.utils.mode_checks import skip_azure_blob_storage
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import SISettings
 from rptest.services.kgo_verifier_services import (
@@ -373,13 +374,22 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
         self.installer = self.redpanda._installer
         self.rpk = RpkTool(self.redpanda)
 
+    # This test starts the Redpanda service inline (see 'install_and_start') at the beginning
+    # of the test body. By default, in the Azure CDT env, the service startup
+    # logic attempts to set the azure specific cluster configs.
+    # However, these did not exist prior to v23.1 and the test would fail
+    # before it can be skipped.
     def setUp(self):
+        pass
+
+    def install_and_start(self):
         self.prev_version = \
             self.installer.highest_from_prior_feature_version(RedpandaInstaller.HEAD)
         self.installer.install(self.redpanda.nodes, self.prev_version)
         super().setUp()
 
     @cluster(num_nodes=4, log_allow_list=RESTART_LOG_ALLOW_LIST)
+    @skip_azure_blob_storage
     def test_rolling_upgrade(self):
         """
         Verify that when tiered storage writes happen during a rolling upgrade,
@@ -388,6 +398,8 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
 
         This ensures that rollbacks remain possible.
         """
+        self.install_and_start()
+
         initial_version = Version(
             self.redpanda.get_version(self.redpanda.nodes[0]))
 
@@ -447,13 +459,11 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
             produce(p, n_records)
 
         # Wait for archiver to upload to S3
-        for p in range(0, n_partitions):
-            wait_for_local_storage_truncate(self.redpanda,
-                                            topic,
-                                            p,
-                                            local_retention_bytes +
-                                            segment_bytes,
-                                            timeout_sec=30)
+        wait_for_local_storage_truncate(self.redpanda,
+                                        topic,
+                                        target_bytes=local_retention_bytes +
+                                        segment_bytes,
+                                        timeout_sec=30)
 
         # Restart 2/3 nodes, leave last node on old version
         self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
@@ -490,12 +500,12 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
         else:
             # In the general case, S3 PUTs are permitted during upgrade, so we should
             # see local storage getting truncated
-            wait_for_local_storage_truncate(self.redpanda,
-                                            topic,
-                                            newdata_p,
-                                            local_retention_bytes +
-                                            segment_bytes,
-                                            timeout_sec=30)
+            wait_for_local_storage_truncate(
+                self.redpanda,
+                topic,
+                partition_idx=newdata_p,
+                target_bytes=local_retention_bytes + segment_bytes,
+                timeout_sec=30)
 
         # Move leadership to the old version node and check the partition is readable
         # from there.
@@ -523,8 +533,9 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
 
         wait_for_local_storage_truncate(self.redpanda,
                                         topic,
-                                        newdata_p,
-                                        local_retention_bytes + segment_bytes,
+                                        partition_idx=newdata_p,
+                                        target_bytes=local_retention_bytes +
+                                        segment_bytes,
                                         timeout_sec=30)
 
 
@@ -555,11 +566,20 @@ class UpgradeFrom22_2_7VerifyMigratedRetentionSettings(RedpandaTest):
         self.rpk = RpkTool(self.redpanda)
         self.s3_bucket_name = si_settings.cloud_storage_bucket
 
+    # This test starts the Redpanda service inline (see 'install_and_start') at the beginning
+    # of the test body. By default, in the Azure CDT env, the service startup
+    # logic attempts to set the azure specific cluster configs.
+    # However, these did not exist prior to v23.1 and the test would fail
+    # before it can be skipped.
     def setUp(self):
+        pass
+
+    def install_and_start(self):
         self.installer.install(self.redpanda.nodes, (22, 2, 7))
         super().setUp()
 
     @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
+    @skip_azure_blob_storage
     def test_upgrade(self):
         """
         Verify that there is no data loss with topics that have been 'upgraded',
@@ -569,6 +589,8 @@ class UpgradeFrom22_2_7VerifyMigratedRetentionSettings(RedpandaTest):
         Their respective new cloud retention settings should be 'infinity' and
         there should be no truncations or compactions performed on the partitions
         """
+        self.install_and_start()
+
         total_segments = 10
         topic = TopicSpec(name='migrating-topic',
                           partition_count=1,
@@ -588,9 +610,7 @@ class UpgradeFrom22_2_7VerifyMigratedRetentionSettings(RedpandaTest):
         produce_until_segments(self.redpanda, topic.name, 0, total_segments)
 
         def cloud_log_size() -> int:
-            s3_snapshot = S3Snapshot([topic],
-                                     self.redpanda.cloud_storage_client,
-                                     self.s3_bucket_name, self.logger)
+            s3_snapshot = BucketView(self.redpanda, topics=[topic])
             cloud_log_size = s3_snapshot.cloud_log_size_for_ntp(topic.name, 0)
             self.logger.debug(f"Current cloud log size is: {cloud_log_size}")
             return cloud_log_size

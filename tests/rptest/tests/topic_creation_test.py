@@ -23,7 +23,8 @@ from rptest.services.redpanda import ResourceSettings, SISettings
 from rptest.services.redpanda_installer import RedpandaInstaller
 from rptest.services.rpk_producer import RpkProducer
 from rptest.clients.kafka_cli_tools import KafkaCliTools
-from rptest.util import wait_for_segments_removal, expect_exception
+from rptest.util import wait_for_local_storage_truncate, expect_exception
+from rptest.utils.mode_checks import skip_azure_blob_storage
 from rptest.clients.kcl import KCL
 
 from ducktape.utils.util import wait_until
@@ -478,25 +479,43 @@ class CreateTopicUpgradeTest(RedpandaTest):
         self.installer = self.redpanda._installer
         self.rpk = RpkTool(self.redpanda)
 
+    # This test starts the Redpanda service inline (see 'install_and_start') at the beginning
+    # of the test body. By default, in the Azure CDT env, the service startup
+    # logic attempts to set the azure specific cluster configs.
+    # However, these did not exist prior to v23.1 and the test would fail
+    # before it can be skipped.
     def setUp(self):
+        pass
+
+    def install_and_start(self):
         self.installer.install(
             self.redpanda.nodes,
             (22, 2),
         )
         self.redpanda.start()
 
-    def _populate_tiered_storage_topic(self, topic_name):
-        for n in range(0, 8):
-            self.rpk.produce(topic_name, "key", "b" * 512 * 1024)
-        wait_for_segments_removal(self.redpanda, topic_name, 0, 1)
+    def _populate_tiered_storage_topic(self, topic_name, local_retention):
+        # Write 3x the local retention, then wait for local storage to be
+        # trimmed back accordingly.
+        bytes = local_retention * 3
+        msg_size = 131072
+        msg_count = bytes // msg_size
+        for n in range(0, msg_count):
+            self.rpk.produce(topic_name, "key", "b" * msg_size)
+
+        wait_for_local_storage_truncate(self.redpanda,
+                                        topic=topic_name,
+                                        target_bytes=local_retention)
 
     @cluster(num_nodes=3)
+    @skip_azure_blob_storage
     def test_cloud_storage_sticky_enablement_v22_2_to_v22_3(self):
         """
         In Redpanda 22.3, the cluster defaults for cloud storage change
         from being applied at runtime to being sticky at creation time,
         or at upgrade time.
         """
+        self.install_and_start()
 
         # Switch on tiered storage using cluster properties, not topic properties
         self.redpanda.set_cluster_config(
@@ -555,14 +574,18 @@ class CreateTopicUpgradeTest(RedpandaTest):
         assert described['redpanda.remote.read'] == ('false', 'DEFAULT_CONFIG')
 
     @cluster(num_nodes=3)
+    @skip_azure_blob_storage
     def test_retention_config_on_upgrade_from_v22_2_to_v22_3(self):
+        self.install_and_start()
+
         self.rpk.create_topic("test-topic-with-retention",
                               config={"retention.bytes": 10000})
 
+        local_retention = 10000
         self.rpk.create_topic(
             "test-si-topic-with-retention",
             config={
-                "retention.bytes": 10000,
+                "retention.bytes": str(local_retention),
                 "redpanda.remote.write": "true",
                 "redpanda.remote.read": "true",
                 # Small segment.bytes so that we can readily
@@ -572,7 +595,8 @@ class CreateTopicUpgradeTest(RedpandaTest):
 
         # Write a few megabytes of data, enough to spill to S3.  This will be used
         # later for checking that deletion behavior is correct on legacy topics.
-        self._populate_tiered_storage_topic("test-si-topic-with-retention")
+        self._populate_tiered_storage_topic("test-si-topic-with-retention",
+                                            local_retention)
 
         # This topic is like "test-si-topic-with-retention", but instead
         # of settings its properties at creation time, set them via
@@ -650,10 +674,14 @@ class CreateTopicUpgradeTest(RedpandaTest):
         for (new_topic_name,
              enable_si) in [("test-topic-post-upgrade-nosi", False),
                             ("test-topic-post-upgrade-si", True)]:
+
+            segment_bytes = 1000000
+            local_retention = segment_bytes * 2
+            retention_bytes = segment_bytes * 10
             create_config = {
-                "retention.bytes": 10000,
-                "retention.local.target.bytes": 5000,
-                "segment.bytes": 1000000
+                "retention.bytes": retention_bytes,
+                "retention.local.target.bytes": local_retention,
+                "segment.bytes": segment_bytes
             }
             if enable_si:
                 create_config['redpanda.remote.write'] = 'true'
@@ -662,13 +690,13 @@ class CreateTopicUpgradeTest(RedpandaTest):
             self.rpk.create_topic(new_topic_name, config=create_config)
             new_config = self.rpk.describe_topic_configs(new_topic_name)
             assert new_config["redpanda.remote.delete"][0] == "true"
-            assert new_config["retention.bytes"] == ("10000",
+            assert new_config["retention.bytes"] == (str(retention_bytes),
                                                      "DYNAMIC_TOPIC_CONFIG")
             assert new_config["retention.ms"][1] == "DEFAULT_CONFIG"
             assert new_config["retention.local.target.ms"][
                 1] == "DEFAULT_CONFIG"
             assert new_config["retention.local.target.bytes"] == (
-                "5000", "DYNAMIC_TOPIC_CONFIG")
+                str(local_retention), "DYNAMIC_TOPIC_CONFIG")
             if enable_si:
                 assert new_config['redpanda.remote.write'][0] == "true"
                 assert new_config['redpanda.remote.read'][0] == "true"
@@ -678,7 +706,8 @@ class CreateTopicUpgradeTest(RedpandaTest):
             assert new_config['redpanda.remote.delete'][0] == "true"
 
             if enable_si:
-                self._populate_tiered_storage_topic(new_topic_name)
+                self._populate_tiered_storage_topic(new_topic_name,
+                                                    local_retention)
 
         # A newly created tiered storage topic should have its data deleted
         # in S3 when the topic is deleted
@@ -729,11 +758,14 @@ class CreateTopicUpgradeTest(RedpandaTest):
             assert len(deleted_objects) == 0
 
     @cluster(num_nodes=3)
+    @skip_azure_blob_storage
     def test_retention_upgrade_with_cluster_remote_write(self):
         """
         Validate how the cluster-wide cloud_storage_enable_remote_write
         is handled on upgrades from <=22.2
         """
+        self.install_and_start()
+
         self.redpanda.set_cluster_config(
             {"cloud_storage_enable_remote_write": "true"}, expect_restart=True)
 

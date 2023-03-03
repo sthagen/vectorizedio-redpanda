@@ -85,6 +85,8 @@ public:
     cloud_storage_clients::client_configuration get_client_config() const;
     void set_client_config(cloud_storage_clients::client_configuration conf);
 
+    ss::future<> stop();
+
 private:
     void do_start_auth_refresh_op(
       cloud_roles::credentials_update_cb_t credentials_update_cb);
@@ -411,6 +413,8 @@ private:
     intrusive_list<event_filter, &event_filter::_hook> _filters;
 
     config::binding<std::optional<ss::sstring>> _azure_shared_key_binding;
+
+    model::cloud_storage_backend _cloud_storage_backend;
 };
 
 } // namespace cloud_storage

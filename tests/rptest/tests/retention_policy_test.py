@@ -20,9 +20,9 @@ from rptest.services.cluster import cluster
 from rptest.services.redpanda import CloudStorageType, SISettings, MetricsEndpoint
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import (produce_until_segments, produce_total_bytes,
-                         wait_for_segments_removal, segments_count,
+                         wait_for_local_storage_truncate, segments_count,
                          expect_exception)
-from rptest.utils.si_utils import S3Snapshot
+from rptest.utils.si_utils import BucketView
 
 
 def bytes_for_segments(want_segments, segment_size):
@@ -71,14 +71,25 @@ class RetentionPolicyTest(RedpandaTest):
             count=10,
             acks=acks,
         )
+
         # change retention time
-        self.client().alter_topic_configs(self.topic, {
-            property: 10000,
-        })
-        wait_for_segments_removal(self.redpanda,
-                                  self.topic,
-                                  partition_idx=0,
-                                  count=5)
+        if property == TopicSpec.PROPERTY_RETENTION_BYTES:
+            local_retention = 10000
+            self.client().alter_topic_configs(self.topic, {
+                property: local_retention,
+            })
+            wait_for_local_storage_truncate(redpanda=self.redpanda,
+                                            topic=self.topic,
+                                            target_bytes=local_retention)
+        else:
+            # Set a tiny time retention, and wait for some local segments
+            # to be removed.
+            self.client().alter_topic_configs(self.topic, {
+                property: 10000,
+            })
+            wait_until(lambda: next(
+                segments_count(self.redpanda, self.topic, 0)) <= 5,
+                       timeout_sec=120)
 
     @cluster(num_nodes=3)
     @parametrize(cloud_storage_type=CloudStorageType.ABS)
@@ -108,38 +119,15 @@ class RetentionPolicyTest(RedpandaTest):
         # Wait for controller, alter configs doesn't have a retry loop
         kafka_tools.describe_topic(self.topic)
 
-        # change retention bytes to preserve 15 segments
-        self.client().alter_topic_configs(
-            self.topic, {
-                TopicSpec.PROPERTY_RETENTION_BYTES:
-                bytes_for_segments(15, segment_size)
-            })
-        wait_for_segments_removal(redpanda=self.redpanda,
-                                  topic=self.topic,
-                                  partition_idx=0,
-                                  count=16)
-
-        # change retention bytes again to preserve 10 segments
-        self.client().alter_topic_configs(
-            self.topic, {
-                TopicSpec.PROPERTY_RETENTION_BYTES:
-                bytes_for_segments(10, segment_size),
-            })
-        wait_for_segments_removal(redpanda=self.redpanda,
-                                  topic=self.topic,
-                                  partition_idx=0,
-                                  count=11)
-
-        # change retention bytes again to preserve 5 segments
-        self.client().alter_topic_configs(
-            self.topic, {
-                TopicSpec.PROPERTY_RETENTION_BYTES:
-                bytes_for_segments(4, segment_size),
-            })
-        wait_for_segments_removal(redpanda=self.redpanda,
-                                  topic=self.topic,
-                                  partition_idx=0,
-                                  count=5)
+        # Retain progressively less data, and validate that retention policy is applied
+        for retain_segments in (15, 10, 5):
+            local_retention = bytes_for_segments(retain_segments, segment_size)
+            self.client().alter_topic_configs(
+                self.topic,
+                {TopicSpec.PROPERTY_RETENTION_BYTES: local_retention})
+            wait_for_local_storage_truncate(self.redpanda,
+                                            self.topic,
+                                            target_bytes=local_retention)
 
 
 class ShadowIndexingLocalRetentionTest(RedpandaTest):
@@ -408,9 +396,7 @@ class ShadowIndexingCloudRetentionTest(RedpandaTest):
                             bytes_to_produce=total_bytes)
 
         def cloud_log_size() -> int:
-            s3_snapshot = S3Snapshot([topic],
-                                     self.redpanda.cloud_storage_client,
-                                     self.s3_bucket_name, self.logger)
+            s3_snapshot = BucketView(self.redpanda, topics=[topic])
             cloud_log_size = s3_snapshot.cloud_log_size_for_ntp(topic.name, 0)
             self.logger.debug(f"Current cloud log size is: {cloud_log_size}")
             return cloud_log_size
@@ -473,9 +459,7 @@ class ShadowIndexingCloudRetentionTest(RedpandaTest):
                             bytes_to_produce=total_bytes)
 
         def cloud_log_segment_count() -> int:
-            s3_snapshot = S3Snapshot([topic],
-                                     self.redpanda.cloud_storage_client,
-                                     self.s3_bucket_name, self.logger)
+            s3_snapshot = BucketView(self.redpanda, topics=[topic])
             count = s3_snapshot.cloud_log_segment_count_for_ntp(topic.name, 0)
             self.logger.debug(
                 f"Current count of segments in manifest is: {count}")
@@ -554,9 +538,7 @@ class ShadowIndexingCloudRetentionTest(RedpandaTest):
                             bytes_to_produce=total_bytes)
 
         def ntp_in_manifest() -> int:
-            s3_snapshot = S3Snapshot([topic],
-                                     self.redpanda.cloud_storage_client,
-                                     self.s3_bucket_name, self.logger)
+            s3_snapshot = BucketView(self.redpanda, topics=[topic])
             return s3_snapshot.is_ntp_in_manifest(topic.name, 0)
 
         # Sleep for 4 cloud_storage_housekeeping_interval_ms, then assert ntp does
@@ -577,9 +559,7 @@ class ShadowIndexingCloudRetentionTest(RedpandaTest):
         wait_until(lambda: ntp_in_manifest(), timeout_sec=10)
 
         def cloud_log_size() -> int:
-            s3_snapshot = S3Snapshot([topic],
-                                     self.redpanda.cloud_storage_client,
-                                     self.s3_bucket_name, self.logger)
+            s3_snapshot = BucketView(self.redpanda, topics=[topic])
             cloud_log_size = s3_snapshot.cloud_log_size_for_ntp(topic.name, 0)
             self.logger.debug(f"Current cloud log size is: {cloud_log_size}")
             return cloud_log_size

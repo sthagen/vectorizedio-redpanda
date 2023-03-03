@@ -108,7 +108,8 @@ CHAOS_LOG_ALLOW_LIST = [
 # Log errors emitted by refresh credentials system when cloud storage is enabled with IAM roles
 # without a corresponding mock service set up to return credentials
 IAM_ROLES_API_CALL_ALLOW_LIST = [
-    re.compile(r'cloud_roles - .*api request failed')
+    re.compile(r'cloud_roles - .*api request failed'),
+    re.compile(r'cloud_roles - .*failed during IAM credentials refresh:'),
 ]
 
 # Log errors are used in node_operation_fuzzy_test and partition_movement_test
@@ -276,6 +277,7 @@ class SISettings:
 
     GLOBAL_ABS_STORAGE_ACCOUNT = "abs_storage_account"
     GLOBAL_ABS_SHARED_KEY = "abs_shared_key"
+    GLOBAL_CLOUD_PROVIDER = "cloud_provider"
 
     DEDICATED_NODE_KEY = "dedicated_nodes"
 
@@ -339,6 +341,9 @@ class SISettings:
             self._cloud_storage_bucket = f'panda-bucket-{uuid.uuid1()}'
 
             self.cloud_storage_api_endpoint = cloud_storage_api_endpoint
+            if test_context.globals.get(self.GLOBAL_CLOUD_PROVIDER,
+                                        'aws') == 'gcp':
+                self.cloud_storage_api_endpoint = 'storage.googleapis.com'
             self.cloud_storage_api_endpoint_port = cloud_storage_api_endpoint_port
         elif self.cloud_storage_type == CloudStorageType.ABS:
             self.cloud_storage_azure_shared_key = self.ABS_AZURITE_KEY
@@ -421,6 +426,9 @@ class SISettings:
             self.cloud_storage_access_key = cloud_storage_access_key
             self.cloud_storage_secret_key = cloud_storage_secret_key
             self.endpoint_url = None  # None so boto auto-gens the endpoint url
+            if test_context.globals.get(self.GLOBAL_CLOUD_PROVIDER,
+                                        'aws') == 'gcp':
+                self.endpoint_url = 'https://storage.googleapis.com'
             self.cloud_storage_disable_tls = False  # SI will fail to create archivers if tls is disabled
             self.cloud_storage_region = cloud_storage_region
             self.cloud_storage_api_endpoint_port = 443
@@ -839,6 +847,10 @@ class RedpandaService(Service):
         self._si_settings = si_settings
         self._extra_rp_conf = self._si_settings.update_rp_conf(
             self._extra_rp_conf)
+
+    @property
+    def si_settings(self):
+        return self._si_settings
 
     def add_extra_rp_conf(self, conf):
         self._extra_rp_conf = {**self._extra_rp_conf, **conf}
@@ -1435,6 +1447,14 @@ class RedpandaService(Service):
         this function will not return until redpanda appears to have started
         successfully.
         """
+        self.logger.debug(
+            self.who_am_i() +
+            ": killing processes and attempting to clean up before starting")
+        try:
+            self.stop_node(node)
+        except Exception:
+            pass
+
         if clean_node:
             self.clean_node(node, preserve_current_install=True)
         else:
@@ -1811,9 +1831,16 @@ class RedpandaService(Service):
             self.logger.info(
                 f"Scanning node {node.account.hostname} log for errors...")
 
-            match_errors = "-e ^ERROR" if self._raise_on_errors else ""
+            # List of regexes that will fail the test on if they appear in the log
+            match_terms = [
+                "Segmentation fault", "[Aa]ssert", "Exceptional future ignored"
+            ]
+            if self._raise_on_errors:
+                match_terms.append("^ERROR")
+            match_expr = " ".join(f"-e \"{t}\"" for t in match_terms)
+
             for line in node.account.ssh_capture(
-                    f"grep {match_errors} -e Segmentation\ fault -e [Aa]ssert {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
+                    f"grep {match_expr} {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
             ):
                 line = line.strip()
 
@@ -1954,8 +1981,8 @@ class RedpandaService(Service):
         For debugging issues around stopping processes: set the log level to
         trace on all loggers.
         """
-        # These tend to be exceptionally chatty.
-        keep_existing = ['exception', 'io', 'seastar_memory']
+        # These tend to be exceptionally chatty, or don't provide much value.
+        keep_existing = ['exception', 'io', 'seastar_memory', 'assert']
         try:
             loggers = self._admin.get_loggers(node)
             for logger in loggers:

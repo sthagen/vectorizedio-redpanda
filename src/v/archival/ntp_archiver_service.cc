@@ -546,11 +546,17 @@ ss::future<cloud_storage::download_result> ntp_archiver::sync_manifest() {
         }
         auto errc = co_await builder.replicate();
         if (errc) {
+            if (errc == raft::errc::shutting_down) {
+                // During shutdown, act like we hit an abort source rather
+                // than trying to log+handle this like a write error.
+                throw ss::abort_requested_exception();
+            }
+
             vlog(
               _rtclog.error,
               "Can't replicate archival_metadata_stm configuration batch: "
               "{}",
-              errc);
+              errc.message());
             co_return cloud_storage::download_result::failed;
         }
     }
@@ -1299,24 +1305,28 @@ ss::future<> ntp_archiver::housekeeping() {
             // external housekeeping jobs from upload_housekeeping_service
             // and retention/GC
             auto units = co_await ss::get_units(_mutex, 1, _as);
-            co_await apply_retention();
-            co_await garbage_collect();
-            co_await upload_manifest();
+            const auto retention_updated_manifest = co_await apply_retention();
+            const auto gc_updated_manifest = co_await garbage_collect();
+            if (retention_updated_manifest || gc_updated_manifest) {
+                co_await upload_manifest();
+            }
         }
     } catch (std::exception& e) {
         vlog(_rtclog.warn, "Error occured during housekeeping", e.what());
     }
 }
 
-ss::future<> ntp_archiver::apply_retention() {
+ss::future<ntp_archiver::manifest_updated> ntp_archiver::apply_retention() {
+    manifest_updated updated = manifest_updated::no;
+
     if (!may_begin_uploads()) {
-        co_return;
+        co_return updated;
     }
 
     auto retention_calculator = retention_calculator::factory(
       manifest(), _parent.get_ntp_config());
     if (!retention_calculator) {
-        co_return;
+        co_return updated;
     }
 
     auto next_start_offset = retention_calculator->next_start_offset();
@@ -1332,7 +1342,9 @@ ss::future<> ntp_archiver::apply_retention() {
         auto deadline = ss::lowres_clock::now() + sync_timeout;
         auto error = co_await _parent.archival_meta_stm()->truncate(
           *next_start_offset, deadline, _as);
-        if (error != cluster::errc::success) {
+        if (error == cluster::errc::success) {
+            updated = manifest_updated::yes;
+        } else {
             vlog(
               _rtclog.warn,
               "Failed to update archival metadata STM start offest according "
@@ -1345,14 +1357,18 @@ ss::future<> ntp_archiver::apply_retention() {
           "{} Retention policies are already met.",
           retention_calculator->strategy_name());
     }
+
+    co_return updated;
 }
 
 // Garbage collection can be improved as follows:
 // * issue #6843: delete via DeleteObjects S3 api instead of deleting individual
 // segments
-ss::future<> ntp_archiver::garbage_collect() {
+ss::future<ntp_archiver::manifest_updated> ntp_archiver::garbage_collect() {
+    manifest_updated updated = manifest_updated::no;
+
     if (!may_begin_uploads()) {
-        co_return;
+        co_return updated;
     }
 
     const auto to_remove
@@ -1403,7 +1419,9 @@ ss::future<> ntp_archiver::garbage_collect() {
         auto error = co_await _parent.archival_meta_stm()->cleanup_metadata(
           deadline, _as);
 
-        if (error != cluster::errc::success) {
+        if (error == cluster::errc::success) {
+            updated = manifest_updated::yes;
+        } else {
             vlog(
               _rtclog.info,
               "Failed to clean up metadata after garbage collection: {}",
@@ -1419,6 +1437,8 @@ ss::future<> ntp_archiver::garbage_collect() {
     _probe->segments_deleted(static_cast<int64_t>(successful_deletes));
     vlog(
       _rtclog.debug, "Deleted {} segments from the cloud", successful_deletes);
+
+    co_return updated;
 }
 
 ss::future<cloud_storage::upload_result>
@@ -1639,8 +1659,8 @@ ntp_archiver::prepare_transfer_leadership(ss::lowres_clock::duration timeout) {
         // the next manifest written by the new leader will not refer to
         // this object.
         //
-        // This is not a correctness issue, but consumes some disk space, and
-        // these objects may also be left behind when the topic is later
+        // This is not a correctness issue, but consumes some disk space,
+        // and these objects may also be left behind when the topic is later
         // deleted.
         co_return false;
     }
