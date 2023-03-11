@@ -127,6 +127,30 @@ std::vector<raft::broker_revision> create_brokers_set(
     return brokers;
 }
 
+static std::vector<raft::vnode> create_vnode_set(
+  const std::vector<model::broker_shard>& replicas,
+  const absl::flat_hash_map<model::node_id, model::revision_id>&
+    replica_revisions) {
+    std::vector<raft::vnode> nodes;
+    nodes.reserve(replicas.size());
+
+    std::transform(
+      std::cbegin(replicas),
+      std::cend(replicas),
+      std::back_inserter(nodes),
+      [&replica_revisions](const model::broker_shard& bs) {
+          auto rev_it = replica_revisions.find(bs.node_id);
+          vassert(
+            rev_it != replica_revisions.end(),
+            "revision for broker {} must be present in replica revisions map. "
+            "revisions map size: {}",
+            bs.node_id,
+            replica_revisions.size());
+          return raft::vnode(bs.node_id, rev_it->second);
+      });
+    return nodes;
+}
+
 std::optional<ss::shard_id> get_target_shard(
   model::node_id id, const std::vector<model::broker_shard>& replicas) {
     auto it = std::find_if(
@@ -244,7 +268,7 @@ std::error_code check_configuration_update(
           "{}",
           partition->ntp(),
           bs,
-          group_cfg.brokers());
+          group_cfg);
         return errc::partition_configuration_differs;
     }
 
@@ -274,6 +298,11 @@ controller_backend::controller_backend(
   , _housekeeping_timer_interval(
       config::shard_local_cfg().controller_backend_housekeeping_interval_ms())
   , _as(as) {}
+
+bool controller_backend::command_based_membership_active() const {
+    return _features.local().is_active(
+      features::feature::membership_change_controller_cmds);
+}
 
 ss::future<> controller_backend::stop() {
     vlog(clusterlog.info, "Stopping Controller Backend...");
@@ -378,14 +407,41 @@ find_interrupting_operation(deltas_t::iterator current_it, deltas_t& deltas) {
       });
 }
 
+ss::future<std::error_code> do_update_replica_set(
+  const model::ntp& ntp,
+  const std::vector<model::broker_shard>& replicas,
+  const replicas_revision_map& replica_revisions,
+  model::revision_id rev,
+  ss::lw_shared_ptr<partition> p,
+  members_table& members,
+  bool command_based_members_update) {
+    vlog(
+      clusterlog.debug,
+      "[{}] updating partition replicas. revision: {}, replicas: {}, using "
+      "vnodes: {}",
+      ntp,
+      rev,
+      replicas,
+      command_based_members_update);
+
+    // when cluster membership updates are driven by controller commands, use
+    // only vnodes to update raft replica set
+    if (likely(command_based_members_update)) {
+        auto nodes = create_vnode_set(replicas, replica_revisions);
+        co_return co_await p->update_replica_set(std::move(nodes), rev);
+    }
+
+    auto brokers = create_brokers_set(replicas, replica_revisions, members);
+    co_return co_await p->update_replica_set(std::move(brokers), rev);
+}
 ss::future<std::error_code> revert_configuration_update(
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& replicas,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   model::revision_id rev,
   ss::lw_shared_ptr<partition> p,
-  members_table& members) {
-    auto brokers = create_brokers_set(replicas, replica_revisions, members);
+  members_table& members,
+  bool command_based_members_update) {
     vlog(
       clusterlog.debug,
       "[{}] reverting already finished reconfiguration. Revision: {}, replica "
@@ -393,7 +449,14 @@ ss::future<std::error_code> revert_configuration_update(
       ntp,
       rev,
       replicas);
-    co_return co_await p->update_replica_set(std::move(brokers), rev);
+    return do_update_replica_set(
+      ntp,
+      replicas,
+      replica_revisions,
+      rev,
+      p,
+      members,
+      command_based_members_update);
 }
 
 bool is_finishing_operation(
@@ -935,7 +998,7 @@ controller_backend::process_partition_reconfiguration(
   model::ntp ntp,
   const partition_assignment& target_assignment,
   const std::vector<model::broker_shard>& previous_replicas,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   model::revision_id command_rev) {
     vlog(
       clusterlog.trace,
@@ -1178,10 +1241,14 @@ controller_backend::create_partition_from_remote_shard(
             co_return errc::waiting_for_partition_shutdown;
         }
         initial_revision = x_shard_req->log_revision;
-        std::copy(
-          x_shard_req->initial_configuration.brokers().begin(),
-          x_shard_req->initial_configuration.brokers().end(),
-          std::back_inserter(initial_brokers));
+        const auto all_nodes = x_shard_req->initial_configuration.all_nodes();
+        std::transform(
+          all_nodes.begin(),
+          all_nodes.end(),
+          std::back_inserter(initial_brokers),
+          [this](const raft::vnode& vnode) {
+              return get_node_metadata(_members_table.local(), vnode.id());
+          });
     }
 
     if (!initial_revision) {
@@ -1246,7 +1313,7 @@ ss::future<std::error_code> controller_backend::execute_reconfiguration(
   topic_table_delta::op_type type,
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& replica_set,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   const std::vector<model::broker_shard>& previous_replica_set,
   model::revision_id revision) {
     switch (type) {
@@ -1394,7 +1461,7 @@ controller_backend::apply_configuration_change_on_leader(
 ss::future<std::error_code> controller_backend::cancel_replica_set_update(
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& replicas,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   const std::vector<model::broker_shard>& previous_replicas,
   model::revision_id rev) {
     /**
@@ -1444,15 +1511,14 @@ ss::future<std::error_code> controller_backend::cancel_replica_set_update(
                         errc::success);
                   }
 
-                  auto brokers = create_brokers_set(
-                    replicas, replica_revisions, _members_table.local());
-                  vlog(
-                    clusterlog.debug,
-                    "[{}] updating replica set with {}",
+                  return do_update_replica_set(
                     ntp,
-                    replicas);
-
-                  return p->update_replica_set(std::move(brokers), rev);
+                    replicas,
+                    replica_revisions,
+                    rev,
+                    std::move(p),
+                    _members_table.local(),
+                    command_based_membership_active());
               } else if (already_moved) {
                   if (likely(_features.local().is_active(
                         features::feature::partition_move_revert_cancel))) {
@@ -1465,7 +1531,8 @@ ss::future<std::error_code> controller_backend::cancel_replica_set_update(
                     replica_revisions,
                     rev,
                     std::move(p),
-                    _members_table.local());
+                    _members_table.local(),
+                    command_based_membership_active());
               }
               return ss::make_ready_future<std::error_code>(
                 errc::waiting_for_recovery);
@@ -1491,7 +1558,7 @@ controller_backend::dispatch_revert_cancel_move(model::ntp ntp) {
 ss::future<std::error_code> controller_backend::force_abort_replica_set_update(
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& replicas,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   const std::vector<model::broker_shard>& previous_replicas,
   model::revision_id rev) {
     /**
@@ -1550,7 +1617,8 @@ ss::future<std::error_code> controller_backend::force_abort_replica_set_update(
                     replica_revisions,
                     rev,
                     std::move(p),
-                    _members_table.local());
+                    _members_table.local(),
+                    command_based_membership_active());
               });
         }
         co_return errc::waiting_for_recovery;
@@ -1573,7 +1641,7 @@ ss::future<std::error_code> controller_backend::force_abort_replica_set_update(
 ss::future<std::error_code> controller_backend::update_partition_replica_set(
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& replicas,
-  const topic_table_delta::revision_map_t& replica_revisions,
+  const replicas_revision_map& replica_revisions,
   model::revision_id rev) {
     /**
      * Following scenarios can happen in here:
@@ -1594,15 +1662,14 @@ ss::future<std::error_code> controller_backend::update_partition_replica_set(
               return ss::make_ready_future<std::error_code>(errc::success);
           }
 
-          auto brokers = create_brokers_set(
-            replicas, replica_revisions, _members_table.local());
-          vlog(
-            clusterlog.debug,
-            "[{}] updating replica set with {}",
+          return do_update_replica_set(
             ntp,
-            replicas);
-
-          return p->update_replica_set(std::move(brokers), rev);
+            replicas,
+            replica_revisions,
+            rev,
+            std::move(p),
+            _members_table.local(),
+            command_based_membership_active());
       });
 }
 

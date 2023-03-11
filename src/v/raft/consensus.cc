@@ -100,7 +100,8 @@ consensus::consensus(
   std::optional<std::reference_wrapper<recovery_throttle>> recovery_throttle,
   recovery_memory_quota& recovery_mem_quota,
   features::feature_table& ft,
-  std::optional<voter_priority> voter_priority_override)
+  std::optional<voter_priority> voter_priority_override,
+  keep_snapshotted_log should_keep_snapshotted_log)
   : _self(nid, initial_cfg.revision_id())
   , _group(group)
   , _jit(std::move(jit))
@@ -137,6 +138,7 @@ consensus::consensus(
       _scheduling.default_iopc)
   , _configuration_manager(std::move(initial_cfg), _group, _storage, _ctxlog)
   , _node_priority_override(voter_priority_override)
+  , _keep_snapshotted_log(should_keep_snapshotted_log)
   , _append_requests_buffer(*this, 256) {
     setup_metrics();
     setup_public_metrics();
@@ -199,6 +201,7 @@ void consensus::do_step_down(std::string_view ctx) {
           _term,
           _log.offsets().dirty_offset);
     }
+    _fstats.reset();
     _vstate = vote_state::follower;
 }
 
@@ -299,6 +302,17 @@ consensus::success_reply consensus::update_follower_index(
         // current node may change it.
         return success_reply::yes;
     }
+    auto config = _configuration_manager.get_latest();
+    if (!config.contains(node)) {
+        // We might have sent an append_entries just before removing
+        // a node from configuration: ignore its reply, to avoid
+        // doing things like initiating recovery to this removed node.
+        vlog(
+          _ctxlog.debug,
+          "Ignoring reply from node {}, it is not in members list",
+          physical_node);
+        return success_reply::no;
+    }
 
     auto it = _fstats.find(node);
 
@@ -309,6 +323,21 @@ consensus::success_reply consensus::update_follower_index(
     follower_index_metadata& idx = it->second;
     const append_entries_reply& reply = r.value();
     vlog(_ctxlog.trace, "Append entries response: {}", reply);
+
+    /**
+     * Do not update any of the follower state if a node that replied to
+     * append_entries_request is not the one that the request was addressed to.
+     */
+    if (unlikely(reply.node_id.id() != physical_node)) {
+        vlog(
+          _ctxlog.warn,
+          "Received append entries response node_id doesn't match expected "
+          "node_id (received: {}, expected: {})",
+          reply.node_id.id(),
+          node);
+        return success_reply::no;
+    }
+
     if (unlikely(reply.result == append_entries_reply::status::timeout)) {
         // ignore this response, timed out on the receiver node
         vlog(_ctxlog.trace, "Append entries request timedout at node {}", node);
@@ -327,6 +356,12 @@ consensus::success_reply consensus::update_follower_index(
           "Append entries response send to wrong group: {}, current group: {}",
           reply.group,
           _group));
+    }
+
+    // check preconditions for processing the reply
+    if (unlikely(!is_elected_leader())) {
+        vlog(_ctxlog.debug, "ignoring append entries reply, not leader");
+        return success_reply::no;
     }
 
     update_node_reply_timestamp(node);
@@ -363,15 +398,11 @@ consensus::success_reply consensus::update_follower_index(
      * seq 98, updating the last_received_seq unconditionally would cause
      * accepting request with seq 98, which should be rejected
      */
-    idx.last_received_seq = std::max(seq, idx.last_received_seq);
+    idx.last_received_seq = std::min(
+      std::max(seq, idx.last_received_seq), idx.last_sent_seq);
     auto broadcast_state_change = ss::defer(
       [&idx] { idx.follower_state_change.broadcast(); });
 
-    // check preconditions for processing the reply
-    if (!is_elected_leader()) {
-        vlog(_ctxlog.debug, "ignoring append entries reply, not leader");
-        return success_reply::no;
-    }
     // If RPC request or response contains term T > currentTerm:
     // set currentTerm = T, convert to follower (Raft paper: §5.1)
     if (reply.term > _term) {
@@ -475,18 +506,6 @@ void consensus::process_append_entries_reply(
   result<append_entries_reply> r,
   follower_req_seq seq_id,
   model::offset dirty_offset) {
-    auto config = _configuration_manager.get_latest();
-    if (!config.contains_broker(physical_node)) {
-        // We might have sent an append_entries just before removing
-        // a node from configuration: ignore its reply, to avoid
-        // doing things like initiating recovery to this removed node.
-        vlog(
-          _ctxlog.debug,
-          "Ignoring reply from node {}, it is not in members list",
-          physical_node);
-        return;
-    }
-
     auto is_success = update_follower_index(
       physical_node, r, seq_id, dirty_offset);
     if (is_success) {
@@ -951,7 +970,7 @@ ss::future<std::error_code> consensus::change_configuration(Func&& f) {
               return ss::make_ready_future<std::error_code>(
                 errc::configuration_change_in_progress);
           }
-          maybe_upgrade_configuration(latest_cfg);
+          maybe_upgrade_configuration_to_v4(latest_cfg);
           result<group_configuration> res = f(std::move(latest_cfg));
           if (res) {
               if (res.value().revision_id() < config().revision_id()) {
@@ -968,48 +987,38 @@ ss::future<std::error_code> consensus::change_configuration(Func&& f) {
       });
 }
 
-ss::future<std::error_code> consensus::add_group_members(
-  std::vector<model::broker> nodes, model::revision_id new_revision) {
-    vlog(_ctxlog.trace, "Adding members: {}", nodes);
-    return change_configuration([nodes = std::move(nodes), new_revision](
+ss::future<std::error_code> consensus::add_group_member(
+  model::broker node, model::revision_id new_revision) {
+    vlog(_ctxlog.trace, "Adding member: {}", node);
+    return change_configuration([node = std::move(node), new_revision](
                                   group_configuration current) mutable {
-        auto contains_already = std::any_of(
-          nodes.cbegin(),
-          nodes.cend(),
-          [&current](const model::broker& broker) {
-              return current.contains_broker(broker.id());
-          });
-
-        if (contains_already) {
-            return result<group_configuration>(errc::node_already_exists);
+        using ret_t = result<group_configuration>;
+        if (current.contains_broker(node.id())) {
+            return ret_t{errc::node_already_exists};
         }
+        current.add_broker(std::move(node), new_revision);
         current.set_revision(new_revision);
-        current.add(std::move(nodes), new_revision);
 
-        return result<group_configuration>(std::move(current));
+        return ret_t{std::move(current)};
     });
 }
 
-ss::future<std::error_code> consensus::remove_members(
-  std::vector<model::node_id> ids, model::revision_id new_revision) {
-    vlog(_ctxlog.trace, "Removing members: {}", ids);
+ss::future<std::error_code>
+consensus::remove_member(model::node_id id, model::revision_id new_revision) {
+    vlog(_ctxlog.trace, "Removing member: {}", id);
     return change_configuration(
-      [ids = std::move(ids), new_revision](group_configuration current) {
-          auto all_exists = std::all_of(
-            ids.cbegin(), ids.cend(), [&current](model::node_id id) {
-                return current.contains_broker(id);
-            });
-          if (!all_exists) {
-              return result<group_configuration>(errc::node_does_not_exists);
+      [id, new_revision](group_configuration current) {
+          using ret_t = result<group_configuration>;
+          if (!current.contains_broker(id)) {
+              return ret_t{errc::node_does_not_exists};
           }
           current.set_revision(new_revision);
-          current.remove(ids);
+          current.remove_broker(id);
 
           if (current.current_config().voters.empty()) {
-              return result<group_configuration>(
-                errc::invalid_configuration_update);
+              return ret_t{errc::invalid_configuration_update};
           }
-          return result<group_configuration>(std::move(current));
+          return ret_t{std::move(current)};
       });
 }
 
@@ -1019,10 +1028,57 @@ ss::future<std::error_code> consensus::replace_configuration(
     return change_configuration(
       [new_brokers = std::move(new_brokers),
        new_revision](group_configuration current) mutable {
-          current.replace(std::move(new_brokers), new_revision);
+          using ret_t = result<group_configuration>;
+          current.replace_brokers(std::move(new_brokers), new_revision);
           current.set_revision(new_revision);
-          return result<group_configuration>(std::move(current));
+          return ret_t{std::move(current)};
       });
+}
+
+ss::future<std::error_code>
+consensus::add_group_member(vnode node, model::revision_id new_revision) {
+    vlog(_ctxlog.trace, "Adding member: {}", node);
+    return change_configuration(
+      [node, new_revision](group_configuration current) mutable {
+          using ret_t = result<group_configuration>;
+          if (current.contains(node)) {
+              return ret_t{errc::node_already_exists};
+          }
+          current.set_version(raft::group_configuration::v_5);
+          current.add(node, new_revision);
+
+          return ret_t{std::move(current)};
+      });
+}
+
+ss::future<std::error_code>
+consensus::remove_member(vnode node, model::revision_id new_revision) {
+    vlog(_ctxlog.trace, "Removing member: {}", node);
+    return change_configuration(
+      [node, new_revision](group_configuration current) {
+          using ret_t = result<group_configuration>;
+          if (!current.contains(node)) {
+              return ret_t{errc::node_does_not_exists};
+          }
+          current.set_version(raft::group_configuration::v_5);
+          current.remove(node, new_revision);
+
+          if (current.current_config().voters.empty()) {
+              return ret_t{errc::invalid_configuration_update};
+          }
+          return ret_t{std::move(current)};
+      });
+}
+
+ss::future<std::error_code> consensus::replace_configuration(
+  std::vector<vnode> nodes, model::revision_id new_revision) {
+    return change_configuration([nodes = std::move(nodes), new_revision](
+                                  group_configuration current) mutable {
+        current.set_version(raft::group_configuration::v_5);
+        current.replace(nodes, new_revision);
+
+        return result<group_configuration>{std::move(current)};
+    });
 }
 
 template<typename Func>
@@ -1326,13 +1382,14 @@ ss::future<> consensus::do_start() {
                 // set last heartbeat timestamp to prevent skipping first
                 // election
                 _hbeat = clock_type::time_point::min();
-                auto conf = _configuration_manager.get_latest().brokers();
-                if (!conf.empty() && _self.id() == conf.begin()->id()) {
+                auto conf
+                  = _configuration_manager.get_latest().current_config();
+                if (!conf.voters.empty() && _self == conf.voters.front()) {
                     // Arm immediate election for single node scenarios
                     // or for the very first start of the preferred leader
                     // in a multi-node group.  Otherwise use standard election
                     // timeout.
-                    if (conf.size() > 1 && _term > model::term_id{0}) {
+                    if (conf.voters.size() > 1 && _term > model::term_id{0}) {
                         next_election += _jit.next_duration();
                     }
                 } else {
@@ -1507,6 +1564,7 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
     vote_reply reply;
     reply.term = _term;
     reply.target_node_id = r.node_id;
+    reply.node_id = _self;
     auto lstats = _log.offsets();
     auto last_log_index = lstats.dirty_offset;
     _probe.vote_request();
@@ -1949,12 +2007,22 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
             metadata.last_included_index,
             _last_snapshot_index);
 
+          vlog(
+            _ctxlog.info,
+            "hydrating snapshot with last included index: {}",
+            metadata.last_included_index);
+
           _last_snapshot_index = metadata.last_included_index;
           _last_snapshot_term = metadata.last_included_term;
 
           // TODO: add applying snapshot content to state machine
+          auto prev_commit_index = _commit_index;
           _commit_index = std::max(_last_snapshot_index, _commit_index);
           maybe_update_last_visible_index(_commit_index);
+          if (prev_commit_index != _commit_index) {
+              _commit_index_updated.broadcast();
+              _event_manager.notify_commit_index();
+          }
 
           update_follower_stats(metadata.latest_configuration);
           return _configuration_manager
@@ -1976,30 +2044,42 @@ ss::future<> consensus::do_hydrate_snapshot(storage::snapshot_reader& reader) {
                 return _offset_translator.prefix_truncate_reset(
                   _last_snapshot_index, delta);
             })
-            .then([this] { return truncate_to_latest_snapshot(); })
-            .then(
-              [this] { _log.set_collectible_offset(_last_snapshot_index); });
+            .then([this] {
+                if (
+                  _keep_snapshotted_log
+                  && _log.offsets().dirty_offset >= _last_snapshot_index) {
+                    // skip prefix truncating if we want to preserve the log
+                    // (e.g. for the controller partition), but only if there is
+                    // no gap between old end offset and new start offset,
+                    // otherwise we must still advance the log start offset by
+                    // prefix-truncating.
+                    return ss::now();
+                }
+                return truncate_to_latest_snapshot().then([this] {
+                    _log.set_collectible_offset(_last_snapshot_index);
+                });
+            });
       })
       .then([this] { return _snapshot_mgr.get_snapshot_size(); })
       .then([this](uint64_t size) { _snapshot_size = size; });
 }
 
 ss::future<install_snapshot_reply>
-consensus::do_install_snapshot(install_snapshot_request&& r) {
-    vlog(_ctxlog.trace, "Install snapshot request: {}", r);
+consensus::do_install_snapshot(install_snapshot_request r) {
+    vlog(_ctxlog.trace, "received install_snapshot request: {}", r);
 
-    install_snapshot_reply reply{
-      .term = _term, .bytes_stored = r.chunk.size_bytes(), .success = false};
+    install_snapshot_reply reply{.term = _term, .success = false};
     reply.target_node_id = r.node_id;
+    reply.node_id = _self;
 
     if (unlikely(is_request_target_node_invalid("install_snapshot", r))) {
-        return ss::make_ready_future<install_snapshot_reply>(reply);
+        co_return reply;
     }
 
     bool is_done = r.done;
     // Raft paper: Reply immediately if term < currentTerm (§7.1)
     if (r.term < _term) {
-        return ss::make_ready_future<install_snapshot_reply>(reply);
+        co_return reply;
     }
 
     // no need to trigger timeout
@@ -2010,42 +2090,46 @@ consensus::do_install_snapshot(install_snapshot_request&& r) {
         _term = r.term;
         _voted_for = {};
         do_step_down("install_snapshot_term_greater");
-        return do_install_snapshot(std::move(r));
+        co_return co_await do_install_snapshot(std::move(r));
     }
 
-    auto f = ss::now();
     // Create new snapshot file if first chunk (offset is 0) (§7.2)
     if (r.file_offset == 0) {
         // discard old chunks, previous snaphost wasn't finished
         if (_snapshot_writer) {
-            f = _snapshot_writer->close().then(
-              [this] { return _snapshot_mgr.remove_partial_snapshots(); });
+            co_await _snapshot_writer->close();
+            co_await _snapshot_mgr.remove_partial_snapshots();
         }
-        f = f.then([this] {
-            return _snapshot_mgr.start_snapshot().then(
-              [this](storage::snapshot_writer w) {
-                  _snapshot_writer.emplace(std::move(w));
-              });
-        });
+
+        auto w = co_await _snapshot_mgr.start_snapshot();
+        _snapshot_writer.emplace(std::move(w));
+        _received_snapshot_index = r.last_included_index;
+        _received_snapshot_bytes = 0;
+    }
+
+    if (
+      r.last_included_index != _received_snapshot_index
+      || r.file_offset != _received_snapshot_bytes) {
+        // Out of order request? Ignore and answer with success=false.
+        co_return reply;
     }
 
     // Write data into snapshot file at given offset (§7.3)
-    f = f.then([this, chunk = std::move(r.chunk)]() mutable {
-        return write_iobuf_to_output_stream(
-          std::move(chunk), _snapshot_writer->output());
-    });
+    size_t chunk_size = r.chunk.size_bytes();
+    co_await write_iobuf_to_output_stream(
+      std::move(r.chunk), _snapshot_writer->output());
+
+    _received_snapshot_bytes += chunk_size;
+    reply.bytes_stored = _received_snapshot_bytes;
 
     // Reply and wait for more data chunks if done is false (§7.4)
     if (!is_done) {
-        return f.then([reply]() mutable {
-            reply.success = true;
-            return reply;
-        });
+        reply.success = true;
+        co_return reply;
     }
+
     // Last chunk, finish storing snapshot
-    return f.then([this, r = std::move(r), reply]() mutable {
-        return finish_snapshot(std::move(r), reply);
-    });
+    co_return co_await finish_snapshot(std::move(r), reply);
 }
 
 ss::future<install_snapshot_reply> consensus::finish_snapshot(
@@ -2118,6 +2202,12 @@ ss::future<> consensus::write_snapshot(write_snapshot_cfg cfg) {
         co_return;
     }
 
+    if (_keep_snapshotted_log) {
+        // Skip prefix truncating to preserve the log (we want this e.g. for the
+        // controller partition in case we need to turn off snapshots).
+        co_return;
+    }
+
     // Release the lock when truncating the log because it can take some
     // time while we wait for readers to be evicted.
     co_await _log.truncate_prefix(storage::truncate_prefix_config(
@@ -2181,6 +2271,34 @@ consensus::do_write_snapshot(model::offset last_included_index, iobuf&& data) {
       .then([this](uint64_t size) { _snapshot_size = size; });
 }
 
+ss::future<std::optional<consensus::opened_snapshot>>
+consensus::open_snapshot() {
+    auto reader = co_await _snapshot_mgr.open_snapshot();
+    if (!reader) {
+        co_return std::nullopt;
+    }
+
+    auto metadata
+      = co_await reader->read_metadata()
+          .then([](iobuf md_buf) {
+              auto md_parser = iobuf_parser(std::move(md_buf));
+              return reflection::adl<raft::snapshot_metadata>{}.from(md_parser);
+          })
+          .then_wrapped([&reader](ss::future<raft::snapshot_metadata> f) {
+              if (!f.failed()) {
+                  return f;
+              }
+
+              return reader->close().then(
+                [f = std::move(f)]() mutable { return std::move(f); });
+          });
+
+    co_return opened_snapshot{
+      .metadata = metadata,
+      .reader = std::move(*reader),
+    };
+}
+
 ss::future<std::error_code> consensus::replicate_configuration(
   ssx::semaphore_units u, group_configuration cfg) {
     // under the _op_sem lock
@@ -2190,7 +2308,7 @@ ss::future<std::error_code> consensus::replicate_configuration(
     vlog(_ctxlog.debug, "Replicating group configuration {}", cfg);
     return ss::with_gate(
       _bg, [this, u = std::move(u), cfg = std::move(cfg)]() mutable {
-          maybe_upgrade_configuration(cfg);
+          maybe_upgrade_configuration_to_v4(cfg);
           auto batches = details::serialize_configuration_as_batches(
             std::move(cfg));
           for (auto& b : batches) {
@@ -2218,13 +2336,13 @@ ss::future<std::error_code> consensus::replicate_configuration(
       });
 }
 
-void consensus::maybe_upgrade_configuration(group_configuration& cfg) {
-    if (unlikely(cfg.version() < group_configuration::version_t(4))) {
+void consensus::maybe_upgrade_configuration_to_v4(group_configuration& cfg) {
+    if (unlikely(cfg.version() < group_configuration::v_4)) {
         if (
           _features.is_active(features::feature::raft_improved_configuration)
           && cfg.get_state() == configuration_state::simple) {
             vlog(_ctxlog.debug, "Upgrading configuration version");
-            cfg.set_version(group_configuration::current_version);
+            cfg.set_version(raft::group_configuration::v_4);
         }
     }
 }
@@ -3210,8 +3328,7 @@ bool consensus::should_reconnect_follower(vnode id) {
 }
 
 voter_priority consensus::next_target_priority() {
-    auto node_count = std::max<size_t>(
-      _configuration_manager.get_latest().brokers().size(), 1);
+    auto node_count = std::max<size_t>(_fstats.size() + 1, 1);
 
     return voter_priority(std::max<voter_priority::type>(
       (_target_priority / node_count) * (node_count - 1), min_voter_priority));
@@ -3228,14 +3345,11 @@ voter_priority consensus::get_node_priority(vnode rni) const {
     }
 
     auto& latest_cfg = _configuration_manager.get_latest();
-    auto& brokers = latest_cfg.brokers();
+    auto nodes = latest_cfg.all_nodes();
 
-    auto it = std::find_if(
-      brokers.cbegin(), brokers.cend(), [rni](const model::broker& b) {
-          return b.id() == rni.id();
-      });
+    auto it = std::find(nodes.begin(), nodes.end(), rni);
 
-    if (it == brokers.cend()) {
+    if (it == nodes.end()) {
         /**
          * If node is not present in current configuration i.e. was added to the
          * cluster, return max, this way for joining node we will use
@@ -3244,14 +3358,14 @@ voter_priority consensus::get_node_priority(vnode rni) const {
         return voter_priority::max();
     }
 
-    auto idx = std::distance(brokers.cbegin(), it);
+    auto idx = std::distance(nodes.begin(), it);
 
     /**
      * Voter priority is inversly proportion to node position in brokers
      * vector.
      */
     return voter_priority(
-      (brokers.size() - idx) * (voter_priority::max() / brokers.size()));
+      (nodes.size() - idx) * (voter_priority::max() / nodes.size()));
 }
 
 model::offset consensus::get_latest_configuration_offset() const {

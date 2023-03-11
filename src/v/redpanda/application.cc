@@ -1563,6 +1563,7 @@ void application::wire_up_bootstrap_services() {
     // Wire up the internal RPC server.
     ss::sharded<net::server_configuration> rpc_cfg;
     rpc_cfg.start(ss::sstring("internal_rpc")).get();
+    auto stop_cfg = ss::defer([&rpc_cfg] { rpc_cfg.stop().get(); });
     rpc_cfg
       .invoke_on_all([this](net::server_configuration& c) {
           return ss::async([this, &c] {
@@ -1608,7 +1609,6 @@ void application::wire_up_bootstrap_services() {
       "Constructing internal RPC services {}", rpc_cfg.local())
       .get();
     _rpc.start(&rpc_cfg).get();
-    rpc_cfg.stop().get();
 }
 
 void application::start_bootstrap_services() {
@@ -1837,17 +1837,6 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
 
 void application::start_runtime_services(
   cluster::cluster_discovery& cd, ::stop_signal& app_signal) {
-    ssx::background = feature_table.invoke_on_all(
-      [this](features::feature_table& ft) {
-          return ft.await_feature_then(
-            features::feature::rpc_v2_by_default, [this] {
-                if (ss::this_shard_id() == 0) {
-                    vlog(_log.debug, "Activating RPC protocol v2");
-                }
-                _connection_cache.local().set_default_transport_version(
-                  rpc::transport_version::v2);
-            });
-      });
     ssx::background = feature_table.invoke_on_all(
       [this](features::feature_table& ft) {
           return ft.await_feature_then(
@@ -2103,13 +2092,6 @@ void application::load_feature_table_snapshot() {
 #ifndef NDEBUG
         vassert(my_version >= snap.version, "Incompatible downgrade detected");
 #endif
-    } else if (my_version > snap.version) {
-        vlog(
-          _log.info,
-          "Upgrade in progress!  This binary logical version {}, last feature "
-          "table snapshot version {}",
-          my_version,
-          snap.version);
     } else {
         vlog(
           _log.debug,
@@ -2122,4 +2104,8 @@ void application::load_feature_table_snapshot() {
     feature_table
       .invoke_on_all([snap](features::feature_table& ft) { snap.apply(ft); })
       .get();
+
+    // Having loaded a snapshot, do our strict check for version compat.
+    feature_table.local().assert_compatible_version(
+      config::node().upgrade_override_checks);
 }

@@ -43,7 +43,8 @@ from rptest.services.redpanda_installer import InstallOptions, RedpandaInstaller
 
 class UpgradeFromSpecificVersion(RedpandaTest):
     """
-    Basic test that upgrading software works as expected.
+    Basic test that upgrading software works as expected, upgrading from the last
+    feature version to the HEAD version.
     """
     def __init__(self, test_context):
         super(UpgradeFromSpecificVersion,
@@ -51,9 +52,10 @@ class UpgradeFromSpecificVersion(RedpandaTest):
         self.installer = self.redpanda._installer
 
     def setUp(self):
-        # NOTE: `rpk redpanda admin brokers list` requires versions v22.1.x and
-        # above.
-        self.installer.install(self.redpanda.nodes, (22, 1, 3))
+        self.old_version = self.redpanda._installer.highest_from_prior_feature_version(
+            RedpandaInstaller.HEAD)
+        self.old_version_str = f"v{self.old_version[0]}.{self.old_version[1]}.{self.old_version[2]}"
+        self.installer.install(self.redpanda.nodes, self.old_version)
         super(UpgradeFromSpecificVersion, self).setUp()
 
     @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
@@ -61,27 +63,27 @@ class UpgradeFromSpecificVersion(RedpandaTest):
         first_node = self.redpanda.nodes[0]
 
         unique_versions = wait_for_num_versions(self.redpanda, 1)
-        assert "v22.1.3" in unique_versions, unique_versions
+        assert self.old_version_str in unique_versions, unique_versions
 
         # Upgrade one node to the head version.
         self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
         self.redpanda.restart_nodes([first_node])
         unique_versions = wait_for_num_versions(self.redpanda, 2)
-        assert "v22.1.3" in unique_versions, unique_versions
+        assert self.old_version_str in unique_versions, unique_versions
 
         # Rollback the partial upgrade and ensure we go back to the original
         # state.
-        self.installer.install([first_node], (22, 1, 3))
+        self.installer.install([first_node], self.old_version)
         self.redpanda.restart_nodes([first_node])
         unique_versions = wait_for_num_versions(self.redpanda, 1)
-        assert "v22.1.3" in unique_versions, unique_versions
+        assert self.old_version_str in unique_versions, unique_versions
 
         # Only once we upgrade the rest of the nodes do we converge on the new
         # version.
         self.installer.install([first_node], RedpandaInstaller.HEAD)
         self.redpanda.restart_nodes(self.redpanda.nodes)
         unique_versions = wait_for_num_versions(self.redpanda, 1)
-        assert "v22.1.3" not in unique_versions, unique_versions
+        assert self.old_version_str not in unique_versions, unique_versions
 
 
 class UpgradeFromPriorFeatureVersionTest(RedpandaTest):
@@ -142,6 +144,8 @@ class UpgradeBackToBackTest(PreallocNodesTest):
     CONSUMER_GROUP_READERS = 4
     topics = (TopicSpec(partition_count=3, replication_factor=3), )
 
+    oldest_version = (21, 11)
+
     def __init__(self, test_context):
         if self.debug_mode:
             self.MSG_SIZE = 10
@@ -154,10 +158,8 @@ class UpgradeBackToBackTest(PreallocNodesTest):
                                                     num_brokers=3,
                                                     node_prealloc_count=1)
         self.installer = self.redpanda._installer
-        self.intermediate_version = self.installer.highest_from_prior_feature_version(
-            RedpandaInstaller.HEAD)
-        self.initial_version = self.installer.highest_from_prior_feature_version(
-            self.intermediate_version)
+        self.versions = []
+        self.current_version = None
 
         self._producer = KgoVerifierProducer(test_context, self.redpanda,
                                              self.topic, self.MSG_SIZE,
@@ -168,8 +170,7 @@ class UpgradeBackToBackTest(PreallocNodesTest):
             self.redpanda,
             self.topic,
             self.MSG_SIZE,
-            nodes=self.preallocated_nodes,
-            debug_logs=True)
+            nodes=self.preallocated_nodes)
         self._rand_consumer = KgoVerifierRandomConsumer(
             test_context, self.redpanda, self.topic, self.MSG_SIZE,
             self.RANDOM_READ_COUNT, self.RANDOM_READ_PARALLEL,
@@ -186,73 +187,59 @@ class UpgradeBackToBackTest(PreallocNodesTest):
             self._seq_consumer, self._rand_consumer, self._cg_consumer
         ]
 
+    def load_versions(self, single_upgrade: bool):
+        # Special case: just one upgrade
+        if single_upgrade:
+            self.versions = [
+                self.installer.highest_from_prior_feature_version(
+                    RedpandaInstaller.HEAD), RedpandaInstaller.HEAD
+            ]
+            return
+
+        else:
+            self.versions = self.load_version_range(self.oldest_version)
+
+    def install_next(self):
+        v = self.versions.pop(0)
+        self.logger.info(f"Installing version {v}...")
+        self.installer.install(self.redpanda.nodes, v)
+        self.current_version = v
+
     def setUp(self):
-        self.installer.install(self.redpanda.nodes, self.initial_version)
-        super(UpgradeBackToBackTest, self).setUp()
+        pass
 
     @cluster(num_nodes=4, log_allow_list=PREV_VERSION_LOG_ALLOW_LIST)
     @parametrize(single_upgrade=True)
     @parametrize(single_upgrade=False)
     def test_upgrade_with_all_workloads(self, single_upgrade):
-        if single_upgrade:
-            # If the test should exercise workloads with just a single upgrade,
-            # start at the intermediate version -- this test will just test a
-            # rolling restart followed by a rolling upgrade.
-            self.initial_version = self.intermediate_version
-            self.installer.install(self.redpanda.nodes, self.initial_version)
-            self.redpanda.restart_nodes(self.redpanda.nodes,
-                                        start_timeout=90,
-                                        stop_timeout=90)
-        self._producer.start(clean=False)
-        self._producer.wait_for_offset_map()
-        wrote_at_least = self._producer.produce_status.acked
-        for consumer in self._consumers:
-            consumer.start(clean=False)
+        self.load_versions(single_upgrade)
 
-        def stop_producer():
-            self._producer.wait()
-            assert self._producer.produce_status.acked == self.PRODUCE_COUNT
+        # Have we already started our producer/consumer?
+        started = False
 
-        produce_during_upgrade = self.initial_version >= (22, 1, 0)
-        if produce_during_upgrade:
-            # Give ample time to restart, given the running workload.
-            self.installer.install(self.redpanda.nodes,
-                                   self.intermediate_version)
-            self.redpanda.rolling_restart_nodes(self.redpanda.nodes,
-                                                start_timeout=90,
-                                                stop_timeout=90)
-        else:
-            # If there's no maintenance mode, write workloads during the
-            # restart may be affected, so stop our writes up front.
-            stop_producer()
-            self.installer.install(self.redpanda.nodes,
-                                   self.intermediate_version)
-            self.redpanda.rolling_restart_nodes(self.redpanda.nodes,
-                                                start_timeout=90,
-                                                stop_timeout=90,
-                                                use_maintenance_mode=False)
+        # Is our producer/consumer currently stopped (having already been started)?
+        paused = False
 
-            # When upgrading from versions that don't support maintenance mode
-            # (v21.11 and below), there is a migration of the consumer offsets
-            # topic to be mindful of.
-            rpk = RpkTool(self.redpanda)
+        wrote_at_least = None
 
-            def _consumer_offsets_present():
-                try:
-                    rpk.describe_topic("__consumer_offsets")
-                except Exception as e:
-                    if "Topic not found" in str(e):
-                        return False
-                return True
+        for current_version in self.upgrade_through_versions(self.versions):
+            if not started:
+                # First version, start up the workload
+                self._producer.start(clean=False)
+                self._producer.wait_for_offset_map()
+                wrote_at_least = self._producer.produce_status.acked
+                for consumer in self._consumers:
+                    consumer.start(clean=False)
+                started = True
 
-            wait_until(_consumer_offsets_present,
-                       timeout_sec=90,
-                       backoff_sec=3)
-
-        self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
-        self.redpanda.rolling_restart_nodes(self.redpanda.nodes,
-                                            start_timeout=90,
-                                            stop_timeout=90)
+            if current_version[0:2] == (21, 11):
+                # Stop the producer before the next upgrade hop: 21.11 -> 22.1 upgrades
+                # are not graceful
+                self._producer.wait()
+                assert self._producer.produce_status.acked == self.PRODUCE_COUNT
+                paused = True
+            elif current_version[0:2] == (22, 1) and paused:
+                self._producer.start(clean=False)
 
         for consumer in self._consumers:
             consumer.wait()
@@ -278,16 +265,19 @@ class UpgradeWithWorkloadTest(EndToEndTest):
     """
     def setUp(self):
         super(UpgradeWithWorkloadTest, self).setUp()
-        # Start at a version that supports rolling restarts.
-        self.initial_version = (22, 1, 3)
 
         # Use a relatively low throughput to give the restarted node a chance
         # to catch up. If the node is particularly slow compared to the others
         # (e.g. a locally-built debug binary), catching up can take a while.
         self.producer_msgs_per_sec = 10
-        install_opts = InstallOptions(version=self.initial_version)
-        self.start_redpanda(num_nodes=3, install_opts=install_opts)
+
+        # Start the prior feature version, we will upgrade to latest.
+        self.start_redpanda(
+            num_nodes=3,
+            install_opts=InstallOptions(install_previous_version=True))
         self.installer = self.redpanda._installer
+        self.initial_version = self.installer.highest_from_prior_feature_version(
+            RedpandaInstaller.HEAD)
 
         # Start running a workload.
         spec = TopicSpec(name="topic", partition_count=2, replication_factor=3)
@@ -537,105 +527,6 @@ class UpgradeFromPriorFeatureVersionCloudStorageTest(RedpandaTest):
                                         target_bytes=local_retention_bytes +
                                         segment_bytes,
                                         timeout_sec=30)
-
-
-class UpgradeFrom22_2_7VerifyMigratedRetentionSettings(RedpandaTest):
-    """
-    Check that a mixed-version cluster does not run into issues with
-    an older node trying to read cloud storage data from a newer node.
-    """
-
-    segment_size = 1000000  # 1MB
-
-    def __init__(self, test_context):
-        si_settings = SISettings(test_context,
-                                 log_segment_size=self.segment_size)
-        super().__init__(
-            test_context=test_context,
-            num_brokers=3,
-            si_settings=si_settings,
-            extra_rp_conf={
-                # We will exercise storage/cloud_storage read paths, get the
-                # batch cache out of the way to ensure reads hit storage layer.
-                "disable_batch_cache": True,
-                # We will manually manipulate leaderships, do not want to fight
-                # with the leader balancer
-                "enable_leader_balancer": False,
-            })
-        self.installer = self.redpanda._installer
-        self.rpk = RpkTool(self.redpanda)
-        self.s3_bucket_name = si_settings.cloud_storage_bucket
-
-    # This test starts the Redpanda service inline (see 'install_and_start') at the beginning
-    # of the test body. By default, in the Azure CDT env, the service startup
-    # logic attempts to set the azure specific cluster configs.
-    # However, these did not exist prior to v23.1 and the test would fail
-    # before it can be skipped.
-    def setUp(self):
-        pass
-
-    def install_and_start(self):
-        self.installer.install(self.redpanda.nodes, (22, 2, 7))
-        super().setUp()
-
-    @cluster(num_nodes=3, log_allow_list=RESTART_LOG_ALLOW_LIST)
-    @skip_azure_blob_storage
-    def test_upgrade(self):
-        """
-        Verify that there is no data loss with topics that have been 'upgraded',
-        i.e. that is topics pre 22.2 that had remote-write enabled before any
-        cloud retention settings were introduced.
-
-        Their respective new cloud retention settings should be 'infinity' and
-        there should be no truncations or compactions performed on the partitions
-        """
-        self.install_and_start()
-
-        total_segments = 10
-        topic = TopicSpec(name='migrating-topic',
-                          partition_count=1,
-                          replication_factor=3,
-                          cleanup_policy=TopicSpec.CLEANUP_DELETE)
-
-        # Create a topic with a retention size lower then the total proposed
-        # number of bytes to be pushed
-        self.rpk.create_topic(topic.name,
-                              partitions=topic.partition_count,
-                              replicas=topic.replication_factor,
-                              config={
-                                  'segment.bytes': self.segment_size,
-                                  'cleanup.policy': topic.cleanup_policy
-                              })
-
-        produce_until_segments(self.redpanda, topic.name, 0, total_segments)
-
-        def cloud_log_size() -> int:
-            s3_snapshot = BucketView(self.redpanda, topics=[topic])
-            cloud_log_size = s3_snapshot.cloud_log_size_for_ntp(topic.name, 0)
-            self.logger.debug(f"Current cloud log size is: {cloud_log_size}")
-            return cloud_log_size
-
-        # Wait for everything to be uploaded to the cloud.
-        wait_until_segments(self.redpanda, topic.name, 0, total_segments)
-
-        total_cloud_size_before_upgrade = cloud_log_size()
-
-        # Upgrade and restart all of the nodes
-        self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
-        self.redpanda.rolling_restart_nodes(self.redpanda.nodes,
-                                            start_timeout=120,
-                                            stop_timeout=120)
-
-        self.redpanda.set_cluster_config(
-            {"cloud_storage_housekeeping_interval_ms": 100},
-            expect_restart=True)
-
-        # Wait for 5s, enough time for a possible erraneous truncation or compaction to occur
-        time.sleep(5)
-
-        # Assert manifest has not been mutated by comparing sizes
-        total_cloud_size_after_upgrade = cloud_log_size()
-        assert total_cloud_size_before_upgrade <= total_cloud_size_after_upgrade, f"Mismatch in cloud storage size after upgrade, bytes before: {total_cloud_size_before_upgrade} bytes_after: {total_cloud_size_after_upgrade}"
 
 
 class RedpandaInstallerTest(RedpandaTest):

@@ -1235,6 +1235,14 @@ configuration::configuration()
       "remote storage (sec)",
       {.visibility = visibility::tunable},
       std::nullopt)
+  , cloud_storage_manifest_max_upload_interval_sec(
+      *this,
+      "cloud_storage_manifest_max_upload_interval_sec",
+      "Wait at least this long between partition manifest uploads. Actual time "
+      "between uploads may be greater than this interval. If this is null, "
+      "metadata will be updated after each segment upload.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      60s)
   , cloud_storage_readreplica_manifest_sync_timeout_ms(
       *this,
       "cloud_storage_readreplica_manifest_sync_timeout_ms",
@@ -1831,7 +1839,14 @@ configuration::configuration()
       "considering itself to be isolated",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       3000,
-      {.min = 100, .max = 10000}) {}
+      {.min = 100, .max = 10000})
+  , controller_snapshot_max_age_sec(
+      *this,
+      "controller_snapshot_max_age_sec",
+      "Max time that will pass before we make an attempt to create a "
+      "controller snapshot, after a new controller command appears",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      60s) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

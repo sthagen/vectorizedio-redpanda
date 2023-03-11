@@ -381,6 +381,10 @@ private:
     ss::future<ss::json::json_return_type>
       redpanda_services_restart_handler(std::unique_ptr<ss::httpd::request>);
 
+    // Debug routes
+    ss::future<ss::json::json_return_type>
+      cloud_storage_usage_handler(std::unique_ptr<ss::httpd::request>);
+
     ss::future<> throw_on_error(
       ss::httpd::request& req,
       std::error_code ec,
@@ -427,4 +431,7 @@ private:
     ss::sharded<cloud_storage::topic_recovery_service>& _topic_recovery_service;
     ss::sharded<cluster::topic_recovery_status_frontend>&
       _topic_recovery_status_frontend;
+    // Value before the temporary override
+    std::chrono::milliseconds _default_blocked_reactor_notify;
+    ss::timer<> _blocked_reactor_notify_reset_timer;
 };

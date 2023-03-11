@@ -27,6 +27,8 @@ class shard_table;
 class topics_frontend;
 class topic_table;
 struct topic_table_delta;
+class topic_table_partition_generator;
+class cloud_storage_size_reducer;
 class members_manager;
 class members_table;
 class metadata_cache;
@@ -57,6 +59,7 @@ class self_test_backend;
 class self_test_frontend;
 class topic_recovery_status_frontend;
 class node_isolation_watcher;
+struct controller_snapshot;
 
 namespace node {
 class local_monitor;

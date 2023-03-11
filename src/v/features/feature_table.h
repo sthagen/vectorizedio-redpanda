@@ -54,6 +54,8 @@ enum class feature : std::uint64_t {
     node_isolation = 1ULL << 19U,
     group_offset_retention = 1ULL << 20U,
     rpc_transport_unknown_errc = 1ULL << 21U,
+    membership_change_controller_cmds = 1ULL << 22U,
+    controller_snapshots = 1ULL << 23U,
 
     // Dummy features for testing only
     test_alpha = 1ULL << 62U,
@@ -238,6 +240,18 @@ constexpr static std::array feature_schema{
     "rpc_transport_unknown_errc",
     feature::rpc_transport_unknown_errc,
     feature_spec::available_policy::always,
+    feature_spec::prepare_policy::always},
+  feature_spec{
+    cluster::cluster_version{10},
+    "membership_change_controller_cmds",
+    feature::membership_change_controller_cmds,
+    feature_spec::available_policy::always,
+    feature_spec::prepare_policy::always},
+  feature_spec{
+    cluster::cluster_version{10},
+    "controller_snapshots",
+    feature::controller_snapshots,
+    feature_spec::available_policy::explicit_only,
     feature_spec::prepare_policy::always},
 
   // For testing, a feature that does not auto-activate
@@ -433,6 +447,9 @@ public:
           serde::to_iobuf(f));
         return std::move(builder).build();
     }
+
+    // Assert out on startup if we appear to have upgraded too far
+    void assert_compatible_version(bool);
 
 private:
     // Only for use by our friends feature backend & manager

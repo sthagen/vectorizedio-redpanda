@@ -300,10 +300,9 @@ ss::future<> recovery_stm::send_install_snapshot_request() {
             .chunk = std::move(chunk),
             .done = (_sent_snapshot_bytes + chunk_size) == _snapshot_size};
 
-          vlog(
-            _ctxlog.trace,
-            "Sending install snapshot request, last included index: {}",
-            req.last_included_index);
+          _sent_snapshot_bytes += chunk_size;
+
+          vlog(_ctxlog.trace, "sending install_snapshot request: {}", req);
           auto seq = _ptr->next_follower_sequence(_node_id);
           _ptr->update_suppress_heartbeats(
             _node_id, seq, heartbeats_suppressed::yes);
@@ -315,7 +314,7 @@ ss::future<> recovery_stm::send_install_snapshot_request() {
             .then([this](result<install_snapshot_reply> reply) {
                 return handle_install_snapshot_reply(
                   _ptr->validate_reply_target_node(
-                    "install_snapshot", std::move(reply)));
+                    "install_snapshot", reply, _node_id.id()));
             })
             .finally([this, seq] {
                 _ptr->update_suppress_heartbeats(
@@ -334,6 +333,7 @@ ss::future<> recovery_stm::close_snapshot_reader() {
 
 ss::future<> recovery_stm::handle_install_snapshot_reply(
   result<install_snapshot_reply> reply) {
+    vlog(_ctxlog.trace, "received install_snapshot reply: {}", reply);
     // snapshot delivery failed
     if (reply.has_error() || !reply.value().success) {
         // if snapshot delivery failed, stop recovery to update follower state
@@ -346,10 +346,9 @@ ss::future<> recovery_stm::handle_install_snapshot_reply(
             return _ptr->step_down(term, "snapshot response with greater term");
         });
     }
-    _sent_snapshot_bytes = reply.value().bytes_stored;
 
     // we will send next chunk as a part of recovery loop
-    if (_sent_snapshot_bytes != _snapshot_size) {
+    if (reply.value().bytes_stored != _snapshot_size) {
         return ss::now();
     }
 
@@ -504,7 +503,7 @@ ss::future<result<append_entries_reply>> recovery_stm::dispatch_append_entries(
       .append_entries(_node_id.id(), std::move(r), std::move(opts))
       .then([this](result<append_entries_reply> reply) {
           return _ptr->validate_reply_target_node(
-            "append_entries_recovery", std::move(reply));
+            "append_entries_recovery", reply, _node_id.id());
       });
 }
 

@@ -13,6 +13,7 @@
 
 #include "features/feature_table.h"
 #include "hashing/crc32c.h"
+#include "likely.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "raft/append_entries_buffer.h"
@@ -98,7 +99,8 @@ public:
       std::optional<std::reference_wrapper<recovery_throttle>>,
       recovery_memory_quota&,
       features::feature_table&,
-      std::optional<voter_priority> = std::nullopt);
+      std::optional<voter_priority> = std::nullopt,
+      keep_snapshotted_log = keep_snapshotted_log::no);
 
     /// Initial call. Allow for internal state recovery
     ss::future<> start();
@@ -116,21 +118,29 @@ public:
 
     ss::future<timeout_now_reply> timeout_now(timeout_now_request&& r);
 
-    /// This method adds multiple members to the group and performs
-    /// configuration update
+    /// This method adds member to a group
     ss::future<std::error_code>
-      add_group_members(std::vector<model::broker>, model::revision_id);
+      add_group_member(model::broker, model::revision_id);
     /// Updates given member configuration
     ss::future<std::error_code> update_group_member(model::broker);
-    // Removes members from group
+    // Removes member from group
     ss::future<std::error_code>
-      remove_members(std::vector<model::node_id>, model::revision_id);
-
+      remove_member(model::node_id, model::revision_id);
     /**
      * Replace configuration, uses revision provided with brokers
      */
     ss::future<std::error_code>
       replace_configuration(std::vector<broker_revision>, model::revision_id);
+
+    /**
+     * New simplified configuration change API, accepting only vnode instead of
+     * full broker object
+     */
+    ss::future<std::error_code> add_group_member(vnode, model::revision_id);
+    ss::future<std::error_code> remove_member(vnode, model::revision_id);
+    ss::future<std::error_code>
+      replace_configuration(std::vector<vnode>, model::revision_id);
+
     // Abort ongoing configuration change - may cause data loss
     ss::future<std::error_code> abort_configuration_change(model::revision_id);
     // Revert current configuration change - this is safe and will never cause
@@ -182,6 +192,20 @@ public:
      * consensus operations lock.
      */
     ss::future<> write_snapshot(write_snapshot_cfg);
+
+    struct opened_snapshot {
+        raft::snapshot_metadata metadata;
+        storage::snapshot_reader reader;
+
+        ss::future<> close() { return reader.close(); }
+    };
+
+    // Open the current snapshot for reading (if present)
+    ss::future<std::optional<opened_snapshot>> open_snapshot();
+
+    std::filesystem::path get_snapshot_path() const {
+        return _snapshot_mgr.snapshot_path();
+    }
 
     /// Increment and returns next append_entries order tracking sequence for
     /// follower with given node id
@@ -287,6 +311,8 @@ public:
 
     ss::future<std::optional<storage::timequery_result>>
     timequery(storage::timequery_config cfg);
+
+    model::offset last_snapshot_index() const { return _last_snapshot_index; }
 
     model::offset start_offset() const {
         return model::next_offset(_last_snapshot_index);
@@ -401,7 +427,7 @@ private:
     ss::future<append_entries_reply>
     do_append_entries(append_entries_request&&);
     ss::future<install_snapshot_reply>
-    do_install_snapshot(install_snapshot_request&& r);
+    do_install_snapshot(install_snapshot_request r);
     ss::future<> do_start();
 
     ss::future<result<replicate_result>> dispatch_replicate(
@@ -531,39 +557,60 @@ private:
 
     template<typename Reply>
     result<Reply> validate_reply_target_node(
-      std::string_view request, result<Reply>&& reply) {
-        if (unlikely(reply && reply.value().target_node_id != self())) {
-            /**
-             * if received node_id is not initialized it means that there were
-             * no raft group instance on target node to handle the request.
-             */
-            if (reply.value().target_node_id.id() == model::node_id{}) {
-                // A grace period, where perhaps it is okay that a peer
-                // hasn't seen the controller log message that created
-                // this partition yet.
-                static constexpr clock_type::duration grace = 30s;
-                bool instantiated_recently = (clock_type::now()
-                                              - _instantiated_at)
-                                             < grace;
-                if (!instantiated_recently) {
-                    vlog(
-                      _ctxlog.warn,
-                      "received {} reply from the node where ntp {} does not "
-                      "exists",
-                      request,
-                      _log.config().ntp());
-                }
-                return result<Reply>(errc::group_not_exists);
+      std::string_view request,
+      result<Reply> reply,
+      model::node_id requested_node_id) {
+        if (reply) {
+            // since we are not going to introduce the node in ADL versions of
+            // replies it may be not initialzed, in this case just ignore the
+            // check
+            if (unlikely(
+                  reply.value().node_id != vnode{}
+                  && reply.value().node_id.id() != requested_node_id)) {
+                vlog(
+                  _ctxlog.warn,
+                  "received {} reply from a node that id does not match the "
+                  "requested one. Received: {}, requested: {}",
+                  request,
+                  reply.value().node_id.id(),
+                  requested_node_id);
+                return result<Reply>(errc::invalid_target_node);
             }
+            if (unlikely(reply.value().target_node_id != self())) {
+                /**
+                 * if received node_id is not initialized it means that there
+                 * were no raft group instance on target node to handle the
+                 * request.
+                 */
+                if (reply.value().target_node_id.id() == model::node_id{}) {
+                    // A grace period, where perhaps it is okay that a peer
+                    // hasn't seen the controller log message that created
+                    // this partition yet.
+                    static constexpr clock_type::duration grace = 30s;
+                    bool instantiated_recently = (clock_type::now()
+                                                  - _instantiated_at)
+                                                 < grace;
+                    if (!instantiated_recently) {
+                        vlog(
+                          _ctxlog.warn,
+                          "received {} reply from the node where ntp {} does "
+                          "not "
+                          "exists",
+                          request,
+                          _log.config().ntp());
+                    }
+                    return result<Reply>(errc::group_not_exists);
+                }
 
-            vlog(
-              _ctxlog.warn,
-              "received {} reply addressed to different node: {}, current "
-              "node: {}",
-              request,
-              reply.value().target_node_id,
-              _self);
-            return result<Reply>(errc::invalid_target_node);
+                vlog(
+                  _ctxlog.warn,
+                  "received {} reply addressed to different node: {}, current "
+                  "node: {}",
+                  request,
+                  reply.value().target_node_id,
+                  _self);
+                return result<Reply>(errc::invalid_target_node);
+            }
         }
         return std::move(reply);
     }
@@ -586,7 +633,7 @@ private:
         return false;
     }
 
-    void maybe_upgrade_configuration(group_configuration&);
+    void maybe_upgrade_configuration_to_v4(group_configuration&);
 
     void update_confirmed_term();
     // args
@@ -669,6 +716,11 @@ private:
     model::offset _visibility_upper_bound_index;
     voter_priority _target_priority = voter_priority::max();
     std::optional<voter_priority> _node_priority_override;
+    keep_snapshotted_log _keep_snapshotted_log;
+
+    // used to track currently installed snapshot
+    model::offset _received_snapshot_index;
+    size_t _received_snapshot_bytes = 0;
 
     /**
      * We keep an idex of the most recent entry replicated with quorum

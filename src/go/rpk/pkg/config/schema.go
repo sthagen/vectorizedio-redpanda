@@ -67,7 +67,6 @@ type RedpandaNodeConfig struct {
 	EmptySeedStartsCluster     *bool                     `yaml:"empty_seed_starts_cluster,omitempty" json:"empty_seed_starts_cluster,omitempty"`
 	SeedServers                []SeedServer              `yaml:"seed_servers" json:"seed_servers"`
 	RPCServer                  SocketAddress             `yaml:"rpc_server,omitempty" json:"rpc_server"`
-	RPCServerTLS               []ServerTLS               `yaml:"rpc_server_tls,omitempty" json:"rpc_server_tls"`
 	KafkaAPI                   []NamedAuthNSocketAddress `yaml:"kafka_api,omitempty" json:"kafka_api"`
 	KafkaAPITLS                []ServerTLS               `yaml:"kafka_api_tls,omitempty" json:"kafka_api_tls"`
 	AdminAPI                   []NamedSocketAddress      `yaml:"admin,omitempty" json:"admin"`
@@ -193,7 +192,6 @@ type RpkConfig struct {
 	KafkaAPI                 RpkKafkaAPI `yaml:"kafka_api,omitempty" json:"kafka_api"`
 	AdminAPI                 RpkAdminAPI `yaml:"admin_api,omitempty" json:"admin_api"`
 	AdditionalStartFlags     []string    `yaml:"additional_start_flags,omitempty"  json:"additional_start_flags"`
-	EnableUsageStats         bool        `yaml:"enable_usage_stats,omitempty" json:"enable_usage_stats"`
 	TuneNetwork              bool        `yaml:"tune_network,omitempty" json:"tune_network"`
 	TuneDiskScheduler        bool        `yaml:"tune_disk_scheduler,omitempty" json:"tune_disk_scheduler"`
 	TuneNomerges             bool        `yaml:"tune_disk_nomerges,omitempty" json:"tune_disk_nomerges"`

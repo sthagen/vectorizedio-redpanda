@@ -161,6 +161,10 @@ public:
         return _raft->replace_configuration(
           std::move(brokers), new_revision_id);
     }
+    ss::future<std::error_code> update_replica_set(
+      std::vector<raft::vnode> nodes, model::revision_id new_revision_id) {
+        return _raft->replace_configuration(std::move(nodes), new_revision_id);
+    }
 
     raft::group_configuration group_configuration() const {
         return _raft->config();
@@ -242,6 +246,8 @@ public:
     /// method returned 'true'.
     bool cloud_data_available() const;
 
+    uint64_t cloud_log_size() const;
+
     /// Starting offset in the object store
     model::offset start_cloud_offset() const;
 
@@ -284,10 +290,6 @@ public:
             return std::nullopt;
         }
     }
-
-    /// Fixture testing hook, for tests that would like to stop the
-    /// usual archiver and start their own
-    ss::future<> stop_archiver();
 
     uint64_t upload_backlog_size() const;
 

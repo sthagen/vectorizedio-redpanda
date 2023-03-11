@@ -541,7 +541,7 @@ class ClusterConfigTest(RedpandaTest):
             if 'example' in p:
                 valid_value = p['example']
                 if p['type'] == "array":
-                    valid_value = yaml.load(valid_value)
+                    valid_value = yaml.full_load(valid_value)
             elif p['type'] == 'integer':
                 if initial_value:
                     valid_value = initial_value * 2
@@ -1423,10 +1423,9 @@ class ClusterConfigAzureSharedKey(RedpandaTest):
     ), )
 
     def __init__(self, test_context):
-        self.si_settings = SISettings(
-            test_context,
-            log_segment_size=self.segment_size,
-            cloud_storage_segment_max_upload_interval_sec=1)
+        self.si_settings = SISettings(test_context,
+                                      log_segment_size=self.segment_size,
+                                      fast_uploads=True)
         super().__init__(test_context,
                          log_level="trace",
                          si_settings=self.si_settings,
