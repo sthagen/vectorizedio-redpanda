@@ -678,9 +678,10 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     co_return ret_t(_commit_index);
 }
 
-ss::future<result<replicate_result>> chain_stages(replicate_stages stages) {
+ss::future<result<replicate_result>>
+consensus::chain_stages(replicate_stages stages) {
     return stages.request_enqueued.then_wrapped(
-      [f = std::move(stages.replicate_finished)](
+      [this, f = std::move(stages.replicate_finished)](
         ss::future<> enqueued) mutable {
           if (enqueued.failed()) {
               return enqueued
@@ -688,7 +689,7 @@ ss::future<result<replicate_result>> chain_stages(replicate_stages stages) {
                     vlog(
                       raftlog.debug, "replicate first stage exception - {}", e);
                 })
-                .then([f = std::move(f)]() mutable {
+                .then([this, f = std::move(f)]() mutable {
                     return f.discard_result()
                       .handle_exception([](const std::exception_ptr& e) {
                           vlog(
@@ -696,9 +697,14 @@ ss::future<result<replicate_result>> chain_stages(replicate_stages stages) {
                             "ignoring replicate second stage exception - {}",
                             e);
                       })
-                      .then([] {
-                          return result<replicate_result>(make_error_code(
-                            errc::replicate_first_stage_exception));
+                      .then([this] {
+                          if (_as.abort_requested()) {
+                              return result<replicate_result>(
+                                make_error_code(errc::shutting_down));
+                          } else {
+                              return result<replicate_result>(make_error_code(
+                                errc::replicate_first_stage_exception));
+                          }
                       });
                 });
           }
@@ -3388,7 +3394,8 @@ follower_metrics build_follower_metrics(
       .last_heartbeat = meta.last_received_reply_timestamp,
       .is_live = is_live,
       .under_replicated = (meta.is_recovering || !is_live)
-                          && meta.match_index < lstats.dirty_offset};
+                          && meta.match_index < lstats.dirty_offset
+                          && !meta.is_learner};
 }
 
 std::vector<follower_metrics> consensus::get_follower_metrics() const {

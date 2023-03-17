@@ -1922,10 +1922,9 @@ struct topic_table_delta {
                || type == op_type::force_abort_update;
     }
 
-    bool is_reconfiguration_interrupt() const {
-        return type == op_type::cancel_update
-               || type == op_type::force_abort_update;
-    }
+    /// Preconditions: delta is of type that has replica_revisions and the node
+    /// is in the new assignment.
+    model::revision_id get_replica_revision(model::node_id) const;
 
     friend std::ostream& operator<<(std::ostream&, const topic_table_delta&);
     friend std::ostream& operator<<(std::ostream&, const op_type&);
@@ -3131,6 +3130,33 @@ struct node_metadata {
       = default;
     friend std::ostream& operator<<(std::ostream&, const node_metadata&);
 };
+
+// Node update types, used for communication between members_manager and
+// members_backend.
+//
+// NOTE: maintenance mode doesn't interact with the members_backend,
+// instead interacting with each core via their respective drain_manager.
+enum class node_update_type : int8_t {
+    // A node has been added to the cluster.
+    added,
+
+    // A node has been decommissioned from the cluster.
+    decommissioned,
+
+    // A node has been recommissioned after an incomplete decommission.
+    recommissioned,
+
+    // All reallocations associated with a given node update have completed
+    // (e.g. it's been fully decommissioned, indicating it can no longer be
+    // recommissioned).
+    reallocation_finished,
+
+    // node has been removed from the cluster
+    removed,
+};
+
+std::ostream& operator<<(std::ostream&, const node_update_type&);
+
 /**
  * Reconfiguration state indicates if ongoing reconfiguration is a result of
  * partition movement, cancellation or forced cancellation

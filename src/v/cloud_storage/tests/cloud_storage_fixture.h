@@ -8,6 +8,8 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
+#pragma once
+
 #include "cloud_storage/cache_service.h"
 #include "cloud_storage/tests/common_def.h"
 #include "cloud_storage/tests/s3_imposter.h"
@@ -25,12 +27,17 @@
 using namespace std::chrono_literals;
 using namespace cloud_storage;
 
+static constexpr model::cloud_credentials_source config_file{
+  model::cloud_credentials_source::config_file};
+
 struct cloud_storage_fixture : s3_imposter_fixture {
     cloud_storage_fixture() {
         tmp_directory.create().get();
-        constexpr size_t cache_size = 1024 * 1024 * 1024;
-
-        cache.start(tmp_directory.get_path(), cache_size).get();
+        cache
+          .start(
+            tmp_directory.get_path(),
+            config::mock_binding<uint64_t>(1024 * 1024 * 1024))
+          .get();
 
         cache.invoke_on_all([](cloud_storage::cache& c) { return c.start(); })
           .get();

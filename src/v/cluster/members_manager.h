@@ -86,36 +86,20 @@ public:
     static constexpr ss::shard_id shard = 0;
     static constexpr size_t max_updates_queue_size = 100;
 
-    // Update types, used for communication between the manager and backend.
-    //
-    // NOTE: maintenance mode doesn't interact with the members_backend,
-    // instead interacting with each core via their respective drain_manager.
-    enum class node_update_type : int8_t {
-        // A node has been added to the cluster.
-        added,
-
-        // A node has been decommissioned from the cluster.
-        decommissioned,
-
-        // A node has been recommissioned after an incomplete decommission.
-        recommissioned,
-
-        // All reallocations associated with a given node update have completed
-        // (e.g. it's been fully decommissioned, indicating it can no longer be
-        // recommissioned).
-        reallocation_finished,
-
-        // node has been removed from the cluster
-        removed,
-    };
-
     // Node update information to be processed by the members_backend.
     struct node_update {
         model::node_id id;
         node_update_type type;
         model::offset offset;
+        // indicates if command needs a raft 0 configuration update
+        bool need_raft0_update = false;
+        // revision of a related decommission command, present only in
+        // recommission node_update
+        std::optional<model::revision_id> decommission_update_revision;
+
         friend bool operator==(const node_update&, const node_update&)
           = default;
+
         friend std::ostream& operator<<(std::ostream&, const node_update&);
     };
 
@@ -307,12 +291,19 @@ private:
 
     ss::sharded<ss::abort_source>& _as;
 
-    absl::flat_hash_set<model::node_id> _connections_to_remove;
+    // A set of node ids for which the removed command has already been
+    // processed, but that are still members of the controller group. We can
+    // close a connection to these nodes only after they leave the controller
+    // group and are fully removed.
+    absl::flat_hash_set<model::node_id> _removed_nodes_still_in_raft0;
 
     const config::tls_config _rpc_tls_config;
 
     // Gate with which to guard new work (e.g. if stop() has been called).
     ss::gate _gate;
+
+    // Node membership updates that are currently processed by members_backend
+    absl::flat_hash_map<model::node_id, node_update> _in_progress_updates;
 
     // Cluster membership updates that have yet to be released via the call to
     // get_node_updates().
@@ -337,6 +328,4 @@ private:
     model::offset _first_node_operation_command_offset = model::offset::max();
 };
 
-std::ostream&
-operator<<(std::ostream&, const members_manager::node_update_type&);
 } // namespace cluster

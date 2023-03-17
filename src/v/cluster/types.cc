@@ -225,6 +225,19 @@ topic_table_delta::topic_table_delta(
   , previous_replica_set(std::move(previous))
   , replica_revisions(std::move(replica_revisions)) {}
 
+model::revision_id
+topic_table_delta::get_replica_revision(model::node_id replica) const {
+    vassert(
+      replica_revisions, "ntp {}: replica_revisions map must be present", ntp);
+    auto rev_it = replica_revisions->find(replica);
+    vassert(
+      rev_it != replica_revisions->end(),
+      "ntp {}: node {} must be present in the replica_revisions map",
+      ntp,
+      replica);
+    return rev_it->second;
+}
+
 ntp_reconciliation_state::ntp_reconciliation_state(
   model::ntp ntp,
   std::vector<backend_operation> ops,
@@ -976,6 +989,22 @@ std::ostream& operator<<(std::ostream& o, const broker_state& state) {
 std::ostream& operator<<(std::ostream& o, const node_metadata& nm) {
     fmt::print(o, "{{broker: {}, state: {} }}", nm.broker, nm.state);
     return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const node_update_type& tp) {
+    switch (tp) {
+    case node_update_type::added:
+        return o << "added";
+    case node_update_type::decommissioned:
+        return o << "decommissioned";
+    case node_update_type::recommissioned:
+        return o << "recommissioned";
+    case node_update_type::reallocation_finished:
+        return o << "reallocation_finished";
+    case node_update_type::removed:
+        return o << "removed";
+    }
+    return o << "unknown";
 }
 
 std::ostream& operator<<(std::ostream& o, reconfiguration_state update) {

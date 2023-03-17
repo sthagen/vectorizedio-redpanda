@@ -124,12 +124,9 @@ void partition_balancer_planner::init_per_node_state(
     }
 
     for (const auto& node_report : health_report.node_reports) {
-        uint64_t total = 0;
-        uint64_t free = 0;
-        for (const auto& disk : node_report.local_state.disks) {
-            total += disk.total;
-            free += disk.free;
-        }
+        const uint64_t total = node_report.local_state.data_disk.total;
+        const uint64_t free = node_report.local_state.data_disk.free;
+
         rrs.node_disk_reports.emplace(
           node_report.id, node_disk_space(node_report.id, total, total - free));
     }
@@ -215,29 +212,23 @@ partition_constraints partition_balancer_planner::get_partition_constraints(
     allocation_constraints allocation_constraints;
 
     // Add constraint on least disk usage
-    allocation_constraints.soft_constraints.push_back(
-      ss::make_lw_shared<soft_constraint>(
-        least_disk_filled(max_disk_usage_ratio, rrs.node_disk_reports)));
+    allocation_constraints.add(
+      least_disk_filled(max_disk_usage_ratio, rrs.node_disk_reports));
 
     // Add constraint on partition max_disk_usage_ratio overfill
     size_t upper_bound_for_partition_size = partition_size
                                             + _config.segment_fallocation_step;
-    allocation_constraints.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(disk_not_overflowed_by_partition(
-        max_disk_usage_ratio,
-        upper_bound_for_partition_size,
-        rrs.node_disk_reports)));
+    allocation_constraints.add(disk_not_overflowed_by_partition(
+      max_disk_usage_ratio,
+      upper_bound_for_partition_size,
+      rrs.node_disk_reports));
 
     // Add constraint on unavailable nodes
-    allocation_constraints.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(
-        distinct_from(rrs.timed_out_unavailable_nodes)));
+    allocation_constraints.add(distinct_from(rrs.timed_out_unavailable_nodes));
 
     // Add constraint on decommissioning nodes
     if (!rrs.decommissioning_nodes.empty()) {
-        allocation_constraints.hard_constraints.push_back(
-          ss::make_lw_shared<hard_constraint>(
-            distinct_from(rrs.decommissioning_nodes)));
+        allocation_constraints.add(distinct_from(rrs.decommissioning_nodes));
     }
 
     return partition_constraints(

@@ -22,6 +22,8 @@
 
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/coroutine/maybe_yield.hh>
+#include <seastar/util/later.hh>
 
 #include <absl/container/node_hash_set.h>
 #include <sys/resource.h>
@@ -55,25 +57,17 @@ allocation_constraints partition_allocator::default_constraints(
   const partition_allocation_domain domain) {
     allocation_constraints req;
 
-    req.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(distinct_nodes()));
-
-    req.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(not_fully_allocated()));
-
-    req.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(is_active()));
+    req.add(distinct_nodes());
+    req.add(not_fully_allocated());
+    req.add(is_active());
 
     if (domain == partition_allocation_domains::common) {
-        req.soft_constraints.push_back(
-          ss::make_lw_shared<soft_constraint>(least_allocated()));
+        req.add(least_allocated());
     } else {
-        req.soft_constraints.push_back(ss::make_lw_shared<soft_constraint>(
-          least_allocated_in_domain(domain)));
+        req.add(least_allocated_in_domain(domain));
     }
     if (_enable_rack_awareness()) {
-        req.soft_constraints.push_back(ss::make_lw_shared<soft_constraint>(
-          distinct_rack_preferred(*_state)));
+        req.add(distinct_rack_preferred(*_state));
     }
     return req;
 }
@@ -269,7 +263,7 @@ std::error_code partition_allocator::check_cluster_limits(
     return errc::success;
 }
 
-result<allocation_units::pointer>
+ss::future<result<allocation_units::pointer>>
 partition_allocator::allocate(allocation_request request) {
     vlog(
       clusterlog.trace,
@@ -278,7 +272,7 @@ partition_allocator::allocate(allocation_request request) {
 
     auto cluster_errc = check_cluster_limits(request);
     if (cluster_errc) {
-        return cluster_errc;
+        co_return cluster_errc;
     }
 
     intermediate_allocation<partition_assignment> assignments(
@@ -289,13 +283,14 @@ partition_allocator::allocate(allocation_request request) {
         auto replicas = allocate_partition(
           std::move(p_constraints), request.domain);
         if (!replicas) {
-            return replicas.error();
+            co_return replicas.error();
         }
         assignments.emplace_back(
           _state->next_group_id(), partition_id, std::move(replicas.value()));
+        co_await ss::coroutine::maybe_yield();
     }
 
-    return ss::make_foreign(std::make_unique<allocation_units>(
+    co_return ss::make_foreign(std::make_unique<allocation_units>(
       std::move(assignments).finish(), _state.get(), request.domain));
 }
 
@@ -352,40 +347,6 @@ result<allocation_units> partition_allocator::reallocate_partition(
       current_assignment.replicas,
       _state.get(),
       domain);
-}
-
-result<allocation_units> partition_allocator::reassign_decommissioned_replicas(
-  const partition_assignment& current_assignment,
-  const partition_allocation_domain domain) {
-    uint16_t replication_factor = current_assignment.replicas.size();
-    auto current_replicas = current_assignment.replicas;
-    std::erase_if(current_replicas, [this](const model::broker_shard& bs) {
-        auto it = _state->allocation_nodes().find(bs.node_id);
-        return it == _state->allocation_nodes().end()
-               || it->second->is_decommissioned();
-    });
-
-    auto req = default_constraints(domain);
-    req.hard_constraints.push_back(
-      ss::make_lw_shared<hard_constraint>(distinct_from(current_replicas)));
-
-    auto replicas = do_reallocate_partition(
-      partition_constraints(current_assignment.id, replication_factor),
-      domain,
-      current_replicas);
-
-    if (!replicas) {
-        return replicas.error();
-    }
-
-    partition_assignment assignment{
-      current_assignment.group,
-      current_assignment.id,
-      std::move(replicas.value()),
-    };
-
-    return allocation_units(
-      {std::move(assignment)}, current_replicas, _state.get(), domain);
 }
 
 void partition_allocator::deallocate(
