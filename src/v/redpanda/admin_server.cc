@@ -51,6 +51,7 @@
 #include "json/stringbuffer.h"
 #include "json/validator.h"
 #include "json/writer.h"
+#include "kafka/server/usage_manager.h"
 #include "kafka/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -75,6 +76,7 @@
 #include "redpanda/admin/api-doc/shadow_indexing.json.h"
 #include "redpanda/admin/api-doc/status.json.h"
 #include "redpanda/admin/api-doc/transaction.json.h"
+#include "redpanda/admin/api-doc/usage.json.h"
 #include "rpc/errc.h"
 #include "security/credential_store.h"
 #include "security/scram_algorithm.h"
@@ -126,6 +128,7 @@ admin_server::admin_server(
   ss::sharded<rpc::connection_cache>& connection_cache,
   ss::sharded<cluster::node_status_table>& node_status_table,
   ss::sharded<cluster::self_test_frontend>& self_test_frontend,
+  ss::sharded<kafka::usage_manager>& usage_manager,
   pandaproxy::rest::api* http_proxy,
   pandaproxy::schema_registry::api* schema_registry,
   ss::sharded<cloud_storage::topic_recovery_service>& topic_recovery_svc,
@@ -143,6 +146,7 @@ admin_server::admin_server(
   , _auth(config::shard_local_cfg().admin_api_require_auth.bind(), _controller)
   , _node_status_table(node_status_table)
   , _self_test_frontend(self_test_frontend)
+  , _usage_manager(usage_manager)
   , _http_proxy(http_proxy)
   , _schema_registry(schema_registry)
   , _topic_recovery_service(topic_recovery_svc)
@@ -220,6 +224,7 @@ void admin_server::configure_admin_routes() {
     register_hbadger_routes();
     register_transaction_routes();
     register_debug_routes();
+    register_usage_routes();
     register_self_test_routes();
     register_cluster_routes();
     register_shadow_indexing_routes();
@@ -1054,70 +1059,6 @@ void admin_server::register_config_routes() {
 
           return ss::make_ready_future<ss::json::json_return_type>(
             ss::json::json_void());
-      });
-
-    register_route<superuser>(
-      ss::httpd::config_json::blocked_reactor_notify_ms,
-      [this](std::unique_ptr<ss::httpd::request> req) {
-          ss::sstring timeout_str;
-          if (!ss::httpd::connection::url_decode(
-                req->param["timeout"], timeout_str)) {
-              throw ss::httpd::bad_param_exception(
-                fmt::format("Required parameter 'timeout' is not set"));
-          }
-
-          std::chrono::milliseconds ms;
-          try {
-              ms = std::clamp(
-                std::chrono::milliseconds(
-                  boost::lexical_cast<long long>(timeout_str)),
-                1ms,
-                _default_blocked_reactor_notify);
-          } catch (const boost::bad_lexical_cast&) {
-              throw ss::httpd::bad_param_exception(fmt::format(
-                "Invalid parameter 'timeout' value {{{}}}", timeout_str));
-          }
-
-          std::optional<std::chrono::seconds> expires;
-          static constexpr std::chrono::seconds max_expire_time_sec
-            = std::chrono::minutes(30);
-          if (auto e = req->get_query_param("expires"); !e.empty()) {
-              try {
-                  expires = std::clamp(
-                    std::chrono::seconds(boost::lexical_cast<long long>(e)),
-                    1s,
-                    max_expire_time_sec);
-              } catch (const boost::bad_lexical_cast&) {
-                  throw ss::httpd::bad_param_exception(
-                    fmt::format("Invalid parameter 'expires' value {{{}}}", e));
-              }
-          }
-
-          // This value is used when the expiration time is not set explicitly
-          static constexpr std::chrono::seconds default_expiration_time
-            = std::chrono::minutes(5);
-          auto curr = ss::engine().get_blocked_reactor_notify_ms();
-
-          vlog(
-            logger.info,
-            "Setting blocked_reactor_notify_ms from {} to {} for {} "
-            "(default={})",
-            curr,
-            ms.count(),
-            expires.value_or(default_expiration_time),
-            _default_blocked_reactor_notify);
-
-          return ss::smp::invoke_on_all(
-                   [ms] { ss::engine().update_blocked_reactor_notify_ms(ms); })
-            .then([] {
-                return ss::make_ready_future<ss::json::json_return_type>(
-                  ss::json::json_void());
-            })
-            .finally([this, expires] {
-                _blocked_reactor_notify_reset_timer.rearm(
-                  ss::steady_clock_type::now()
-                  + expires.value_or(default_expiration_time));
-            });
       });
 }
 
@@ -3455,6 +3396,59 @@ admin_server::cloud_storage_usage_handler(
     }
 }
 
+static ss::json::json_return_type raw_data_to_usage_response(
+  const std::vector<kafka::usage_window>& total_usage, bool include_open) {
+    std::vector<ss::httpd::usage_json::usage_response> resp;
+    resp.reserve(total_usage.size());
+    for (size_t i = (include_open ? 0 : 1); i < total_usage.size(); ++i) {
+        resp.emplace_back();
+        const auto& e = total_usage[i];
+        resp.back().begin_timestamp = e.begin;
+        resp.back().end_timestamp = e.end;
+        resp.back().open = e.is_open();
+        resp.back().kafka_bytes_received_count = e.u.bytes_received;
+        resp.back().kafka_bytes_sent_count = e.u.bytes_sent;
+        resp.back().cloud_storage_bytes_gauge = e.u.bytes_cloud_storage;
+    }
+    if (include_open && !resp.empty()) {
+        /// Handle case where client does not want to observe
+        /// value of 0 for open buckets end timestamp
+        auto& e = resp.at(0);
+        vassert(e.open(), "Bucket not open when expecting to be");
+        e.end_timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                            ss::lowres_system_clock::now().time_since_epoch())
+                            .count();
+    }
+    return resp;
+}
+
+void admin_server::register_usage_routes() {
+    register_route<user>(
+      ss::httpd::usage_json::get_usage,
+      [this](std::unique_ptr<ss::httpd::request> req) {
+          if (!config::shard_local_cfg().enable_usage()) {
+              throw ss::httpd::bad_request_exception(
+                "Usage tracking is not enabled");
+          }
+          bool include_open = false;
+          auto include_open_str = req->get_query_param("include_open_bucket");
+          vlog(
+            logger.info,
+            "Request to observe usage info, include_open_bucket={}",
+            include_open_str);
+          if (!include_open_str.empty()) {
+              include_open = str_to_bool(include_open_str);
+          }
+          return _usage_manager
+            .invoke_on(
+              kafka::usage_manager::usage_manager_main_shard,
+              [](kafka::usage_manager& um) { return um.get_usage_stats(); })
+            .then([include_open](auto total_usage) {
+                return raw_data_to_usage_response(total_usage, include_open);
+            });
+      });
+}
+
 void admin_server::register_debug_routes() {
     register_route<user>(
       ss::httpd::debug_json::reset_leaders_info,
@@ -3543,6 +3537,66 @@ void admin_server::register_debug_routes() {
       [this](std::unique_ptr<ss::httpd::request> req)
         -> ss::future<ss::json::json_return_type> {
           return cloud_storage_usage_handler(std::move(req));
+      });
+
+    register_route<superuser>(
+      ss::httpd::debug_json::blocked_reactor_notify_ms,
+      [this](std::unique_ptr<ss::httpd::request> req) {
+          std::chrono::milliseconds timeout;
+          if (auto e = req->get_query_param("timeout"); !e.empty()) {
+              try {
+                  timeout = std::clamp(
+                    std::chrono::milliseconds(
+                      boost::lexical_cast<long long>(e)),
+                    1ms,
+                    _default_blocked_reactor_notify);
+              } catch (const boost::bad_lexical_cast&) {
+                  throw ss::httpd::bad_param_exception(
+                    fmt::format("Invalid parameter 'timeout' value {{{}}}", e));
+              }
+          }
+
+          std::optional<std::chrono::seconds> expires;
+          static constexpr std::chrono::seconds max_expire_time_sec
+            = std::chrono::minutes(30);
+          if (auto e = req->get_query_param("expires"); !e.empty()) {
+              try {
+                  expires = std::clamp(
+                    std::chrono::seconds(boost::lexical_cast<long long>(e)),
+                    1s,
+                    max_expire_time_sec);
+              } catch (const boost::bad_lexical_cast&) {
+                  throw ss::httpd::bad_param_exception(
+                    fmt::format("Invalid parameter 'expires' value {{{}}}", e));
+              }
+          }
+
+          // This value is used when the expiration time is not set explicitly
+          static constexpr std::chrono::seconds default_expiration_time
+            = std::chrono::minutes(5);
+          auto curr = ss::engine().get_blocked_reactor_notify_ms();
+
+          vlog(
+            logger.info,
+            "Setting blocked_reactor_notify_ms from {} to {} for {} "
+            "(default={})",
+            curr,
+            timeout.count(),
+            expires.value_or(default_expiration_time),
+            _default_blocked_reactor_notify);
+
+          return ss::smp::invoke_on_all([timeout] {
+                     ss::engine().update_blocked_reactor_notify_ms(timeout);
+                 })
+            .then([] {
+                return ss::make_ready_future<ss::json::json_return_type>(
+                  ss::json::json_void());
+            })
+            .finally([this, expires] {
+                _blocked_reactor_notify_reset_timer.rearm(
+                  ss::steady_clock_type::now()
+                  + expires.value_or(default_expiration_time));
+            });
       });
 }
 ss::future<ss::json::json_return_type>
