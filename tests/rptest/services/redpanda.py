@@ -630,8 +630,8 @@ class PandaproxyConfig(TlsConfig):
 
     def __init__(self):
         super(PandaproxyConfig, self).__init__()
-        self.cache_keep_alive_ms: int = 300000
-        self.cache_max_size: int = 10
+        self.cache_keep_alive_ms: Optional[int] = 300000
+        self.cache_max_size: Optional[int] = 10
 
 
 class SchemaRegistryConfig(TlsConfig):
@@ -2002,9 +2002,6 @@ class RedpandaService(Service):
         # should be safe against actual failures to of the process to stop, because
         # we're using SIGKILL which does not require the process's cooperation.
         node.account.kill_process("redpanda",
-                                  clean_shutdown=False,
-                                  allow_fail=True)
-        node.account.kill_process("bin/node",
                                   clean_shutdown=False,
                                   allow_fail=True)
         if node.account.exists(RedpandaService.PERSISTENT_ROOT):

@@ -3357,11 +3357,6 @@ admin_server::cloud_storage_usage_handler(
         }
     }
 
-    vlog(
-      logger.info,
-      "Members table at: {}",
-      static_cast<void*>(&(_controller->get_members_table())));
-
     cluster::cloud_storage_size_reducer reducer(
       _controller->get_topics_state(),
       _controller->get_members_table(),
@@ -3444,6 +3439,28 @@ void admin_server::register_debug_routes() {
             .invoke_on_all([](auto& mc) { mc.reset_leaders(); })
             .then(
               [] { return ss::json::json_return_type(ss::json::json_void()); });
+      });
+
+    register_route<user>(
+      ss::httpd::debug_json::refresh_disk_health_info,
+      [this](std::unique_ptr<ss::httpd::request>) {
+          vlog(logger.info, "Request to refresh disk health info");
+          return _metadata_cache.local().refresh_health_monitor().then_wrapped(
+            [](ss::future<> f) {
+                if (f.failed()) {
+                    auto eptr = f.get_exception();
+                    vlog(
+                      logger.error,
+                      "failed to refresh disk health info: {}",
+                      eptr);
+                    return ss::make_exception_future<
+                      ss::json::json_return_type>(
+                      ss::httpd::server_error_exception(
+                        "Could not refresh disk health info"));
+                }
+                return ss::make_ready_future<ss::json::json_return_type>(
+                  ss::json::json_void());
+            });
       });
 
     register_route<user>(
