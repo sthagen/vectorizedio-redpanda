@@ -563,12 +563,16 @@ class Admin:
         information like replica set assignments with core affinities.
         """
         assert (topic is None and partition is None) or \
-                (topic is not None and partition is not None)
-        assert topic or namespace is None
+                (topic is not None)
+
         namespace = namespace or "kafka"
         path = "partitions"
         if topic:
-            path = f"{path}/{namespace}/{topic}/{partition}"
+            path = f"{path}/{namespace}/{topic}"
+
+        if partition is not None:
+            path = f"{path}/{partition}"
+
         return self._request('get', path, node=node).json()
 
     def get_transactions(self, topic, partition, namespace, node=None):
@@ -856,12 +860,12 @@ class Admin:
     def self_test_status(self):
         return self._request("GET", "debug/self_test/status").json()
 
-    def redpanda_services_restart(self,
-                                  rp_service: Optional[str] = None,
-                                  node: Optional[ClusterNode] = None):
+    def restart_service(self,
+                        rp_service: Optional[str] = None,
+                        node: Optional[ClusterNode] = None):
         service_param = f"service={rp_service if rp_service is not None else ''}"
         return self._request("PUT",
-                             f"redpanda-services/restart?{service_param}",
+                             f"debug/restart_service?{service_param}",
                              node=node)
 
     def is_node_isolated(self, node):
