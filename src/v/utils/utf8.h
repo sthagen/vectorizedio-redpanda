@@ -20,6 +20,19 @@
 #include <string_view>
 #include <vector>
 
+/*
+ * Used to access/modify the flag that permits/prevents reporting an error
+ * if a control character is found within a string
+ */
+class permit_unsafe_log_operation {
+public:
+    static bool get() { return _flag; }
+    static void set(bool flag) { _flag = flag; }
+
+private:
+    static thread_local bool _flag;
+};
+
 constexpr bool is_lower_control_char(char c) { return 0x00 <= c && c <= 0x1f; }
 
 constexpr bool is_high_control_char(char c) { return c == 0x7f; };
@@ -55,13 +68,11 @@ concept ExceptionThrower = requires(T obj) {
     obj.conversion_error();
 };
 
-namespace {
-struct default_thrower {
+struct default_utf8_thrower {
     [[noreturn]] [[gnu::cold]] void conversion_error() {
         throw std::runtime_error("Cannot decode string as UTF8");
     }
 };
-} // namespace
 
 struct default_control_character_thrower {
     explicit default_control_character_thrower(
@@ -85,7 +96,9 @@ inline bool contains_control_character(std::string_view v) {
 }
 
 void validate_no_control(std::string_view s, ExceptionThrower auto thrower) {
-    if (unlikely(contains_control_character(s))) {
+    if (
+      !permit_unsafe_log_operation::get()
+      && unlikely(contains_control_character(s))) {
         thrower.conversion_error();
     }
 }
@@ -106,5 +119,5 @@ inline void validate_utf8(std::string_view s, Thrower&& thrower) {
 }
 
 inline void validate_utf8(std::string_view s) {
-    validate_utf8(s, default_thrower{});
+    validate_utf8(s, default_utf8_thrower{});
 }

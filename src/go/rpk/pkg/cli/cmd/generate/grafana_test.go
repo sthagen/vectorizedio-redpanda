@@ -11,8 +11,12 @@ package generate
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -28,21 +32,6 @@ func TestPrometheusURLFlagDeprecation(t *testing.T) {
 		"--datasource", "prometheus",
 	})
 	require.Contains(t, cmd.Flag("prometheus-url").Deprecated, "Use --metrics-endpoint instead")
-}
-
-func TestGrafanaHostNoServer(t *testing.T) {
-	var out bytes.Buffer
-	logrus.SetOutput(&out)
-	cmd := newGrafanaDashboardCmd()
-	cmd.SetArgs([]string{
-		"--metrics-endpoint", "localhost:8888/metrics",
-		"--datasource", "prometheus",
-	})
-
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Get \"http://localhost:8888/metrics\": dial tcp")
-	require.Contains(t, err.Error(), "connect: connection refused")
 }
 
 func TestGrafanaParseResponse(t *testing.T) {
@@ -72,17 +61,9 @@ vectorized_memory_allocated_memory_bytes{shard="1",type="bytes"} 36986880
 			w.Write([]byte(res))
 		}),
 	)
-	var out bytes.Buffer
-	logrus.SetOutput(&out)
-	cmd := newGrafanaDashboardCmd()
-	cmd.SetOutput(&out)
-	cmd.SetArgs([]string{
-		"--metrics-endpoint", ts.URL,
-		"--datasource", "prometheus",
-	})
-	err := cmd.Execute()
+	out, err := executeGrafanaDashboard(ts.URL, "prometheus")
 	require.NoError(t, err)
-	require.JSONEq(t, expected, out.String())
+	require.JSONEq(t, expected, out)
 }
 
 func TestGrafanaInvalidResponse(t *testing.T) {
@@ -96,14 +77,41 @@ vectorized_vectorized_in
 			w.Write([]byte(res))
 		}),
 	)
-	var out bytes.Buffer
-	logrus.SetOutput(&out)
-	cmd := newGrafanaDashboardCmd()
-	cmd.SetOutput(&out)
-	cmd.SetArgs([]string{
-		"--metrics-endpoint", ts.URL,
-		"--datasource", "prometheus",
-	})
-	err := cmd.Execute()
+	_, err := executeGrafanaDashboard(ts.URL, "any")
 	require.EqualError(t, err, "text format parsing error in line 3: expected float as value, got \"\"")
+}
+
+// Test_embeddedDecompressAndPrint tests that the embedded files are actually a
+// valid json files and can be decompressed.
+func Test_embeddedDecompressAndPrint(t *testing.T) {
+	type tt struct {
+		name    string
+		path    string
+		expHash string
+	}
+
+	var tests []tt
+	for k, v := range dashboardMap {
+		tests = append(tests, tt{
+			name:    fmt.Sprintf("parse %v correctly", k),
+			path:    filepath.Join("grafana-dashboards", v.Location+".gz"),
+			expHash: v.Hash,
+		})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writer := &bytes.Buffer{}
+			err := decompressAndPrint(dashFS, tt.path, writer)
+			require.NoError(t, err)
+
+			b := writer.Bytes()
+
+			sum := sha256.Sum256(b)
+			require.Equal(t, tt.expHash, fmt.Sprintf("%x", sum))
+
+			var dash map[string]any
+			err = json.Unmarshal(b, &dash)
+			require.NoError(t, err)
+		})
+	}
 }

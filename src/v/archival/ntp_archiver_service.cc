@@ -56,7 +56,9 @@ static std::unique_ptr<adjacent_segment_merger>
 maybe_make_adjacent_segment_merger(
   ntp_archiver& self, retry_chain_logger& log, const storage::ntp_config& cfg) {
     std::unique_ptr<adjacent_segment_merger> result = nullptr;
-    if (cfg.is_archival_enabled() && !cfg.is_compacted()) {
+    if (
+      cfg.is_archival_enabled() && !cfg.is_compacted()
+      && !cfg.is_read_replica_mode_enabled()) {
         result = std::make_unique<adjacent_segment_merger>(self, log, true);
         result->set_enabled(config::shard_local_cfg()
                               .cloud_storage_enable_segment_merging.value());
@@ -104,9 +106,7 @@ ntp_archiver::ntp_archiver(
     // Override bucket for read-replica
     if (_parent.is_read_replica_mode_enabled()) {
         _bucket_override = _parent.get_read_replica_bucket();
-    }
-
-    if (
+    } else if (
       parent.log().config().is_archival_enabled()
       && !parent.log().config().is_compacted()) {
         _segment_merging_enabled.watch([this] {
@@ -338,7 +338,7 @@ ss::future<> ntp_archiver::upload_until_term_change() {
     // uploads).
     {
         auto units = co_await ss::get_units(_uploads_active, 1);
-        co_await maybe_upload_manifest();
+        co_await maybe_upload_manifest(upload_loop_prologue_ctx_label);
         co_await maybe_flush_manifest_clean_offset();
     }
 
@@ -419,7 +419,7 @@ ss::future<> ntp_archiver::upload_until_term_change() {
         // This is the fallback path for uploading manifest if it didn't happen
         // inline with segment uploads: this path will be taken on e.g. restarts
         // or unclean leadership changes.
-        if (co_await maybe_upload_manifest()) {
+        if (co_await maybe_upload_manifest(upload_loop_epilogue_ctx_label)) {
             co_await maybe_flush_manifest_clean_offset();
         }
 
@@ -708,47 +708,31 @@ ntp_archiver::download_manifest() {
  * then we will do an upload + mark_clean in the main upload loop, even
  * if we did not upload any segments.
  */
-ss::future<bool> ntp_archiver::maybe_upload_manifest() {
+ss::future<bool> ntp_archiver::maybe_upload_manifest(const char* upload_ctx) {
     if (
       _parent.archival_meta_stm()->get_dirty(_projected_manifest_clean_at)
       == cluster::archival_metadata_stm::state_dirty::clean) {
         vlog(
           _rtclog.debug,
-          "Manifest is clean{}, skipping upload",
+          "[{}] Manifest is clean{}, skipping upload",
+          upload_ctx,
           _projected_manifest_clean_at.has_value() ? " (projected)" : "");
         co_return false;
     }
 
     // Do not upload if interval has not elapsed.  The upload loop will call
     // us again periodically and we will eventually upload when we pass the
-    // interval.
+    // interval.  Make an exception if we are under local storage pressure,
+    // and skip the interval wait in this case.
     if (
-      _manifest_upload_interval().has_value()
+      !local_storage_pressure() && _manifest_upload_interval().has_value()
       && ss::lowres_clock::now() - _last_manifest_upload_time
            < _manifest_upload_interval().value()) {
         co_return false;
     }
 
-    auto upload_insync_offset
-      = _parent.archival_meta_stm()->get_insync_offset();
-    vlog(
-      _rtclog.debug,
-      "Uploading partition manifest, insync_offset={}",
-      upload_insync_offset);
-
-    auto result = co_await upload_manifest();
-    if (result == cloud_storage::upload_result::success) {
-        _last_manifest_upload_time = ss::lowres_clock::now();
-        _projected_manifest_clean_at = upload_insync_offset;
-
-        co_return true;
-    } else {
-        // It is not necessary to retry: we are called from within the main
-        // upload_until_term_change loop, and will get another chance to
-        // upload the manifest eventually from there.
-        vlog(_rtclog.warn, "Failed to upload partition manifest: {}", result);
-        co_return false;
-    }
+    auto result = co_await upload_manifest(upload_ctx);
+    co_return result == cloud_storage::upload_result::success;
 }
 
 ss::future<> ntp_archiver::maybe_flush_manifest_clean_offset() {
@@ -780,13 +764,16 @@ ss::future<> ntp_archiver::maybe_flush_manifest_clean_offset() {
 }
 
 ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest(
+  const char* upload_ctx,
   std::optional<std::reference_wrapper<retry_chain_node>> source_rtc) {
     if (!_feature_table.local().is_active(
           features::feature::cloud_storage_manifest_format_v2)) {
         vlog(
           archival_log.info,
-          "Skipping manifest upload until all nodes in the cluster have been "
-          "upgraded.");
+          "[{}] Skipping manifest upload until all nodes in the cluster have "
+          "been "
+          "upgraded.",
+          upload_ctx);
 
         co_return cloud_storage::upload_result::cancelled;
     }
@@ -798,13 +785,37 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest(
       _conf->cloud_storage_initial_backoff,
       &rtc.get());
     retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
-    vlog(
-      ctxlog.debug,
-      "Uploading manifest, path: {}",
-      manifest().get_manifest_path());
     auto units = co_await _parent.archival_meta_stm()->acquire_manifest_lock();
-    co_return co_await _remote.upload_manifest(
+
+    auto upload_insync_offset
+      = _parent.archival_meta_stm()->get_insync_offset();
+
+    vlog(
+      _rtclog.debug,
+      "[{}] Uploading partition manifest, insync_offset={}, path={}",
+      upload_ctx,
+      upload_insync_offset,
+      manifest().get_manifest_path());
+
+    auto result = co_await _remote.upload_manifest(
       get_bucket_name(), manifest(), fib, _manifest_tags);
+
+    if (result == cloud_storage::upload_result::success) {
+        _last_manifest_upload_time = ss::lowres_clock::now();
+        _projected_manifest_clean_at = upload_insync_offset;
+    } else {
+        // It is not necessary to retry: we are called from within the main
+        // upload_until_term_change loop, and will get another chance to
+        // upload the manifest eventually from there.
+        vlog(
+          _rtclog.warn,
+          "[{}] Failed to upload partition manifest at insync_offset={}: {}",
+          upload_ctx,
+          result,
+          upload_insync_offset);
+    }
+
+    co_return result;
 }
 
 remote_segment_path
@@ -1186,8 +1197,10 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
         // so that we can conveniently await it along with our segment
         // uploads.  The actual result is reflected in
         // _projected_manifest_clean_at if something was uploaded.
-        flist.push_back(maybe_upload_manifest().then(
-          [](bool) { return cloud_storage::upload_result::success; }));
+        flist.push_back(
+          maybe_upload_manifest(concurrent_with_segs_ctx_label).then([](bool) {
+              return cloud_storage::upload_result::success;
+          }));
     }
 
     auto segment_results = co_await ss::when_all_succeed(
@@ -1294,7 +1307,7 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
             // * infrequent means we're uploading a segment less often than the
             //   manifest upload interval, so can afford to upload manifest
             //   immediately after each segment upload.
-            co_await maybe_upload_manifest();
+            co_await maybe_upload_manifest(post_add_segs_ctx_label);
         }
     }
 
@@ -1459,7 +1472,7 @@ ntp_archiver::maybe_truncate_manifest() {
             vlog(
               ctxlog.debug,
               "archival metadata STM update passed, re-uploading manifest");
-            co_await upload_manifest();
+            co_await upload_manifest(sync_local_state_ctx_label);
         }
         vlog(
           ctxlog.info,
@@ -1520,7 +1533,7 @@ ss::future<> ntp_archiver::housekeeping() {
             const auto retention_updated_manifest = co_await apply_retention();
             const auto gc_updated_manifest = co_await garbage_collect();
             if (retention_updated_manifest || gc_updated_manifest) {
-                co_await upload_manifest();
+                co_await upload_manifest(housekeeping_ctx_label);
             }
         }
     } catch (std::exception& e) {
@@ -1585,6 +1598,11 @@ ss::future<ntp_archiver::manifest_updated> ntp_archiver::garbage_collect() {
 
     const auto to_remove
       = _parent.archival_meta_stm()->get_segments_to_cleanup();
+
+    // Avoid replicating 'cleanup_metadata_cmd' if there's nothing to remove.
+    if (to_remove.size() == 0) {
+        co_return updated;
+    }
 
     size_t successful_deletes{0};
     co_await ss::max_concurrent_for_each(
@@ -1832,7 +1850,7 @@ ss::future<bool> ntp_archiver::do_upload_local(
         co_return false;
     }
     if (
-      co_await upload_manifest(source_rtc)
+      co_await upload_manifest(segment_merger_ctx_label, source_rtc)
       != cloud_storage::upload_result::success) {
         vlog(
           _rtclog.info,
@@ -1898,6 +1916,14 @@ void ntp_archiver::complete_transfer_leadership() {
       _uploads_active.current());
     _paused = false;
     _leader_cond.signal();
+}
+
+bool ntp_archiver::local_storage_pressure() const {
+    auto eviction_offset = _parent.eviction_requested_offset();
+
+    return eviction_offset.has_value()
+           && _parent.archival_meta_stm()->get_last_clean_at()
+                <= eviction_offset.value();
 }
 
 } // namespace archival

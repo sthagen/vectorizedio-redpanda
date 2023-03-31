@@ -11,13 +11,17 @@ package generate
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -26,12 +30,15 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/cmd/generate/graf"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/httpapi"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var (
-	datasource   string
+	//go:embed grafana-dashboards/*
+	dashFS       embed.FS
 	jobName      string
 	hClient      = http.Client{Timeout: 10 * time.Second}
 	metricGroups = []string{
@@ -46,9 +53,37 @@ var (
 		"memory",
 		"raft",
 	}
+	dashboardMap = map[string]*dashboardSpec{
+		"consumer-metrics": {
+			"Kafka-Consumer-Metrics.json",
+			"Allows for monitoring of Java Kafka consumers, using the Prometheus JMX Exporter and the Kafka Sample Configuration.",
+			"75c764e38cf52b11191833631c6b641e2e6ccdc42884aedbc655371cb768c08a",
+		},
+		"consumer-offsets": {
+			"Kafka-Consumer-Offsets.json",
+			"Metrics and KPIs that provide details of topic consumers and how far they are lagging behind the end of the log.",
+			"44a00385aa95cd7a531634ab7151d5f18c6057fdd48989c0e96d78a6f16eaae9",
+		},
+		"operations": {
+			"Redpanda-Ops-Dashboard.json",
+			"Provides an overview of KPIs for a Redpanda cluster with health indicators. This is suitable for ops or SRE to monitor on a daily or continuous basis.",
+			"2974e1fb0be8f428b84f28f9fa665302324b3b2cbb271a2876cafe0089fe55c9",
+		},
+		"topic-metrics": {
+			"Kafka-Topic-Metrics.json",
+			"Provides throughput, read/write rates, and on-disk sizes of each/all topics.",
+			"6cfbd0d7bb51e2ef0d9b699388ab1e10b1d6ee91176e52594ee196187c1d4ef5",
+		},
+	}
 )
 
 const panelHeight = 6
+
+type dashboardSpec struct {
+	Location    string // The dashboard location (GH or local path).
+	Description string // The dashboard Description.
+	Hash        string // The SHA256 hash of the JSON dashboard file.
+}
 
 type RowSet struct {
 	rowTitles   []string
@@ -63,60 +98,134 @@ func newRowSet() *RowSet {
 }
 
 func newGrafanaDashboardCmd() *cobra.Command {
-	var metricsEndpoint string
-	command := &cobra.Command{
+	var (
+		dashboard       string
+		datasource      string
+		metricsEndpoint string
+		skipDownload    bool
+	)
+	cmd := &cobra.Command{
 		Use:   "grafana-dashboard",
 		Short: "Generate a Grafana dashboard for redpanda metrics",
-		RunE: func(ccmd *cobra.Command, args []string) error {
-			if !(strings.HasPrefix(metricsEndpoint, "http://") ||
-				strings.HasPrefix(metricsEndpoint, "https://")) {
-				metricsEndpoint = fmt.Sprintf("http://%s", metricsEndpoint)
+		Run: func(cmd *cobra.Command, args []string) {
+			if !skipDownload {
+				switch {
+				case dashboardMap[dashboard] != nil:
+					jsonOut, err := tryFromGithub(cmd.Context(), dashboard)
+					if err == nil {
+						fmt.Println(jsonOut)
+						return
+					}
+
+					fmt.Fprintf(os.Stderr, "unable to retrieve dashboard from github: %v; using static file...\n", err)
+
+					// The embedded dashboard file is compressed, and located
+					// under grafana-dashboard dir:
+					path := filepath.Join("grafana-dashboards", dashboardMap[dashboard].Location+".gz")
+					err = decompressAndPrint(dashFS, path, os.Stdout)
+					if err == nil {
+						return
+					}
+
+					fmt.Fprintf(os.Stderr, "unable to print the static file: %v; generating default dashboard...\n", err)
+				case dashboard == "help":
+					printDashboardHelp(dashboardMap)
+					return
+				default:
+					out.Die("unrecognized dashboard type name: %q; use --dashboard help for more info", dashboard)
+				}
 			}
-			return executeGrafanaDashboard(metricsEndpoint)
+
+			// If downloading from GitHub failed or skip-download is enabled,
+			// then we go with the automatic dashboard generation.
+			if datasource == "" {
+				out.Die(`Error: required flag "datasource" not set`)
+			}
+			jsonOut, err := executeGrafanaDashboard(metricsEndpoint, datasource)
+			out.MaybeDie(err, "unable to generate the grafana dashboard: %v", err)
+
+			fmt.Println(jsonOut)
 		},
 	}
 	metricsEndpointFlag := "metrics-endpoint"
 	deprecatedPrometheusURLFlag := "prometheus-url"
 
 	for _, flag := range []string{metricsEndpointFlag, deprecatedPrometheusURLFlag} {
-		command.Flags().StringVar(
-			&metricsEndpoint,
-			flag,
-			"http://localhost:9644/metrics",
-			"The redpanda metrics endpoint where to get the metrics metadata. i.e. redpanda_host:9644/metrics")
+		cmd.Flags().StringVar(&metricsEndpoint, flag, "http://localhost:9644/public_metrics", "The redpanda metrics endpoint where rpk should get the metrics metadata. i.e. redpanda_host:9644/metrics")
 	}
-
-	command.Flags().MarkDeprecated(deprecatedPrometheusURLFlag, fmt.Sprintf("Deprecated flag. Use --%v instead", metricsEndpointFlag))
+	cmd.Flags().MarkDeprecated(deprecatedPrometheusURLFlag, fmt.Sprintf("Deprecated flag. Use --%v instead", metricsEndpointFlag))
 
 	datasourceFlag := "datasource"
-	command.Flags().StringVar(
-		&datasource,
-		datasourceFlag,
-		"",
-		"The name of the Prometheus datasource as configured in your grafana instance.")
-	command.Flags().StringVar(
-		&jobName,
-		"job-name",
-		"redpanda",
-		"The prometheus job name by which to identify the redpanda nodes")
-	command.MarkFlagRequired(datasourceFlag)
-	return command
+	cmd.Flags().StringVar(&datasource, datasourceFlag, "", "The name of the Prometheus datasource as configured in your grafana instance.")
+	cmd.Flags().StringVar(&jobName, "job-name", "redpanda", "The prometheus job name by which to identify the redpanda nodes")
+
+	dashboardFlag, skipDownloadFlag := "dashboard", "skip-download"
+	cmd.Flags().StringVar(&dashboard, dashboardFlag, "operations", "The name of the dashboard you wish to download; use --dashboard help for more info")
+	cmd.Flags().BoolVar(&skipDownload, skipDownloadFlag, false, "Skips the recommended dashboard download from the Redpanda repository and generates the dashboard automatically")
+	cmd.MarkFlagsMutuallyExclusive(dashboardFlag, skipDownloadFlag)
+
+	// This portion of code is to register the flag autocompletion.
+	cmd.RegisterFlagCompletionFunc(dashboardFlag, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		opts := make([]string, 0, len(dashboardMap))
+		for k, v := range dashboardMap {
+			// Cobra provides support for completion descriptions:
+			//     flagName -- Description of flag
+			// to do so we must add a \t between the flag and the Description.
+			s := fmt.Sprintf("%v\t%v", k, v.Description)
+			opts = append(opts, s)
+		}
+		return opts, cobra.ShellCompDirectiveDefault
+	})
+
+	return cmd
 }
 
-func executeGrafanaDashboard(metricsEndpoint string) error {
-	metricFamilies, err := fetchMetrics(metricsEndpoint)
+func tryFromGithub(ctx context.Context, dashboard string) (string, error) {
+	const host = "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/"
+	cl := httpapi.NewClient(
+		httpapi.Host(host),
+	)
+
+	var jsonOut string
+	return jsonOut, cl.Get(ctx, dashboardMap[dashboard].Location, nil, &jsonOut)
+}
+
+func decompressAndPrint(fs fs.FS, path string, writer io.Writer) error {
+	file, err := fs.Open(path)
 	if err != nil {
 		return err
+	}
+	defer file.Close()
+
+	zr, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(writer, zr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func executeGrafanaDashboard(metricsEndpoint string, datasource string) (string, error) {
+	if !(strings.HasPrefix(metricsEndpoint, "http://") ||
+		strings.HasPrefix(metricsEndpoint, "https://")) {
+		metricsEndpoint = fmt.Sprintf("http://%s", metricsEndpoint)
+	}
+
+	metricFamilies, err := fetchMetrics(metricsEndpoint)
+	if err != nil {
+		return "", err
 	}
 	metricsURL, err := url.Parse(metricsEndpoint)
 	if err != nil {
-		return err
+		return "", err
 	}
 	isPublicMetrics := metricsURL.EscapedPath() == "/public_metrics"
-	dashboard := buildGrafanaDashboard(metricFamilies, isPublicMetrics)
+	dashboard := buildGrafanaDashboard(metricFamilies, isPublicMetrics, datasource)
 	jsonSpec, err := json.MarshalIndent(dashboard, "", " ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	log.SetFormatter(cli.NewNoopFormatter())
 	// The logger's default stream is stderr, which prevents piping to files
@@ -124,30 +233,30 @@ func executeGrafanaDashboard(metricsEndpoint string) error {
 	if log.StandardLogger().Out == os.Stderr {
 		log.SetOutput(os.Stdout)
 	}
-	log.Info(string(jsonSpec))
-	return nil
+	return string(jsonSpec), nil
 }
 
 func buildGrafanaDashboard(
 	metricFamilies map[string]*dto.MetricFamily,
 	isPublicMetrics bool,
+	datasource string,
 ) graf.Dashboard {
 	intervals := []string{"5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"}
 	timeOptions := []string{"5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"}
 	var summaryPanels []graf.Panel
 	if isPublicMetrics {
-		summaryPanels = buildPublicMetricsSummary(metricFamilies)
+		summaryPanels = buildPublicMetricsSummary(metricFamilies, datasource)
 	} else {
-		summaryPanels = buildSummary(metricFamilies)
+		summaryPanels = buildSummary(metricFamilies, datasource)
 	}
 	lastY := summaryPanels[len(summaryPanels)-1].GetGridPos().Y + panelHeight
 	rowSet := newRowSet()
-	rowSet.processRows(metricFamilies, isPublicMetrics)
-	rowSet.addCachePerformancePanels(metricFamilies)
+	rowSet.processRows(metricFamilies, isPublicMetrics, datasource)
+	rowSet.addCachePerformancePanels(metricFamilies, datasource)
 	rows := rowSet.finalize(lastY)
 	return graf.Dashboard{
 		Title:      "Redpanda",
-		Templating: buildTemplating(),
+		Templating: buildTemplating(datasource),
 		Panels: append(
 			summaryPanels,
 			rows...,
@@ -185,7 +294,7 @@ func (rowSet *RowSet) finalize(fromY int) []graf.Panel {
 	return rows
 }
 
-func (rowSet *RowSet) processRows(metricFamilies map[string]*dto.MetricFamily, isPublicMetrics bool) {
+func (rowSet *RowSet) processRows(metricFamilies map[string]*dto.MetricFamily, isPublicMetrics bool, datasource string) {
 	names := []string{}
 	for k := range metricFamilies {
 		names = append(names, k)
@@ -197,11 +306,11 @@ func (rowSet *RowSet) processRows(metricFamilies map[string]*dto.MetricFamily, i
 		// hack around redpanda_storage_* metrics: these should be gauge
 		// panels but the metrics type come as COUNTER
 		if family.GetType() == dto.MetricType_COUNTER && !strings.HasPrefix(name, "redpanda_storage") {
-			panel = newCounterPanel(family, isPublicMetrics)
+			panel = newCounterPanel(family, isPublicMetrics, datasource)
 		} else if subtype(family) == "histogram" {
-			panel = newPercentilePanel(family, 0.95, isPublicMetrics)
+			panel = newPercentilePanel(family, 0.95, isPublicMetrics, datasource)
 		} else {
-			panel = newGaugePanel(family, isPublicMetrics)
+			panel = newGaugePanel(family, isPublicMetrics, datasource)
 		}
 
 		if panel == nil {
@@ -221,18 +330,18 @@ func (rowSet *RowSet) processRows(metricFamilies map[string]*dto.MetricFamily, i
 }
 
 func (rowSet *RowSet) addRatioPanel(
-	metricFamilies map[string]*dto.MetricFamily, m0, m1, group, help string,
+	metricFamilies map[string]*dto.MetricFamily, m0, m1, group, help, datasource string,
 ) {
 	a := metricFamilies[m0]
 	b := metricFamilies[m1]
 	row := rowSet.groupPanels[group]
-	panel := makeRatioPanel(a, b, help)
+	panel := makeRatioPanel(a, b, help, datasource)
 	row.Panels = append(row.Panels, panel)
 	rowSet.groupPanels[group] = row
 }
 
 func (rowSet *RowSet) addCachePerformancePanels(
-	metricFamilies map[string]*dto.MetricFamily,
+	metricFamilies map[string]*dto.MetricFamily, datasource string,
 ) {
 	// are we generating for a broker that has these stats?
 	if _, ok := metricFamilies["vectorized_storage_log_cached_batches_read"]; !ok {
@@ -244,23 +353,25 @@ func (rowSet *RowSet) addCachePerformancePanels(
 		"vectorized_storage_log_cached_batches_read",
 		"vectorized_storage_log_batches_read",
 		"storage",
-		"Batch cache hit ratio - batches")
+		"Batch cache hit ratio - batches",
+		datasource)
 
 	rowSet.addRatioPanel(
 		metricFamilies,
 		"vectorized_storage_log_cached_read_bytes",
 		"vectorized_storage_log_read_bytes",
 		"storage",
-		"Batch cache hit ratio - bytes")
+		"Batch cache hit ratio - bytes",
+		datasource)
 }
 
-func buildTemplating() graf.Templating {
-	node := newDefaultTemplateVar("node", "Node", true)
+func buildTemplating(datasource string) graf.Templating {
+	node := newDefaultTemplateVar(datasource, "node", "Node", true)
 	node.IncludeAll = true
 	node.AllValue = ".*"
 	node.Type = "query"
 	node.Query = "label_values(instance)"
-	shard := newDefaultTemplateVar("node_shard", "Shard", true)
+	shard := newDefaultTemplateVar(datasource, "node_shard", "Shard", true)
 	shard.IncludeAll = true
 	shard.AllValue = ".*"
 	shard.Type = "query"
@@ -284,6 +395,7 @@ func buildTemplating() graf.Templating {
 		},
 	}
 	aggregate := newDefaultTemplateVar(
+		datasource,
 		"aggr_criteria",
 		"Aggregate by",
 		false,
@@ -302,7 +414,7 @@ func buildTemplating() graf.Templating {
 
 // buildSummary builds the Summary section of the Redpanda generated grafana
 // dashboard that uses the /metric endpoint.
-func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
+func buildSummary(metricFamilies map[string]*dto.MetricFamily, datasource string) []graf.Panel {
 	maxWidth := 24
 	singleStatW := 2
 	percentiles := []float32{0.95, 0.99}
@@ -350,7 +462,7 @@ func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
 	if kafkaExists {
 		width := (maxWidth - (singleStatW * 2)) / percentilesNo
 		for i, p := range percentiles {
-			panel := newPercentilePanel(kafkaFamily, p, false)
+			panel := newPercentilePanel(kafkaFamily, p, false, datasource)
 			panel.GridPos = graf.GridPos{
 				H: panelHeight,
 				W: width,
@@ -371,7 +483,7 @@ func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
 		y += rpcLatencyTitle.GridPos.H
 		panels = append(panels, rpcLatencyTitle)
 		for i, p := range percentiles {
-			panel := newPercentilePanel(rpcFamily, p, false)
+			panel := newPercentilePanel(rpcFamily, p, false, datasource)
 			panel.GridPos = graf.GridPos{
 				H: panelHeight,
 				W: width,
@@ -396,7 +508,7 @@ func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
 	readBytesFamily, readBytesExist := metricFamilies["vectorized_storage_log_read_bytes"]
 	writtenBytesFamily, writtenBytesExist := metricFamilies["vectorized_storage_log_written_bytes"]
 	if readBytesExist && writtenBytesExist {
-		readPanel := newCounterPanel(readBytesFamily, false)
+		readPanel := newCounterPanel(readBytesFamily, false, datasource)
 		readPanel.GridPos = graf.GridPos{
 			H: panelHeight,
 			W: width,
@@ -405,7 +517,7 @@ func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
 		}
 		panels = append(panels, readPanel)
 
-		writtenPanel := newCounterPanel(writtenBytesFamily, false)
+		writtenPanel := newCounterPanel(writtenBytesFamily, false, datasource)
 		writtenPanel.GridPos = graf.GridPos{
 			H: panelHeight,
 			W: width,
@@ -420,7 +532,7 @@ func buildSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
 
 // buildPublicMetricsSummary builds the Summary section of the Redpanda
 // generated grafana dashboard that uses the /public_metrics endpoint.
-func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily) []graf.Panel {
+func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily, datasource string) []graf.Panel {
 	maxWidth := 24
 	singleStatW := 2
 	percentiles := []float32{0.95, 0.99}
@@ -482,7 +594,7 @@ func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily) []gr
 				RefID:          "A",
 			}
 			pTitle := fmt.Sprintf("Latency of Kafka produce requests (p%.0f) per broker", p*100)
-			producePanel := newGraphPanel(pTitle, pTarget, "s")
+			producePanel := newGraphPanel(pTitle, pTarget, "s", datasource)
 			producePanel.Interval = "1m"
 			producePanel.Lines = true
 			producePanel.SteppedLine = true
@@ -504,7 +616,7 @@ func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily) []gr
 				RefID:          "A",
 			}
 			cTitle := fmt.Sprintf("Latency of Kafka consume requests (p%.0f) per broker", p*100)
-			consumePanel := newGraphPanel(cTitle, cTarget, "s")
+			consumePanel := newGraphPanel(cTitle, cTarget, "s", datasource)
 			consumePanel.Interval = "1m"
 			consumePanel.Lines = true
 			consumePanel.SteppedLine = true
@@ -544,7 +656,7 @@ func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily) []gr
 				RefID:          "A",
 			}
 			title := fmt.Sprintf("%s (p%.0f)", rpcFamily.GetHelp(), p*100)
-			panel := newGraphPanel(title, target, "s")
+			panel := newGraphPanel(title, target, "s", datasource)
 			panel.Interval = "1m"
 			panel.Lines = true
 			panel.SteppedLine = true
@@ -582,7 +694,7 @@ func buildPublicMetricsSummary(metricFamilies map[string]*dto.MetricFamily) []gr
 			Step:           10,
 			IntervalFactor: 2,
 		}
-		panel := newGraphPanel("Rate - "+reqBytesFamily.GetHelp(), target, "Bps")
+		panel := newGraphPanel("Rate - "+reqBytesFamily.GetHelp(), target, "Bps", datasource)
 		panel.Interval = "1m"
 		panel.Lines = true
 		panel.GridPos = graf.GridPos{
@@ -641,7 +753,7 @@ func fetchMetrics(
 }
 
 func newPercentilePanel(
-	m *dto.MetricFamily, percentile float32, isPublicMetrics bool,
+	m *dto.MetricFamily, percentile float32, isPublicMetrics bool, datasource string,
 ) *graf.GraphPanel {
 	template := `histogram_quantile(%.2f, sum(rate(%s_bucket{instance=~"$node",shard=~"$node_shard"}[2m])) by (le, $aggr_criteria))`
 	if isPublicMetrics {
@@ -656,7 +768,7 @@ func newPercentilePanel(
 		RefID:          "A",
 	}
 	title := fmt.Sprintf("%s (p%.0f)", m.GetHelp(), percentile*100)
-	panel := newGraphPanel(title, target, "µs")
+	panel := newGraphPanel(title, target, "µs", datasource)
 	panel.Lines = true
 	panel.SteppedLine = true
 	panel.NullPointMode = "null as zero"
@@ -666,7 +778,7 @@ func newPercentilePanel(
 	return panel
 }
 
-func newCounterPanel(m *dto.MetricFamily, isPublicMetrics bool) *graf.GraphPanel {
+func newCounterPanel(m *dto.MetricFamily, isPublicMetrics bool, datasource string) *graf.GraphPanel {
 	template := `sum(irate(%s{instance=~"$node",shard=~"$node_shard"}[2m])) by ($aggr_criteria)`
 	if isPublicMetrics {
 		template = `sum(rate(%s{instance=~"$node"}[$__rate_interval])) by ($aggr_criteria)`
@@ -684,13 +796,13 @@ func newCounterPanel(m *dto.MetricFamily, isPublicMetrics bool) *graf.GraphPanel
 	} else if strings.Contains(m.GetName(), "redpanda_scheduler") {
 		format = "percentunit"
 	}
-	panel := newGraphPanel("Rate - "+m.GetHelp(), target, format)
+	panel := newGraphPanel("Rate - "+m.GetHelp(), target, format, datasource)
 	panel.Lines = true
 	panel.Interval = "1m"
 	return panel
 }
 
-func newGaugePanel(m *dto.MetricFamily, isPublicMetrics bool) *graf.GraphPanel {
+func newGaugePanel(m *dto.MetricFamily, isPublicMetrics bool, datasource string) *graf.GraphPanel {
 	template := `sum(%s{instance=~"$node",shard=~"$node_shard"}) by ($aggr_criteria)`
 	if isPublicMetrics {
 		template = `sum(%s{instance=~"$node"}) by ($aggr_criteria)`
@@ -706,13 +818,13 @@ func newGaugePanel(m *dto.MetricFamily, isPublicMetrics bool) *graf.GraphPanel {
 	if strings.Contains(subtype(m), "bytes") {
 		format = "bytes"
 	}
-	panel := newGraphPanel(m.GetHelp(), target, format)
+	panel := newGraphPanel(m.GetHelp(), target, format, datasource)
 	panel.Lines = true
 	panel.SteppedLine = true
 	return panel
 }
 
-func makeRatioPanel(m0, m1 *dto.MetricFamily, help string) *graf.GraphPanel {
+func makeRatioPanel(m0, m1 *dto.MetricFamily, help, datasource string) *graf.GraphPanel {
 	expr := fmt.Sprintf(
 		`sum(irate(%s{instance=~"$node",shard=~"$node_shard"}[2m])) by ($aggr_criteria) / sum(irate(%s{instance=~"$node",shard=~"$node_shard"}[2m])) by ($aggr_criteria)`,
 		m0.GetName(), m1.GetName())
@@ -727,14 +839,14 @@ func makeRatioPanel(m0, m1 *dto.MetricFamily, help string) *graf.GraphPanel {
 	if strings.Contains(subtype(m0), "bytes") {
 		format = "bytes"
 	}
-	panel := newGraphPanel(help, target, format)
+	panel := newGraphPanel(help, target, format, datasource)
 	panel.Lines = true
 	panel.SteppedLine = true
 	return panel
 }
 
 func newGraphPanel(
-	title string, target graf.Target, yAxisFormat string,
+	title string, target graf.Target, yAxisFormat, datasource string,
 ) *graf.GraphPanel {
 	// yAxisMin := 0.0
 	p := graf.NewGraphPanel(title, yAxisFormat)
@@ -749,7 +861,7 @@ func newGraphPanel(
 }
 
 func newDefaultTemplateVar(
-	name, label string, multi bool, opts ...graf.Option,
+	datasource, name, label string, multi bool, opts ...graf.Option,
 ) graf.TemplateVar {
 	if opts == nil {
 		opts = []graf.Option{}
@@ -808,4 +920,78 @@ func htmlHeader(str string) string {
 		"<h1 style=\"color:#87CEEB; border-bottom: 3px solid #87CEEB;\">%s</h1>",
 		str,
 	)
+}
+
+// printDashboardHelp prints the dashboard flag options based on the given spec.
+func printDashboardHelp(spec map[string]*dashboardSpec) {
+	var (
+		lines       []string // Each line of the dashboard spec.
+		maxLen      int      // maxLen is the maximum length until we reach the placeholder.
+		placeholder = "\x00" // This placeholder will be replaced with spacing once the alignment is calculated.
+	)
+
+	// First we loop over the spec and put the placeholder and get the key with
+	// the higher length.
+	for k, v := range spec {
+		line := fmt.Sprintf("  - %s: %s", k, placeholder)
+
+		if len(line) > maxLen {
+			maxLen = len(line)
+		}
+
+		line += v.Description
+		lines = append(lines, line)
+	}
+
+	// Then we replace the placeholder with spacing + wrap the text if its more
+	// than 80 columns.
+	for i, line := range lines {
+		spacing := " "
+		pidx := strings.Index(line, placeholder)
+
+		// Check if we need additional spacing:
+		if pidx < maxLen-1 {
+			spacing = strings.Repeat(" ", maxLen-pidx)
+		}
+		// Finally, we replace the placeholder with spacing and wrap the line at
+		// 80 cols.
+		lines[i] = fmt.Sprintf("%s%s%s", line[:pidx], spacing, wrap(line[pidx+1:], 80, maxLen))
+	}
+
+	fmt.Printf(`You can select one of the following dashboard types:
+
+%s
+
+To learn more about these dashboards you can visit:
+  https://github.com/redpanda-data/observability
+`, strings.Join(lines, "\n"))
+}
+
+// wrap auxiliary function that wraps the string s to the given width with a
+// leading indent.
+func wrap(s string, width, indent int) string {
+	var wrapped string
+
+	// Split the string into words
+	words := strings.Fields(s)
+
+	// Initialize the line length to the length of the indent
+	lineLength := indent
+
+	// Loop through each word
+	for _, word := range words {
+		// If the word doesn't fit on the current line, add a newline and the
+		// indent
+		if lineLength+len(word)+1 > width {
+			wrapped += "\n" + strings.Repeat(" ", indent)
+			lineLength = indent
+		}
+
+		// Add the word to the current line
+		wrapped += word + " "
+		lineLength += len(word) + 1
+	}
+
+	// Return the wrapped string
+	return wrapped
 }
