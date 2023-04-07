@@ -15,9 +15,9 @@
 #include "cluster/tx_utils.h"
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
-#include "kafka/protocol/response_writer.h"
 #include "kafka/protocol/schemata/describe_groups_response.h"
 #include "kafka/protocol/sync_group.h"
+#include "kafka/protocol/wire.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_metadata.h"
 #include "kafka/server/logger.h"
@@ -2683,6 +2683,7 @@ group::handle_offset_fetch(offset_fetch_request&& r) {
                 if (res) {
                     p.partition_index = id;
                     p.committed_offset = res->offset;
+                    p.committed_leader_epoch = res->committed_leader_epoch;
                     p.metadata = res->metadata;
                     p.error_code = error_code::none;
                 }
@@ -3345,7 +3346,7 @@ absl::node_hash_set<model::topic>
 group::decode_consumer_subscriptions(iobuf data) {
     constexpr auto max_topic_name_length = 32_KiB;
 
-    request_reader reader(std::move(data));
+    protocol::decoder reader(std::move(data));
 
     /* version intentionally ignored */
     reader.read_int16();

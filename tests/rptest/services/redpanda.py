@@ -44,7 +44,7 @@ from rptest.clients.rpk_remote import RpkRemoteTool
 from rptest.clients.python_librdkafka import PythonLibrdkafka
 from rptest.services import tls
 from rptest.services.admin import Admin
-from rptest.services.redpanda_installer import RedpandaInstaller
+from rptest.services.redpanda_installer import RedpandaInstaller, VERSION_RE as RI_VERSION_RE, int_tuple as ri_int_tuple
 from rptest.services.rolling_restarter import RollingRestarter
 from rptest.services.storage import ClusterStorage, NodeStorage
 from rptest.services.utils import BadLogLines, NodeCrash
@@ -1252,15 +1252,14 @@ class RedpandaService(Service):
 
     def all_up(self):
         def check_node(node):
-            pids = self.pids(node)
-            if not pids:
+            pid = self.redpanda_pid(node)
+            if not pid:
                 self.logger.warn(f"No redpanda PIDs found on {node.name}")
                 return False
 
-            for p in pids:
-                if not node.account.exists(f"/proc/{p}"):
-                    self.logger.warn(f"PID {p} (node {node.name}) dead")
-                    return False
+            if not node.account.exists(f"/proc/{pid}"):
+                self.logger.warn(f"PID {pid} (node {node.name}) dead")
+                return False
 
             # fall through
             return True
@@ -1431,7 +1430,7 @@ class RedpandaService(Service):
 
             if expect_fail:
                 wait_until(
-                    lambda: self.pids(node) == [],
+                    lambda: self.redpanda_pid(node) == None,
                     timeout_sec=10,
                     backoff_sec=0.2,
                     err_msg=
@@ -1690,7 +1689,7 @@ class RedpandaService(Service):
             # Even if there is no assertion or segfault, look for unexpectedly
             # not-running processes
             for node in self._started:
-                if not self.pids(node):
+                if not self.redpanda_pid(node):
                     crashes.append(
                         (node, "Redpanda process unexpectedly stopped"))
 
@@ -1904,6 +1903,10 @@ class RedpandaService(Service):
         assert len(version_lines) == 1, version_lines
         return VERSION_LINE_RE.findall(version_lines[0])[0]
 
+    def get_version_int_tuple(self, node):
+        version_str = self.get_version(node)
+        return ri_int_tuple(RI_VERSION_RE.findall(version_str)[0])
+
     def stop(self, **kwargs):
         """
         Override default stop() to execude stop_node in parallel
@@ -1956,8 +1959,8 @@ class RedpandaService(Service):
             self.logger.warn(f"Error setting trace loggers: {e}")
 
     def stop_node(self, node, timeout=None, forced=False):
-        pids = self.pids(node)
-        for pid in pids:
+        pid = self.redpanda_pid(node)
+        if pid is not None:
             node.account.signal(pid,
                                 signal.SIGKILL if forced else signal.SIGTERM,
                                 allow_fail=False)
@@ -1967,7 +1970,7 @@ class RedpandaService(Service):
 
         try:
             wait_until(
-                lambda: len(self.pids(node)) == 0,
+                lambda: self.redpanda_pid(node) == None,
                 timeout_sec=timeout,
                 err_msg=
                 f"Redpanda node {node.account.hostname} failed to stop in {timeout} seconds"
@@ -2049,8 +2052,6 @@ class RedpandaService(Service):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
 
     def redpanda_pid(self, node):
-        # we need to look for redpanda pid. pids() method returns pids of both
-        # nodejs server and redpanda
         try:
             cmd = "ps ax | grep -i 'redpanda' | grep -v grep | grep -v 'version' | awk '{print $1}'"
             for p in node.account.ssh_capture(cmd,
@@ -2060,22 +2061,6 @@ class RedpandaService(Service):
 
         except (RemoteCommandError, ValueError):
             return None
-
-    def pids(self, node):
-        """
-        Return process ids for the following processes on the given node:
-        * 'redpanda' started in 'start_redpanda'
-        """
-        try:
-            proc_name_regex = "redpanda"
-            cmd = f"ps ax | grep -i '{proc_name_regex}' | grep -v grep | awk '{{print $1}}'"
-            pid_arr = [
-                pid for pid in node.account.ssh_capture(
-                    cmd, allow_fail=True, callback=int)
-            ]
-            return pid_arr
-        except (RemoteCommandError, ValueError):
-            return []
 
     def started_nodes(self):
         return self._started
@@ -2122,6 +2107,17 @@ class RedpandaService(Service):
         # resolution
         fqdn = self.get_node_fqdn(node)
 
+        try:
+            cur_ver = self.get_version_int_tuple(node)
+        except:
+            cur_ver = None
+
+        # This node property isn't available on versions of RP older than 23.2.
+        if cur_ver and cur_ver >= (23, 2, 0):
+            memory_allocation_warning_threshold_bytes = 256 * 1024  # 256 KiB
+        else:
+            memory_allocation_warning_threshold_bytes = None
+
         conf = self.render("redpanda.yaml",
                            node=node,
                            data_dir=RedpandaService.DATA_DIR,
@@ -2139,7 +2135,9 @@ class RedpandaService(Service):
                            superuser=self._superuser,
                            sasl_enabled=self.sasl_enabled(),
                            endpoint_authn_method=self.endpoint_authn_method(),
-                           auto_auth=self._security.auto_auth)
+                           auto_auth=self._security.auto_auth,
+                           memory_allocation_warning_threshold=
+                           memory_allocation_warning_threshold_bytes)
 
         if override_cfg_params or self._extra_node_conf[node]:
             doc = yaml.full_load(conf)

@@ -85,6 +85,7 @@ calculate_total_replicas(const node_replicas_map_t& node_replicas) {
 }
 
 void reassign_replicas(
+  const model::ntp& ntp,
   partition_allocator& allocator,
   partition_assignment current_assignment,
   members_backend::partition_reallocation& reallocation) {
@@ -101,6 +102,13 @@ void reassign_replicas(
       get_allocation_domain(reallocation.ntp));
     if (res.has_value()) {
         reallocation.set_new_replicas(std::move(res.value()));
+    } else {
+        vlog(
+          clusterlog.info,
+          "failed to reallocate partition {} with assignment {}, error: {}",
+          ntp,
+          current_assignment.replicas,
+          res.error());
     }
 }
 
@@ -170,7 +178,7 @@ double calculate_unevenness_error(
      * from the node after successful reallocation
      */
     for (const auto& r : update.partition_reallocations) {
-        if (r.allocation_units) {
+        if (get_allocation_domain(r.ntp) == domain && r.allocation_units) {
             for (const auto& to_remove : r.replicas_to_remove) {
                 auto it = node_replicas.find(to_remove);
                 if (it != node_replicas.end()) {
@@ -672,7 +680,8 @@ void members_backend::default_reallocation_strategy::
                         continue;
                     }
                     reallocation.replicas_to_remove.emplace(id);
-                    reassign_replicas(allocator, p, reallocation);
+                    reassign_replicas(
+                      reallocation.ntp, allocator, p, reallocation);
 
                     if (!reallocation.allocation_units.has_value()) {
                         continue;
@@ -1088,7 +1097,7 @@ ss::future<> members_backend::reallocate_replica_set(
         // initial state, try to reassign partition replicas
 
         reassign_replicas(
-          _allocator.local(), std::move(*current_assignment), meta);
+          meta.ntp, _allocator.local(), std::move(*current_assignment), meta);
         if (meta.new_replica_set.empty()) {
             // if partition allocator failed to reassign partitions return
             // and wait for next retry
