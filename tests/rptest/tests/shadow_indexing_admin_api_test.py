@@ -20,6 +20,7 @@ from rptest.services.cluster import cluster
 from rptest.services.redpanda import CloudStorageType, SISettings, get_cloud_storage_type
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import (
+    expect_http_error,
     produce_until_segments,
     wait_for_local_storage_truncate,
 )
@@ -43,13 +44,11 @@ class SIAdminApiTest(RedpandaTest):
     topics = (TopicSpec(), )
 
     def __init__(self, test_context):
-        si_settings = SISettings(
-            test_context,
-            cloud_storage_max_connections=5,
-            log_segment_size=self.log_segment_size,
-            cloud_storage_enable_remote_read=True,
-            cloud_storage_enable_remote_write=True,
-        )
+        si_settings = SISettings(test_context,
+                                 cloud_storage_max_connections=5,
+                                 log_segment_size=self.log_segment_size,
+                                 cloud_storage_enable_remote_read=True,
+                                 cloud_storage_enable_remote_write=True)
         self.s3_bucket_name = si_settings.cloud_storage_bucket
 
         extra_rp_conf = dict(log_segment_size=self.log_segment_size)
@@ -114,6 +113,7 @@ class SIAdminApiTest(RedpandaTest):
             self.logger.info(f"describe topic result {partition}")
             assert partition.start_offset == 0, f"start-offset of the partition is supposed to be 0 instead of {partition.start_offset}"
 
+        self.redpanda.si_settings.set_expected_damage({"missing_segments"})
         segment_to_remove = self.find_deletion_candidate()
         self.logger.info(f"trying to remove segment {segment_to_remove}")
         self.cloud_storage_client.delete_object(self.s3_bucket_name,
@@ -190,3 +190,26 @@ class SIAdminApiTest(RedpandaTest):
         response = self.admin.get_topic_recovery_status(
             node=self._get_non_controller_node(), allow_redirects=False)
         assert response.status_code == requests.status_codes.codes['ok']
+
+    @cluster(num_nodes=3)
+    def test_manifest_dump(self):
+        with expect_http_error(404):
+            not_found_response = self.admin.get_partition_manifest(
+                "test-topic", 0)
+
+        self.rpk.create_topic("test-topic")
+        self.admin.await_stable_leader("test-topic", 0)
+        response = self.admin.get_partition_manifest("test-topic", 0)
+
+        assert "last_offset" in response
+        assert response["last_offset"] == 0
+
+        assert "cloud_log_size_bytes" in response
+        assert response["cloud_log_size_bytes"] == 0
+
+        self.redpanda.set_cluster_config({"cloud_storage_enabled": False},
+                                         expect_restart=True)
+
+        with expect_http_error(400):
+            not_enabled_response = self.admin.get_partition_manifest(
+                "test-topic", 0)

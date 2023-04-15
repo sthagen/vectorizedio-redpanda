@@ -92,6 +92,31 @@
           ]
         }
       ]
+    },
+    {
+      "path": "/v1/cloud_storage/manifest/{topic}/{partition}",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get the in-memory partition manifest in JSON format",
+          "operationId": "get_manifest",
+          "nickname": "get_manifest",
+          "parameters": [
+            {
+              "name": "topic",
+              "in": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "name": "partition",
+              "in": "path",
+              "required": true,
+              "type": "integer"
+            }
+          ]
+        }
+      ]
     }
   ],
   "models": {
@@ -174,6 +199,11 @@
             "type": "long",
             "nullable": true,
             "description": "Delta in milliseconds since the last manifest sync (only present for read replicas)"
+        },
+        "metadata_update_pending": {
+          "type": "boolean",
+          "description": "If true, the remote metadata may not yet include all segments that have been uploaded."
+
         },
         "total_log_size_bytes": {
             "type": "long",

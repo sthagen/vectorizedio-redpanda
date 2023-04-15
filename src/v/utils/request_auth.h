@@ -89,16 +89,19 @@ private:
 class request_authenticator {
 public:
     request_authenticator(
-      config::binding<bool> require_auth, cluster::controller*);
+      config::binding<bool> require_auth,
+      config::binding<std::vector<ss::sstring>> superusers,
+      cluster::controller*);
 
-    request_auth_result authenticate(const ss::httpd::request& req);
+    request_auth_result authenticate(const ss::http::request& req);
 
 private:
     request_auth_result do_authenticate(
-      ss::httpd::request const& req,
+      ss::http::request const& req,
       security::credential_store const& cred_store,
       bool require_auth);
 
     cluster::controller* _controller{nullptr};
     config::binding<bool> _require_auth;
+    config::binding<std::vector<ss::sstring>> _superusers;
 };

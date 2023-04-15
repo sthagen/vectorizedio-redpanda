@@ -349,7 +349,7 @@ service::service(
   , _server(
       "schema_registry", // server_name
       "schema_registry", // public_metric_group_name
-      ss::api_registry_builder20(_config.api_doc_dir(), "/v1"),
+      ss::httpd::api_registry_builder20(_config.api_doc_dir(), "/v1"),
       "schema_registry_header",
       "/schema_registry_definitions",
       _ctx,
@@ -358,7 +358,10 @@ service::service(
   , _writer(sequencer)
   , _controller(controller)
   , _ensure_started{[this]() { return do_start(); }}
-  , _auth{config::always_true(), controller.get()} {}
+  , _auth{
+      config::always_true(),
+      config::shard_local_cfg().superusers.bind(),
+      controller.get()} {}
 
 ss::future<> service::start() {
     static std::vector<model::broker_endpoint> not_advertised{};

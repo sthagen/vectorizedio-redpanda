@@ -776,7 +776,7 @@ configuration::configuration()
       "max_kafka_throttle_delay_ms",
       "Fail-safe maximum throttle delay on kafka requests",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      60'000ms)
+      30'000ms)
   , kafka_max_bytes_per_fetch(
       *this,
       "kafka_max_bytes_per_fetch",
@@ -1003,7 +1003,7 @@ configuration::configuration()
       "kafka_nodelete_topics",
       "Prevents the topics in the list from being deleted via the kafka api",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      {"__audit", "__consumer_offsets", "__redpanda_e2e_probe", "_schemas"},
+      {"__audit", "__consumer_offsets", "_schemas"},
       &validate_non_empty_string_vec)
   , kafka_noproduce_topics(
       *this,

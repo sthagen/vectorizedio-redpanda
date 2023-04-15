@@ -35,6 +35,7 @@ enum class reply_error_code : uint16_t {
     nonauthoritative_information = 203,
     no_content = 204,
     reset_content = 205,
+    partial_content = 206,
     multiple_choices = 300,
     moved_permanently = 301,
     moved_temporarily = 302,
@@ -77,6 +78,7 @@ enum class reply_error_code : uint16_t {
     subject_not_deleted = 40405,
     subject_version_soft_deleted = 40406,
     subject_version_not_deleted = 40407,
+    serialization_error = 40801,
     consumer_already_exists = 40902,
     schema_empty = 42201,
     schema_version_invalid = 42202,
@@ -94,7 +96,7 @@ enum class reply_error_code : uint16_t {
 
 std::error_condition make_error_condition(reply_error_code);
 std::error_condition make_error_condition(std::error_code ec);
-std::error_condition make_error_condition(ss::httpd::reply::status_type ec);
+std::error_condition make_error_condition(ss::http::reply::status_type ec);
 const std::error_category& reply_category() noexcept;
 
 } // namespace pandaproxy

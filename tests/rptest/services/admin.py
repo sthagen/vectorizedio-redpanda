@@ -686,8 +686,12 @@ class Admin:
                           algorithm=algorithm,
                       ))
 
-    def list_users(self, node=None):
-        return self._request("get", "security/users", node=node).json()
+    def list_users(self, node=None, include_ephemeral: Optional[bool] = False):
+        params = None if include_ephemeral is None else {
+            "include_ephemeral": f"{include_ephemeral}".lower()
+        }
+        return self._request("get", "security/users", node=node,
+                             params=params).json()
 
     def partition_transfer_leadership(self,
                                       namespace,
@@ -889,6 +893,14 @@ class Admin:
                              "debug/refresh_disk_health_info",
                              node=node)
 
-    def get_partition_cloud_storage_status(self, topic, partition):
+    def get_partition_cloud_storage_status(self, topic, partition, node=None):
+        return self._request("GET",
+                             f"cloud_storage/status/{topic}/{partition}",
+                             node=node).json()
+
+    def get_partition_manifest(self, topic: str, partition: int):
+        """
+        Get the in-memory partition manifest for the requested ntp
+        """
         return self._request(
-            "GET", f"cloud_storage/status/{topic}/{partition}").json()
+            "GET", f"cloud_storage/manifest/{topic}/{partition}").json()

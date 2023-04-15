@@ -8,7 +8,11 @@ function install_java_client_deps() {
     build-essential \
     default-jdk \
     git \
-    maven
+    maven \
+    cmake \
+    curl
+
+  install_protobuf_compiler
 }
 
 function install_system_deps() {
@@ -17,9 +21,7 @@ function install_system_deps() {
     bind9-utils \
     bind9-dnsutils \
     bsdmainutils \
-    curl \
     dmidecode \
-    cmake \
     krb5-admin-server \
     krb5-kdc \
     krb5-user \
@@ -94,11 +96,17 @@ function install_kaf() {
   mv /root/go/bin/kaf /usr/local/bin/
 }
 
+# Alias so that vtools can be updated asynchronously.
 function install_client_swarm() {
+  install_rust_tools "$1"
+}
+
+function install_rust_tools() {
   dir="$1"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   export PATH="$dir/.cargo/bin:${PATH}"
   pushd /tmp
+
   git clone https://github.com/redpanda-data/client-swarm.git
   pushd client-swarm
   git reset --hard 9ef8e93
@@ -106,8 +114,18 @@ function install_client_swarm() {
   cp target/release/client-swarm /usr/local/bin
   popd
   rm -rf client-swarm
+
+  git clone https://github.com/jcsp/segment_toy.git
+  pushd segment_toy
+  git reset --hard 899c1310b0a55e1ade66237054faba81bb4223a4
+  cargo build --release
+  cp target/release/segments /usr/local/bin
+  popd
+  rm -rf segment_toy
+
   popd
   rm -rf $dir/.cargo
+  rm -rf $dir/.rustup
 }
 
 function install_sarama_examples() {
@@ -142,7 +160,7 @@ function install_kcl() {
 function install_kgo_verifier() {
   git -C /opt clone https://github.com/redpanda-data/kgo-verifier.git
   cd /opt/kgo-verifier
-  git reset --hard 9f1c7d0a0d9a2137e4c729c40d9477c5d77b1704
+  git reset --hard 5b1b6b6b802a30962963cca8b364bee148fee515
   go mod tidy
   make
 }
@@ -171,12 +189,25 @@ function install_arroyo() {
 function install_java_test_clients() {
   mvn clean package --batch-mode --file /opt/redpanda-tests/java/e2e-verifiers --define buildDir=/opt/e2e-verifiers
   mvn clean package --batch-mode --file /opt/redpanda-tests/java/verifiers --define buildDir=/opt/verifiers
+  mvn clean package --batch-mode --file /opt/redpanda-tests/java/kafka-serde --define buildDir=/opt/kafka-serde
 }
 
 function install_go_test_clients() {
   cd /opt/redpanda-tests/go/sarama/produce_test
   go mod tidy
   go build
+
+  cd /opt/redpanda-tests/go/go-kafka-serde
+  GOPATH=${HOME}/go make clean all
+}
+
+function install_protobuf_compiler() {
+  mkdir /tmp/protobuf
+  curl -SL "https://vectorized-public.s3.amazonaws.com/dependencies/protobuf-cpp-3.21.8.tar.gz" | tar --no-same-owner -xz --strip-components=1 -C /tmp/protobuf
+  cd /tmp/protobuf
+  cmake -Dprotobuf_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr
+  make -j$(nproc)
+  make install
 }
 
 $@

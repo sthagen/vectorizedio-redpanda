@@ -312,10 +312,17 @@ partition_manifest::get_start_kafka_offset() const {
             auto delta = iter->second.delta_offset;
             return _start_offset - delta;
         } else {
-            throw std::runtime_error(fmt_with_ctx(
-              fmt::format,
-              "can't translate start offset {} because the manifest is empty",
-              _start_offset));
+            // If start offset points outside a segment, then we cannot
+            // translate it.  If there are any segments ahead of it, then
+            // those may be considered the start of the remote log.
+            if (
+              !_segments.empty()
+              && _segments.begin()->second.base_offset >= _start_offset) {
+                const auto& seg = _segments.begin()->second;
+                return seg.base_offset - seg.delta_offset;
+            } else {
+                return std::nullopt;
+            }
         }
     }
     return std::nullopt;
@@ -533,7 +540,7 @@ bool partition_manifest::advance_start_offset(model::offset new_start_offset) {
             // This branch should never be taken. It indicates that the
             // in-memory manifest may be is in some sort of inconsistent state.
             vlog(
-              cst_log.warn,
+              cst_log.error,
               "Previous start offset is not within segment in "
               "manifest for {}: previous_start_offset={}",
               _ntp,
@@ -1360,6 +1367,26 @@ void partition_manifest::serialize(std::ostream& out) const {
     }
     serialize_replaced(c);
     serialize_end(c);
+}
+
+ss::future<>
+partition_manifest::serialize(ss::output_stream<char>& output) const {
+    iobuf serialized;
+    iobuf_ostreambuf obuf(serialized);
+    std::ostream os(&obuf);
+    serialization_cursor_ptr c = make_cursor(os);
+    serialize_begin(c);
+    while (!c->segments_done) {
+        serialize_segments(c);
+
+        co_await write_iobuf_to_output_stream(
+          serialized.share(0, serialized.size_bytes()), output);
+        serialized.clear();
+    }
+    serialize_replaced(c);
+    serialize_end(c);
+
+    co_await write_iobuf_to_output_stream(std::move(serialized), output);
 }
 
 partition_manifest::serialization_cursor_ptr

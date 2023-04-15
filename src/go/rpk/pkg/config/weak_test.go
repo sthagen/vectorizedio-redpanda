@@ -858,9 +858,7 @@ func TestConfig_UnmarshalYAML(t *testing.T) {
 	}{
 		{
 			name: "Config file with normal types",
-			data: `organization: "my_organization"
-cluster_id: "cluster_id"
-node_uuid: "node_uuid"
+			data: `
 redpanda:
   data_directory: "var/lib/redpanda/data"
   node_id: 1
@@ -982,9 +980,6 @@ rpk:
   tune_clocksource: true
 `,
 			exp: &Config{
-				Organization: "my_organization",
-				ClusterID:    "cluster_id",
-				NodeUUID:     "node_uuid",
 				Redpanda: RedpandaNodeConfig{
 					Directory:      "var/lib/redpanda/data",
 					ID:             intPtr(1),
@@ -1065,7 +1060,7 @@ rpk:
 					},
 					SchemaRegistryReplicationFactor: func() *int { i := 3; return &i }(),
 				},
-				Rpk: RpkConfig{
+				Rpk: RpkNodeConfig{
 					TLS:                  &TLS{KeyFile: "~/certs/key.pem"},
 					SASL:                 &SASL{User: "user", Password: "pass"},
 					AdditionalStartFlags: []string{"--overprovisioned"},
@@ -1078,19 +1073,19 @@ rpk:
 						Addresses: []string{"192.168.72.34:9644", "192.168.72.35:9644"},
 						TLS:       &TLS{CertFile: "~/certs/admin-cert.pem", TruststoreFile: "~/certs/admin-ca.pem"},
 					},
-					TuneNetwork:       false,
-					TuneDiskScheduler: false,
-					TuneCPU:           true,
-					TuneAioEvents:     false,
-					TuneClocksource:   true,
+					Tuners: RpkNodeTuners{
+						TuneNetwork:       false,
+						TuneDiskScheduler: false,
+						TuneCPU:           true,
+						TuneAioEvents:     false,
+						TuneClocksource:   true,
+					},
 				},
 			},
 		},
 		{
 			name: "Config file with omitted node ID",
-			data: `organization: "my_organization"
-cluster_id: "cluster_id"
-node_uuid: "node_uuid"
+			data: `
 redpanda:
   data_directory: "var/lib/redpanda/data"
   enable_admin_api: true
@@ -1136,9 +1131,6 @@ redpanda:
   rack: "rack-id"
 `,
 			exp: &Config{
-				Organization: "my_organization",
-				ClusterID:    "cluster_id",
-				NodeUUID:     "node_uuid",
 				Redpanda: RedpandaNodeConfig{
 					Directory:      "var/lib/redpanda/data",
 					ID:             nil,
@@ -1182,9 +1174,7 @@ redpanda:
 		},
 		{
 			name: "Config file with weak types",
-			data: `organization: true
-cluster_id: "cluster_id"
-node_uuid: 124.42
+			data: `
 redpanda:
   data_directory: "var/lib/redpanda/data"
   node_id: 1
@@ -1312,9 +1302,6 @@ rpk:
   tune_clocksource: 1
 `,
 			exp: &Config{
-				Organization: "1",
-				ClusterID:    "cluster_id",
-				NodeUUID:     "124.42",
 				Redpanda: RedpandaNodeConfig{
 					Directory:      "var/lib/redpanda/data",
 					ID:             intPtr(1),
@@ -1394,7 +1381,7 @@ rpk:
 					},
 					SchemaRegistryReplicationFactor: func() *int { i := 3; return &i }(),
 				},
-				Rpk: RpkConfig{
+				Rpk: RpkNodeConfig{
 					TLS:                  &TLS{KeyFile: "~/certs/key.pem"},
 					SASL:                 &SASL{User: "user", Password: "pass"},
 					AdditionalStartFlags: []string{"--overprovisioned"},
@@ -1407,11 +1394,13 @@ rpk:
 						Addresses: []string{"192.168.72.34:9644", "192.168.72.35:9644"},
 						TLS:       &TLS{CertFile: "~/certs/admin-cert.pem", TruststoreFile: "~/certs/admin-ca.pem"},
 					},
-					TuneNetwork:       false,
-					TuneDiskScheduler: false,
-					TuneCPU:           true,
-					TuneAioEvents:     false,
-					TuneClocksource:   true,
+					Tuners: RpkNodeTuners{
+						TuneNetwork:       false,
+						TuneDiskScheduler: false,
+						TuneCPU:           true,
+						TuneAioEvents:     false,
+						TuneClocksource:   true,
+					},
 				},
 			},
 		},

@@ -276,7 +276,8 @@ tm_stm::do_update_tx(tm_transaction tx, model::term_id term) {
     }
 
     auto offset = model::offset(r.value().last_offset());
-    if (!co_await wait_no_throw(offset, _sync_timeout)) {
+    if (!co_await wait_no_throw(
+          offset, model::timeout_clock::now() + _sync_timeout)) {
         vlog(
           txlog.info,
           "timeout on waiting until {} is applied on updating tx:{} pid:{} "
@@ -544,7 +545,8 @@ ss::future<tm_stm::op_status> tm_stm::do_register_new_producer(
     }
 
     if (!co_await wait_no_throw(
-          model::offset(r.value().last_offset()), _sync_timeout)) {
+          model::offset(r.value().last_offset()),
+          model::timeout_clock::now() + _sync_timeout)) {
         co_return tm_stm::op_status::unknown;
     }
     if (_c->term() != expected_term) {
@@ -709,7 +711,7 @@ ss::future<stm_snapshot> tm_stm::do_take_snapshot() {
     tm_ss.transactions = _cache.local().get_log_transactions();
 
     iobuf tm_ss_buf;
-    reflection::adl<tm_snapshot>{}.to(tm_ss_buf, tm_ss);
+    reflection::adl<tm_snapshot>{}.to(tm_ss_buf, std::move(tm_ss));
 
     co_return stm_snapshot::create(
       supported_version, _insync_offset, std::move(tm_ss_buf));

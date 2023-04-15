@@ -12,7 +12,6 @@
 #include "utils/request_auth.h"
 
 #include "cluster/controller.h"
-#include "config/configuration.h"
 #include "seastar/http/exception.hh"
 #include "security/credential_store.h"
 #include "security/scram_algorithm.h"
@@ -21,9 +20,12 @@
 static ss::logger logger{"request_auth"};
 
 request_authenticator::request_authenticator(
-  config::binding<bool> require_auth, cluster::controller* controller)
+  config::binding<bool> require_auth,
+  config::binding<std::vector<ss::sstring>> superusers,
+  cluster::controller* controller)
   : _controller(controller)
-  , _require_auth(std::move(require_auth)) {}
+  , _require_auth(std::move(require_auth))
+  , _superusers(std::move(superusers)) {}
 
 /**
  * Attempt to authenticate the request.
@@ -36,7 +38,7 @@ request_authenticator::request_authenticator(
  * @return
  */
 request_auth_result
-request_authenticator::authenticate(const ss::httpd::request& req) {
+request_authenticator::authenticate(const ss::http::request& req) {
     if (_controller == nullptr) {
         // We are running outside of an environment with credentials, e.g.
         // a unit test or a standalone pandaproxy/schema_registry
@@ -49,7 +51,7 @@ request_authenticator::authenticate(const ss::httpd::request& req) {
     try {
         return do_authenticate(req, cred_store, _require_auth());
     } catch (ss::httpd::base_exception const& e) {
-        if (e.status() == ss::httpd::reply::status_type::unauthorized) {
+        if (e.status() == ss::http::reply::status_type::unauthorized) {
             if (_require_auth()) {
                 throw;
             } else {
@@ -66,7 +68,7 @@ request_authenticator::authenticate(const ss::httpd::request& req) {
 }
 
 request_auth_result request_authenticator::do_authenticate(
-  ss::httpd::request const& req,
+  ss::http::request const& req,
   security::credential_store const& cred_store,
   bool require_auth) {
     security::credential_user username;
@@ -107,7 +109,7 @@ request_auth_result request_authenticator::do_authenticate(
               "Client auth failure: user '{}' not found",
               username);
             throw ss::httpd::base_exception(
-              "Unauthorized", ss::httpd::reply::status_type::unauthorized);
+              "Unauthorized", ss::http::reply::status_type::unauthorized);
         } else {
             const auto& cred = cred_opt.value();
             bool is_valid = (
@@ -122,10 +124,10 @@ request_auth_result request_authenticator::do_authenticate(
                   "Client auth failure: user '{}' wrong password",
                   username);
                 throw ss::httpd::base_exception(
-                  "Unauthorized", ss::httpd::reply::status_type::unauthorized);
+                  "Unauthorized", ss::http::reply::status_type::unauthorized);
             } else {
                 vlog(logger.trace, "Authenticated user {}", username);
-                const auto& superusers = config::shard_local_cfg().superusers();
+                const auto& superusers = _superusers();
                 auto found = std::find(
                   superusers.begin(), superusers.end(), username);
                 bool superuser = (found != superusers.end()) || (!require_auth);
@@ -161,7 +163,7 @@ void request_auth_result::require_superuser() {
           _username);
         throw ss::httpd::base_exception(
           "Forbidden (superuser role required)",
-          ss::httpd::reply::status_type::forbidden);
+          ss::http::reply::status_type::forbidden);
     }
 }
 
@@ -173,7 +175,7 @@ void request_auth_result::require_authenticated() {
           "Client authorization failure: user must be authenticated");
         throw ss::httpd::base_exception(
           "Forbidden (authentication is required)",
-          ss::httpd::reply::status_type::unauthorized);
+          ss::http::reply::status_type::unauthorized);
     }
 }
 

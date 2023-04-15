@@ -153,6 +153,10 @@ ss::future<std::vector<rm_stm::tx_range>> partition::aborted_transactions_cloud(
 }
 
 cluster::cloud_storage_mode partition::get_cloud_storage_mode() const {
+    if (!config::shard_local_cfg().cloud_storage_enabled()) {
+        return cluster::cloud_storage_mode::disabled;
+    }
+
     const auto& cfg = _raft->log_config();
 
     if (cfg.is_read_replica_mode_enabled()) {
@@ -209,8 +213,11 @@ partition_cloud_storage_status partition::get_cloud_storage_status() const {
     status.local_log_last_offset = wrap_model_offset(
       local_log_offsets.committed_offset);
 
-    if (status.mode != cloud_storage_mode::disabled) {
+    if (status.mode != cloud_storage_mode::disabled && _archival_meta_stm) {
         const auto& manifest = _archival_meta_stm->manifest();
+        status.cloud_metadata_update_pending
+          = _archival_meta_stm->get_dirty()
+            == archival_metadata_stm::state_dirty::dirty;
         status.cloud_log_size_bytes = manifest.cloud_log_size();
         status.cloud_log_segment_count = manifest.size();
 
@@ -839,23 +846,31 @@ void partition::set_topic_config(
     }
 }
 
+ss::future<> partition::serialize_manifest_to_output_stream(
+  ss::output_stream<char>& output) {
+    if (!_archival_meta_stm || !_cloud_storage_partition) {
+        throw std::runtime_error(fmt::format(
+          "{} not configured for cloud storage", _topic_cfg->tp_ns));
+    }
+
+    auto lock = _archival_meta_stm->acquire_manifest_lock();
+
+    // The timeout here is meant to place an upper bound on the amount
+    // of time the manifest lock is held for.
+    co_await ss::with_timeout(
+      model::timeout_clock::now() + manifest_serialization_timeout,
+      _cloud_storage_partition->serialize_manifest_to_output_stream(output));
+}
+
 ss::future<std::error_code>
-partition::transfer_leadership(std::optional<model::node_id> target) {
+partition::transfer_leadership(transfer_leadership_request req) {
+    auto target = req.target;
+
     vlog(
       clusterlog.debug,
       "Transferring {} leadership to {}",
       ntp(),
       target.value_or(model::node_id{-1}));
-
-    // Some state machines need a preparatory phase to efficiently transfer
-    // leadership: invoke this, and hold the lock that they return until
-    // the leadership transfer attempt is complete.
-    ss::basic_rwlock<>::holder stm_prepare_lock;
-    if (_rm_stm) {
-        stm_prepare_lock = co_await _rm_stm->prepare_transfer_leadership();
-    } else if (_tm_stm) {
-        stm_prepare_lock = co_await _tm_stm->prepare_transfer_leadership();
-    }
 
     std::optional<ss::deferred_action<std::function<void()>>> complete_archiver;
     auto archival_timeout
@@ -891,7 +906,17 @@ partition::transfer_leadership(std::optional<model::node_id> target) {
         vlog(clusterlog.trace, "transfer_leadership[{}]: no archiver", ntp());
     }
 
-    co_return co_await _raft->do_transfer_leadership(target);
+    // Some state machines need a preparatory phase to efficiently transfer
+    // leadership: invoke this, and hold the lock that they return until
+    // the leadership transfer attempt is complete.
+    ss::basic_rwlock<>::holder stm_prepare_lock;
+    if (_rm_stm) {
+        stm_prepare_lock = co_await _rm_stm->prepare_transfer_leadership();
+    } else if (_tm_stm) {
+        stm_prepare_lock = co_await _tm_stm->prepare_transfer_leadership();
+    }
+
+    co_return co_await _raft->do_transfer_leadership(req);
 }
 
 std::ostream& operator<<(std::ostream& o, const partition& x) {
