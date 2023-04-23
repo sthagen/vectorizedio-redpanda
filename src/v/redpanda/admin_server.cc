@@ -14,7 +14,6 @@
 #include "archival/ntp_archiver_service.h"
 #include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote_partition.h"
-#include "cloud_storage/topic_recovery_service.h"
 #include "cluster/cloud_storage_size_reducer.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/config_frontend.h"
@@ -37,6 +36,7 @@
 #include "cluster/security_frontend.h"
 #include "cluster/self_test_frontend.h"
 #include "cluster/shard_table.h"
+#include "cluster/topic_recovery_service.h"
 #include "cluster/topic_recovery_status_frontend.h"
 #include "cluster/topic_recovery_status_rpc_handler.h"
 #include "cluster/topics_frontend.h"
@@ -920,7 +920,9 @@ ss::future<> admin_server::throw_on_error(
               fmt_with_ctx(fmt::format, "Can not find pid for ntp:{}", ntp));
         case cluster::tx_errc::partition_not_found: {
             ss::sstring error_msg;
-            if (ntp == model::tx_manager_ntp) {
+            if (
+              ntp.tp.topic == model::tx_manager_topic
+              && ntp.ns == model::kafka_internal_namespace) {
                 error_msg = fmt::format("Can not find ntp:{}", ntp);
             } else {
                 error_msg = fmt::format(
@@ -928,6 +930,14 @@ ss::future<> admin_server::throw_on_error(
             }
             throw ss::httpd::bad_request_exception(error_msg);
         }
+        case cluster::tx_errc::not_coordinator:
+            throw ss::httpd::base_exception(
+              fmt::format(
+                "Node not a coordinator or coordinator leader is not "
+                "stabilized yet: {}",
+                ec.message()),
+              ss::http::reply::status_type::service_unavailable);
+
         default:
             throw ss::httpd::server_error_exception(
               fmt::format("Unexpected tx_error error: {}", ec.message()));
@@ -3185,8 +3195,28 @@ admin_server::get_all_transactions_handler(
         throw ss::httpd::bad_request_exception("Transaction are disabled");
     }
 
-    if (need_redirect_to_leader(model::tx_manager_ntp, _metadata_cache)) {
-        throw co_await redirect_to_leader(*req, model::tx_manager_ntp);
+    auto coordinator_partition_str = req->get_query_param(
+      "coordinator_partition_id");
+    int64_t coordinator_partition;
+    try {
+        coordinator_partition = std::stoi(coordinator_partition_str);
+    } catch (...) {
+        throw ss::httpd::bad_param_exception(fmt::format(
+          "Partition must be an integer: {}", coordinator_partition_str));
+    }
+
+    if (coordinator_partition < 0) {
+        throw ss::httpd::bad_param_exception(fmt::format(
+          "Invalid coordinator partition {}", coordinator_partition));
+    }
+
+    model::ntp tx_ntp(
+      model::tx_manager_nt.ns,
+      model::tx_manager_nt.tp,
+      model::partition_id(coordinator_partition));
+
+    if (need_redirect_to_leader(tx_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, tx_ntp);
     }
 
     auto& tx_frontend = _partition_manager.local().get_tx_frontend();
@@ -3194,9 +3224,10 @@ admin_server::get_all_transactions_handler(
         throw ss::httpd::bad_request_exception("Can not get tx_frontend");
     }
 
-    auto res = co_await tx_frontend.local().get_all_transactions();
+    auto res = co_await tx_frontend.local()
+                 .get_all_transactions_for_one_tx_partition(tx_ntp);
     if (!res.has_value()) {
-        co_await throw_on_error(*req, res.error(), model::tx_manager_ntp);
+        co_await throw_on_error(*req, res.error(), tx_ntp);
     }
 
     using tx_info = ss::httpd::transaction_json::transaction_summary;
@@ -3257,11 +3288,20 @@ admin_server::get_all_transactions_handler(
 
 ss::future<ss::json::json_return_type>
 admin_server::delete_partition_handler(std::unique_ptr<ss::http::request> req) {
-    if (need_redirect_to_leader(model::tx_manager_ntp, _metadata_cache)) {
-        throw co_await redirect_to_leader(*req, model::tx_manager_ntp);
+    auto& tx_frontend = _partition_manager.local().get_tx_frontend();
+    if (!tx_frontend.local_is_initialized()) {
+        throw ss::httpd::bad_request_exception("Transaction are disabled");
+    }
+    auto transaction_id = req->param["transactional_id"];
+    kafka::transactional_id tid(transaction_id);
+    auto tx_ntp = tx_frontend.local().get_ntp(tid);
+    if (!tx_ntp) {
+        throw ss::httpd::bad_request_exception("Coordinator not available");
+    }
+    if (need_redirect_to_leader(*tx_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, *tx_ntp);
     }
 
-    auto transaction_id = req->param["transactional_id"];
     auto ntp = parse_ntp_from_query_param(req);
 
     auto etag_str = req->get_query_param("etag");
@@ -3280,12 +3320,6 @@ admin_server::delete_partition_handler(std::unique_ptr<ss::http::request> req) {
 
     cluster::tm_transaction::tx_partition partition_for_delete{
       .ntp = ntp, .etag = model::term_id(etag)};
-    kafka::transactional_id tid(transaction_id);
-
-    auto& tx_frontend = _partition_manager.local().get_tx_frontend();
-    if (!tx_frontend.local_is_initialized()) {
-        throw ss::httpd::bad_request_exception("Transaction are disabled");
-    }
 
     vlog(
       logger.info,
@@ -3598,6 +3632,98 @@ void admin_server::register_usage_routes() {
       });
 }
 
+namespace {
+
+void fill_raft_state(
+  ss::httpd::debug_json::partition_replica_state& replica,
+  cluster::partition_state state) {
+    ss::httpd::debug_json::raft_replica_state raft_state;
+    auto& src = state.raft_state;
+    raft_state.node_id = src.node();
+    raft_state.term = src.term();
+    raft_state.offset_translator_state = std::move(src.offset_translator_state);
+    raft_state.group_configuration = std::move(src.group_configuration);
+    raft_state.confirmed_term = src.confirmed_term();
+    raft_state.flushed_offset = src.flushed_offset();
+    raft_state.commit_index = src.commit_index();
+    raft_state.majority_replicated_index = src.majority_replicated_index();
+    raft_state.visibility_upper_bound_index
+      = src.visibility_upper_bound_index();
+    raft_state.last_quorum_replicated_index
+      = src.last_quorum_replicated_index();
+    raft_state.last_snapshot_term = src.last_snapshot_term();
+    raft_state.received_snapshot_bytes = src.received_snapshot_bytes;
+    raft_state.last_snapshot_index = src.last_snapshot_index();
+    raft_state.received_snapshot_index = src.received_snapshot_index();
+    raft_state.has_pending_flushes = src.has_pending_flushes;
+    raft_state.is_leader = src.is_leader;
+    raft_state.is_elected_leader = src.is_elected_leader;
+    if (src.followers) {
+        for (const auto& f : *src.followers) {
+            ss::httpd::debug_json::raft_follower_state follower_state;
+            follower_state.id = f.node();
+            follower_state.last_flushed_log_index = f.last_flushed_log_index();
+            follower_state.last_dirty_log_index = f.last_dirty_log_index();
+            follower_state.match_index = f.match_index();
+            follower_state.next_index = f.next_index();
+            follower_state.last_sent_offset = f.last_sent_offset();
+            follower_state.heartbeats_failed = f.heartbeats_failed;
+            follower_state.is_learner = f.is_learner;
+            follower_state.ms_since_last_heartbeat = f.ms_since_last_heartbeat;
+            follower_state.last_sent_seq = f.last_sent_seq;
+            follower_state.last_received_seq = f.last_received_seq;
+            follower_state.last_successful_received_seq
+              = f.last_successful_received_seq;
+            follower_state.suppress_heartbeats = f.suppress_heartbeats;
+            follower_state.is_recovering = f.is_recovering;
+            raft_state.followers.push(std::move(follower_state));
+        }
+    }
+    replica.raft_state = std::move(raft_state);
+}
+} // namespace
+
+ss::future<ss::json::json_return_type>
+admin_server::get_partition_state_handler(
+  std::unique_ptr<ss::http::request> req) {
+    const model::ntp ntp = parse_ntp_from_request(req->param);
+    auto result
+      = co_await _controller->get_topics_frontend().local().get_partition_state(
+        ntp);
+    if (result.has_error()) {
+        throw ss::httpd::server_error_exception(fmt::format(
+          "Error {} processing partition state for ntp: {}",
+          result.error(),
+          ntp));
+    }
+
+    ss::httpd::debug_json::partition_state response;
+    response.ntp = fmt::format("{}", ntp);
+    const auto& states = result.value();
+    for (const auto& state : states) {
+        ss::httpd::debug_json::partition_replica_state replica;
+        replica.start_offset = state.start_offset;
+        replica.committed_offset = state.committed_offset;
+        replica.last_stable_offset = state.last_stable_offset;
+        replica.high_watermark = state.high_water_mark;
+        replica.dirty_offset = state.dirty_offset;
+        replica.latest_configuration_offset = state.latest_configuration_offset;
+        replica.revision_id = state.revision_id;
+        replica.log_size_bytes = state.log_size_bytes;
+        replica.non_log_disk_size_bytes = state.non_log_disk_size_bytes;
+        replica.is_read_replica_mode_enabled
+          = state.is_read_replica_mode_enabled;
+        replica.read_replica_bucket = state.read_replica_bucket;
+        replica.is_remote_fetch_enabled = state.is_remote_fetch_enabled;
+        replica.is_cloud_data_available = state.is_cloud_data_available;
+        replica.start_cloud_offset = state.start_cloud_offset;
+        replica.next_cloud_offset = state.next_cloud_offset;
+        fill_raft_state(replica, std::move(state));
+        response.replicas.push(std::move(replica));
+    }
+    co_return ss::json::json_return_type(std::move(response));
+}
+
 void admin_server::register_debug_routes() {
     register_route<user>(
       ss::httpd::debug_json::reset_leaders_info,
@@ -3697,6 +3823,7 @@ void admin_server::register_debug_routes() {
                 using result_t = ss::httpd::debug_json::controller_status;
                 result_t ans;
                 ans.last_applied_offset = offset;
+                ans.start_offset = _controller->get_start_offset();
                 ans.commited_index = _controller->get_commited_index();
                 return ss::make_ready_future<ss::json::json_return_type>(
                   ss::json::json_return_type(ans));
@@ -3774,6 +3901,13 @@ void admin_server::register_debug_routes() {
       ss::httpd::debug_json::restart_service,
       [this](std::unique_ptr<ss::http::request> req) {
           return restart_service_handler(std::move(req));
+      });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_partition_state,
+      [this](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          return get_partition_state_handler(std::move(req));
       });
 }
 

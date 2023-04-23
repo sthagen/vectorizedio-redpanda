@@ -1,3 +1,13 @@
+/*
+ * Copyright 2023 Redpanda Data, Inc.
+ *
+ * Licensed as a Redpanda Enterprise file under the Redpanda Community
+ * License (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
+ */
+
 #include "cloud_storage_clients/client_pool.h"
 
 #include "cloud_storage_clients/abs_client.h"
@@ -20,15 +30,25 @@ client_pool::client_pool(
   , _policy(policy) {}
 
 ss::future<> client_pool::stop() {
+    vlog(pool_log.info, "Stopping client pool: {}", _pool.size());
+
     if (!_as.abort_requested()) {
         _as.request_abort();
     }
     _cvar.broken();
     // Wait until all leased objects are returned
     co_await _gate.close();
+
+    for (auto& it : _pool) {
+        co_await it->stop();
+    }
+
+    vlog(pool_log.info, "Stopped client pool");
 }
 
 void client_pool::shutdown_connections() {
+    vlog(pool_log.info, "Shutting down client pool: {}", _pool.size());
+
     _as.request_abort();
     _cvar.broken();
     for (auto& it : _leased) {
@@ -37,6 +57,8 @@ void client_pool::shutdown_connections() {
     for (auto& it : _pool) {
         it->shutdown();
     }
+
+    vlog(pool_log.info, "Shut down of client pool complete");
 }
 
 bool client_pool::shutdown_initiated() { return _as.abort_requested(); }

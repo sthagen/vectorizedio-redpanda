@@ -338,24 +338,29 @@ struct end_tx_reply {
 };
 struct fetch_tx_request
   : serde::
-      envelope<fetch_tx_request, serde::version<0>, serde::compat_version<0>> {
+      envelope<fetch_tx_request, serde::version<1>, serde::compat_version<0>> {
     using rpc_adl_exempt = std::true_type;
 
     kafka::transactional_id tx_id{};
     model::term_id term{};
+    model::partition_id tm{0};
 
     fetch_tx_request() noexcept = default;
 
-    fetch_tx_request(kafka::transactional_id tx_id, model::term_id term)
+    fetch_tx_request(
+      kafka::transactional_id tx_id,
+      model::term_id term,
+      model::partition_id tm)
       : tx_id(tx_id)
-      , term(term) {}
+      , term(term)
+      , tm(tm) {}
 
     friend bool operator==(const fetch_tx_request&, const fetch_tx_request&)
       = default;
 
     friend std::ostream& operator<<(std::ostream& o, const fetch_tx_request& r);
 
-    auto serde_fields() { return std::tie(tx_id, term); }
+    auto serde_fields() { return std::tie(tx_id, term, tm); }
 };
 
 struct fetch_tx_reply
@@ -465,11 +470,12 @@ struct fetch_tx_reply
 
 struct begin_tx_request
   : serde::
-      envelope<begin_tx_request, serde::version<0>, serde::compat_version<0>> {
+      envelope<begin_tx_request, serde::version<1>, serde::compat_version<0>> {
     model::ntp ntp;
     model::producer_identity pid;
     model::tx_seq tx_seq;
     std::chrono::milliseconds transaction_timeout_ms{};
+    model::partition_id tm_partition{0};
 
     begin_tx_request() noexcept = default;
 
@@ -477,11 +483,13 @@ struct begin_tx_request
       model::ntp ntp,
       model::producer_identity pid,
       model::tx_seq tx_seq,
-      std::chrono::milliseconds transaction_timeout_ms)
+      std::chrono::milliseconds transaction_timeout_ms,
+      model::partition_id tm_partition)
       : ntp(std::move(ntp))
       , pid(pid)
       , tx_seq(tx_seq)
-      , transaction_timeout_ms(transaction_timeout_ms) {}
+      , transaction_timeout_ms(transaction_timeout_ms)
+      , tm_partition(tm_partition) {}
 
     friend bool operator==(const begin_tx_request&, const begin_tx_request&)
       = default;
@@ -489,7 +497,7 @@ struct begin_tx_request
     friend std::ostream& operator<<(std::ostream& o, const begin_tx_request& r);
 
     auto serde_fields() {
-        return std::tie(ntp, pid, tx_seq, transaction_timeout_ms);
+        return std::tie(ntp, pid, tx_seq, transaction_timeout_ms, tm_partition);
     }
 };
 
@@ -683,13 +691,14 @@ struct abort_tx_reply
 struct begin_group_tx_request
   : serde::envelope<
       begin_group_tx_request,
-      serde::version<0>,
+      serde::version<1>,
       serde::compat_version<0>> {
     model::ntp ntp;
     kafka::group_id group_id;
     model::producer_identity pid;
     model::tx_seq tx_seq;
     model::timeout_clock::duration timeout{};
+    model::partition_id tm_partition{0};
 
     begin_group_tx_request() noexcept = default;
 
@@ -698,12 +707,14 @@ struct begin_group_tx_request
       kafka::group_id group_id,
       model::producer_identity pid,
       model::tx_seq tx_seq,
-      model::timeout_clock::duration timeout)
+      model::timeout_clock::duration timeout,
+      model::partition_id tm)
       : ntp(std::move(ntp))
       , group_id(std::move(group_id))
       , pid(pid)
       , tx_seq(tx_seq)
-      , timeout(timeout) {}
+      , timeout(timeout)
+      , tm_partition(tm) {}
 
     /*
      * construct with default value model::ntp
@@ -713,16 +724,17 @@ struct begin_group_tx_request
       kafka::group_id group_id,
       model::producer_identity pid,
       model::tx_seq tx_seq,
-      model::timeout_clock::duration timeout)
+      model::timeout_clock::duration timeout,
+      model::partition_id tm)
       : begin_group_tx_request(
-        model::ntp(), std::move(group_id), pid, tx_seq, timeout) {}
+        model::ntp(), std::move(group_id), pid, tx_seq, timeout, tm) {}
 
     friend bool
     operator==(const begin_group_tx_request&, const begin_group_tx_request&)
       = default;
 
     auto serde_fields() {
-        return std::tie(ntp, group_id, pid, tx_seq, timeout);
+        return std::tie(ntp, group_id, pid, tx_seq, timeout, tm_partition);
     }
 
     friend std::ostream&
@@ -1835,6 +1847,7 @@ struct update_topic_properties_reply
 
     friend bool operator==(
       const update_topic_properties_reply&,
+
       const update_topic_properties_reply&)
       = default;
 
@@ -2351,7 +2364,11 @@ struct bootstrap_cluster_cmd_data
 
     auto serde_fields() {
         return std::tie(
-          uuid, bootstrap_user_cred, node_ids_by_uuid, founding_version);
+          uuid,
+          bootstrap_user_cred,
+          node_ids_by_uuid,
+          founding_version,
+          initial_nodes);
     }
 
     model::cluster_uuid uuid;
@@ -3065,6 +3082,181 @@ struct cloud_storage_usage_reply
     }
 };
 
+struct partition_state_request
+  : serde::envelope<
+      partition_state_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    model::ntp ntp;
+    friend bool
+    operator==(const partition_state_request&, const partition_state_request&)
+      = default;
+
+    auto serde_fields() { return std::tie(ntp); }
+};
+
+struct partition_raft_state
+  : serde::envelope<
+      partition_raft_state,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    model::node_id node;
+    model::term_id term;
+    ss::sstring offset_translator_state;
+    ss::sstring group_configuration;
+    model::term_id confirmed_term;
+    model::offset flushed_offset;
+    model::offset commit_index;
+    model::offset majority_replicated_index;
+    model::offset visibility_upper_bound_index;
+    model::offset last_quorum_replicated_index;
+    model::term_id last_snapshot_term;
+    model::offset last_snapshot_index;
+    model::offset received_snapshot_index;
+    size_t received_snapshot_bytes;
+    bool has_pending_flushes;
+    bool is_leader;
+    bool is_elected_leader;
+
+    struct follower_state
+      : serde::envelope<
+          follower_state,
+          serde::version<0>,
+          serde::compat_version<0>> {
+        using rpc_adl_exempt = std::true_type;
+
+        model::node_id node;
+        model::offset last_flushed_log_index;
+        model::offset last_dirty_log_index;
+        model::offset match_index;
+        model::offset next_index;
+        model::offset last_sent_offset;
+        size_t heartbeats_failed;
+        bool is_learner;
+        uint64_t ms_since_last_heartbeat;
+        uint64_t last_sent_seq;
+        uint64_t last_received_seq;
+        uint64_t last_successful_received_seq;
+        bool suppress_heartbeats;
+        bool is_recovering;
+
+        auto serde_fields() {
+            return std::tie(
+              node,
+              last_flushed_log_index,
+              last_dirty_log_index,
+              match_index,
+              next_index,
+              last_sent_offset,
+              heartbeats_failed,
+              is_learner,
+              ms_since_last_heartbeat,
+              last_sent_seq,
+              last_received_seq,
+              last_successful_received_seq,
+              suppress_heartbeats,
+              is_recovering);
+        }
+    };
+
+    // Set only on leaders.
+    std::optional<std::vector<follower_state>> followers;
+
+    auto serde_fields() {
+        return std::tie(
+          node,
+          term,
+          offset_translator_state,
+          group_configuration,
+          confirmed_term,
+          flushed_offset,
+          commit_index,
+          majority_replicated_index,
+          visibility_upper_bound_index,
+          last_quorum_replicated_index,
+          last_snapshot_term,
+          last_snapshot_index,
+          received_snapshot_index,
+          received_snapshot_bytes,
+          has_pending_flushes,
+          is_leader,
+          is_elected_leader,
+          followers);
+    }
+
+    friend bool
+    operator==(const partition_raft_state&, const partition_raft_state&)
+      = default;
+};
+
+struct partition_state
+  : serde::
+      envelope<partition_state, serde::version<0>, serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    model::offset start_offset;
+    model::offset committed_offset;
+    model::offset last_stable_offset;
+    model::offset high_water_mark;
+    model::offset dirty_offset;
+    model::offset latest_configuration_offset;
+    model::offset start_cloud_offset;
+    model::offset next_cloud_offset;
+    model::revision_id revision_id;
+    size_t log_size_bytes;
+    size_t non_log_disk_size_bytes;
+    bool is_read_replica_mode_enabled;
+    bool is_remote_fetch_enabled;
+    bool is_cloud_data_available;
+    ss::sstring read_replica_bucket;
+    partition_raft_state raft_state;
+
+    auto serde_fields() {
+        return std::tie(
+          start_offset,
+          committed_offset,
+          last_stable_offset,
+          high_water_mark,
+          dirty_offset,
+          latest_configuration_offset,
+          start_cloud_offset,
+          next_cloud_offset,
+          revision_id,
+          log_size_bytes,
+          non_log_disk_size_bytes,
+          is_read_replica_mode_enabled,
+          is_remote_fetch_enabled,
+          is_cloud_data_available,
+          read_replica_bucket,
+          raft_state);
+    }
+
+    friend bool operator==(const partition_state&, const partition_state&)
+      = default;
+};
+
+struct partition_state_reply
+  : serde::envelope<
+      partition_state_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    model::ntp ntp;
+    std::optional<partition_state> state;
+    errc error_code;
+
+    friend bool
+    operator==(const partition_state_reply&, const partition_state_reply&)
+      = default;
+
+    auto serde_fields() { return std::tie(ntp, state, error_code); }
+};
+
 struct revert_cancel_partition_move_cmd_data
   : serde::envelope<
       revert_cancel_partition_move_cmd_data,
@@ -3662,7 +3854,8 @@ struct adl<cluster::begin_group_tx_request> {
           std::move(r.group_id),
           r.pid,
           r.tx_seq,
-          r.timeout);
+          r.timeout,
+          r.tm_partition);
     }
     cluster::begin_group_tx_request from(iobuf_parser& in) {
         auto ntp = adl<model::ntp>{}.from(in);
@@ -3670,7 +3863,14 @@ struct adl<cluster::begin_group_tx_request> {
         auto pid = adl<model::producer_identity>{}.from(in);
         auto tx_seq = adl<model::tx_seq>{}.from(in);
         auto timeout = adl<model::timeout_clock::duration>{}.from(in);
-        return {std::move(ntp), std::move(group_id), pid, tx_seq, timeout};
+        auto tm_partition = adl<model::partition_id>{}.from(in);
+        return {
+          std::move(ntp),
+          std::move(group_id),
+          pid,
+          tx_seq,
+          timeout,
+          tm_partition};
     }
 };
 
@@ -3762,14 +3962,20 @@ template<>
 struct adl<cluster::begin_tx_request> {
     void to(iobuf& out, cluster::begin_tx_request&& r) {
         serialize(
-          out, std::move(r.ntp), r.pid, r.tx_seq, r.transaction_timeout_ms);
+          out,
+          std::move(r.ntp),
+          r.pid,
+          r.tx_seq,
+          r.transaction_timeout_ms,
+          r.tm_partition);
     }
     cluster::begin_tx_request from(iobuf_parser& in) {
         auto ntp = adl<model::ntp>{}.from(in);
         auto pid = adl<model::producer_identity>{}.from(in);
         auto tx_seq = adl<model::tx_seq>{}.from(in);
         auto timeout = adl<std::chrono::milliseconds>{}.from(in);
-        return {std::move(ntp), pid, tx_seq, timeout};
+        auto tm_partition = adl<model::partition_id>{}.from(in);
+        return {std::move(ntp), pid, tx_seq, timeout, tm_partition};
     }
 };
 

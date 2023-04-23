@@ -609,6 +609,12 @@ configuration::configuration()
   , transaction_coordinator_replication(
       *this, "transaction_coordinator_replication")
   , id_allocator_replication(*this, "id_allocator_replication")
+  , transaction_coordinator_partitions(
+      *this,
+      "transaction_coordinator_partitions",
+      "Amount of partitions for transactions coordinator",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      16)
   , transaction_coordinator_cleanup_policy(
       *this,
       "transaction_coordinator_cleanup_policy",
@@ -895,6 +901,17 @@ configuration::configuration()
        .example = "10737418240",
        .visibility = visibility::tunable},
       5_GiB)
+  , storage_ignore_timestamps_in_future_sec(
+      *this,
+      "storage_ignore_timestamps_in_future_sec",
+      "If set, timestamps more than this many seconds in the future relative to"
+      "the server's clock will be ignored for data retention purposes, and "
+      "retention will act based on another timestamp in the same segment, or "
+      "the mtime of the segment file if no valid timestamp is available",
+      {.needs_restart = needs_restart::no,
+       .example = "3600",
+       .visibility = visibility::tunable},
+      std::nullopt)
   , id_allocator_log_capacity(
       *this,
       "id_allocator_log_capacity",
@@ -1388,6 +1405,15 @@ configuration::configuration()
        model::cloud_storage_backend::azure,
        model::cloud_storage_backend::minio,
        model::cloud_storage_backend::unknown})
+  , cloud_storage_credentials_host(
+      *this,
+      "cloud_storage_credentials_host",
+      "The hostname to connect to for retrieving role based credentials. "
+      "Derived from cloud_storage_credentials_source if not set. Only required "
+      "when using IAM role based access.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      std::nullopt,
+      &validate_non_empty_string_opt)
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",

@@ -10,10 +10,11 @@
 
 #pragma once
 
+#include "cloud_roles/logger.h"
 #include "cloud_roles/probe.h"
 #include "cloud_roles/signature.h"
+#include "config/configuration.h"
 #include "model/metadata.h"
-#include "seastarx.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/util/noncopyable_function.hh>
@@ -174,7 +175,23 @@ refresh_credentials make_refresh_credentials(
   aws_region_name region,
   std::optional<net::unresolved_address> endpoint = std::nullopt,
   retry_params retry_params = default_retry_params) {
-    auto host = endpoint ? endpoint->host() : CredentialsProvider::default_host;
+    ss::sstring host = {
+      CredentialsProvider::default_host.data(),
+      CredentialsProvider::default_host.size()};
+    if (endpoint) {
+        host = endpoint->host();
+    }
+    if (auto cfg_host
+        = config::shard_local_cfg().cloud_storage_credentials_host();
+        cfg_host.has_value()) {
+        vlog(
+          clrl_log.info,
+          "overriding default cloud roles credentials host {} with {} set "
+          "in configuration.",
+          host,
+          cfg_host.value());
+        host = cfg_host.value();
+    }
     auto port = endpoint ? endpoint->port() : CredentialsProvider::default_port;
     auto impl = std::make_unique<CredentialsProvider>(
       net::unresolved_address{{host.data(), host.size()}, port},
@@ -185,8 +202,8 @@ refresh_credentials make_refresh_credentials(
       std::move(impl), as, std::move(creds_update_cb), std::move(region)};
 }
 
-/// Builds a refresh_credentials object based on the credentials source set in
-/// configuration.
+/// Builds a refresh_credentials object based on the credentials source set
+/// in configuration.
 refresh_credentials make_refresh_credentials(
   model::cloud_credentials_source cloud_credentials_source,
   ss::abort_source& as,

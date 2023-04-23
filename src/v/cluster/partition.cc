@@ -13,6 +13,7 @@
 #include "archival/upload_housekeeping_service.h"
 #include "cloud_storage/remote_partition.h"
 #include "cluster/logger.h"
+#include "cluster/tm_stm_cache_manager.h"
 #include "config/configuration.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -30,7 +31,8 @@ static bool is_id_allocator_topic(model::ntp ntp) {
 }
 
 static bool is_tx_manager_topic(const model::ntp& ntp) {
-    return ntp == model::tx_manager_ntp;
+    return ntp.ns == model::kafka_internal_namespace
+           && ntp.tp.topic == model::tx_manager_topic;
 }
 
 partition::partition(
@@ -40,7 +42,7 @@ partition::partition(
   ss::sharded<cloud_storage::cache>& cloud_storage_cache,
   ss::lw_shared_ptr<const archival::configuration> archival_conf,
   ss::sharded<features::feature_table>& feature_table,
-  ss::sharded<cluster::tm_stm_cache>& tm_stm_cache,
+  ss::sharded<cluster::tm_stm_cache_manager>& tm_stm_cache_manager,
   ss::sharded<archival::upload_housekeeping_service>& upload_hks,
   config::binding<uint64_t> max_concurrent_producer_ids,
   std::optional<cloud_storage_clients::bucket_name> read_replica_bucket)
@@ -50,7 +52,7 @@ partition::partition(
   , _probe(std::make_unique<replicated_partition_probe>(*this))
   , _tx_gateway_frontend(tx_gateway_frontend)
   , _feature_table(feature_table)
-  , _tm_stm_cache(tm_stm_cache)
+  , _tm_stm_cache_manager(tm_stm_cache_manager)
   , _is_tx_enabled(config::shard_local_cfg().enable_transactions.value())
   , _is_idempotence_enabled(
       config::shard_local_cfg().enable_idempotence.value())
@@ -69,8 +71,10 @@ partition::partition(
         }
 
         if (_is_tx_enabled) {
+            auto tm_stm_cache = _tm_stm_cache_manager.local().get(
+              _raft->ntp().tp.partition);
             _tm_stm = ss::make_shared<cluster::tm_stm>(
-              clusterlog, _raft.get(), feature_table, _tm_stm_cache);
+              clusterlog, _raft.get(), feature_table, tm_stm_cache);
             stm_manager->add_stm(_tm_stm);
         }
     } else {
@@ -317,8 +321,9 @@ ss::future<result<kafka_result>> partition::replicate(
     if (!res) {
         co_return ret_t(res.error());
     }
-    co_return ret_t(kafka_result{
-      kafka::offset(_translator->from_log_offset(res.value().last_offset)())});
+    co_return ret_t(
+      kafka_result{kafka::offset(get_offset_translator_state()->from_log_offset(
+        res.value().last_offset)())});
 }
 
 ss::shared_ptr<cluster::rm_stm> partition::rm_stm() {
@@ -395,7 +400,7 @@ kafka_stages partition::replicate_in_stages(
           }
           auto old_offset = r.value().last_offset;
           auto new_offset = kafka::offset(
-            _translator->from_log_offset(old_offset)());
+            get_offset_translator_state()->from_log_offset(old_offset)());
           return ret_t(kafka_result{new_offset});
       });
     return kafka_stages(
@@ -407,8 +412,7 @@ ss::future<> partition::start() {
 
     _probe.setup_metrics(ntp);
 
-    auto f = _raft->start().then(
-      [this] { _translator = _raft->get_offset_translator_state(); });
+    auto f = _raft->start();
 
     if (is_id_allocator_topic(ntp)) {
         return f.then([this] { return _id_allocator_stm->start(); });
@@ -800,6 +804,45 @@ ss::future<> partition::remove_persistent_state() {
     }
 }
 
+/**
+ * Return the index of this node in the list of voters, or nullopt if it
+ * is not a voter.
+ */
+static std::optional<size_t>
+voter_position(raft::vnode self, const raft::group_configuration& raft_config) {
+    const auto& voters = raft_config.current_config().voters;
+    auto position = std::find(voters.begin(), voters.end(), self);
+    if (position == voters.end()) {
+        return std::nullopt;
+    } else {
+        return position - voters.begin();
+    }
+}
+
+// To reduce redundant re-uploads in the typical case of all replicas
+// being alive, have all non-0th replicas delay before attempting to
+// reconcile the manifest. This is just a best-effort thing, it is
+// still okay for them to step on each other: finalization is best
+// effort and the worst case outcome is to leave behind a few orphan
+// objects if writes were ongoing while deletion happened.
+static ss::future<bool> should_finalize(
+  ss::abort_source& as,
+  raft::vnode self,
+  const raft::group_configuration& raft_config) {
+    static constexpr ss::lowres_clock::duration erase_non_0th_delay = 200ms;
+
+    auto my_position = voter_position(self, raft_config);
+    if (my_position.has_value()) {
+        auto p = my_position.value();
+        if (p != 0) {
+            co_await ss::sleep_abortable(erase_non_0th_delay * p, as);
+        }
+        co_return true;
+    } else {
+        co_return false;
+    }
+}
+
 ss::future<> partition::remove_remote_persistent_state(ss::abort_source& as) {
     // Backward compatibility: even if remote.delete is true, only do
     // deletion if the partition is in full tiered storage mode (this
@@ -816,8 +859,18 @@ ss::future<> partition::remove_remote_persistent_state(ss::abort_source& as) {
           get_ntp_config(),
           get_ntp_config().is_archival_enabled(),
           get_ntp_config().is_read_replica_mode_enabled());
-        co_await _cloud_storage_partition->erase(
+
+        if (!group_configuration().is_voter(_raft->self())) {
+            // Learners are excluded from deletion, because they have a high
+            // risk of having some out of date state, and because there will
+            // always be some voter peers to do the work.
+            co_return;
+        }
+
+        const auto finalize = co_await should_finalize(
           as, _raft->self(), group_configuration());
+
+        co_await _cloud_storage_partition->erase(as, finalize);
     } else if (_cloud_storage_partition && tiered_storage) {
         // Tiered storage is enabled, but deletion is disabled: ensure the
         // remote metadata is up to date before we drop the local partition.
@@ -825,8 +878,11 @@ ss::future<> partition::remove_remote_persistent_state(ss::abort_source& as) {
           clusterlog.info,
           "Leaving tiered storage objects behind for partition {}",
           ntp());
-        co_await _cloud_storage_partition->finalize(
+        const auto finalize = co_await should_finalize(
           as, _raft->self(), group_configuration());
+        if (finalize) {
+            co_await _cloud_storage_partition->finalize(as);
+        }
     }
 }
 

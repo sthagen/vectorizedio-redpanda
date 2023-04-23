@@ -586,8 +586,18 @@ class Admin:
         """
         Get all transactions
         """
-        path = f"transactions"
-        return self._request('get', path, node=node).json()
+        cluster_config = self.get_cluster_config(include_defaults=True)
+        tm_partition_amount = cluster_config[
+            "transaction_coordinator_partitions"]
+        result = []
+        for partition in range(tm_partition_amount):
+            self.await_stable_leader(topic="tx",
+                                     namespace="kafka_internal",
+                                     partition=partition)
+            path = f"transactions?coordinator_partition_id={partition}"
+            partition_res = self._request('get', path, node=node).json()
+            result.extend(partition_res)
+        return result
 
     def mark_transaction_expired(self,
                                  topic,
@@ -654,7 +664,7 @@ class Admin:
         return self._request('post', path, node=node)
 
     def create_user(self, username, password, algorithm):
-        self.redpanda.logger.info(
+        self.redpanda.logger.debug(
             f"Creating user {username}:{password}:{algorithm}")
 
         path = f"security/users"
@@ -904,3 +914,7 @@ class Admin:
         """
         return self._request(
             "GET", f"cloud_storage/manifest/{topic}/{partition}").json()
+
+    def get_partition_state(self, namespace, topic, partition, node=None):
+        path = f"debug/partition/{namespace}/{topic}/{partition}"
+        return self._request("GET", path, node=node).json()

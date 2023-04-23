@@ -19,11 +19,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPrometheusURLFlagDeprecation(t *testing.T) {
-	cmd := newGrafanaDashboardCmd()
+	p := new(config.Params)
+	cmd := newGrafanaDashboardCmd(p)
 	cmd.SetArgs([]string{
 		"--prometheus-url", "localhost:8888/metrics",
 		"--datasource", "prometheus",
@@ -89,6 +91,10 @@ func Test_embeddedDecompressAndPrint(t *testing.T) {
 
 	var tests []tt
 	for k, v := range dashboardMap {
+		if k == "legacy" {
+			// Legacy dashboard is not embedded and is tested above.
+			continue
+		}
 		tests = append(tests, tt{
 			name:    fmt.Sprintf("parse %v correctly", k),
 			path:    filepath.Join("grafana-dashboards", v.Location+".gz"),

@@ -14,6 +14,7 @@
 #include "archival/types.h"
 #include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote.h"
+#include "cloud_storage/remote_segment_index.h"
 #include "cloud_storage/types.h"
 #include "cloud_storage_clients/client.h"
 #include "cluster/fwd.h"
@@ -147,20 +148,18 @@ public:
     ss::future<std::optional<cloud_storage::partition_manifest>>
     maybe_truncate_manifest();
 
-    using manifest_updated = ss::bool_class<struct manifest_updated_tag>;
-
     /// \brief Perform housekeeping operations.
     ss::future<> housekeeping();
 
     /// \brief Advance the start offest for the remote partition
     /// according to the retention policy specified by the partition
     /// configuration. This function does *not* delete any data.
-    ss::future<manifest_updated> apply_retention();
+    ss::future<> apply_retention();
 
     /// \brief Remove segments that are no longer queriable by:
     /// segments that are below the current start offset and segments
     /// that have been replaced with their compacted equivalent.
-    ss::future<manifest_updated> garbage_collect();
+    ss::future<> garbage_collect();
 
     virtual ~ntp_archiver() = default;
 
@@ -363,12 +362,24 @@ private:
     /// \param candidate is an upload candidate
     /// \param segment_read_locks protects the underlying segment(s) from being
     ///        deleted while the upload is in flight.
-    /// \param source_rtc is a retry_chain_node of the caller, if it's set
+    /// \param stream is a stream to the segment used for the initial upload. If
+    /// the upload is retried, the segment will be read again.
+    /// \param source_rtc
+    /// is a retry_chain_node of the caller, if it's set
     ///        to nullopt own retry chain of the ntp_archiver is used
     /// \return error code
     ss::future<cloud_storage::upload_result> upload_segment(
       upload_candidate candidate,
       std::vector<ss::rwlock::holder> segment_read_locks,
+      std::optional<std::reference_wrapper<retry_chain_node>> source_rtc
+      = std::nullopt);
+
+    /// Isolates segment upload and accepts a stream reference, so that if the
+    /// upload fails the exception can be handled in the caller and the stream
+    /// can be closed.
+    ss::future<cloud_storage::upload_result> do_upload_segment(
+      upload_candidate candidate,
+      ss::input_stream<char> stream,
       std::optional<std::reference_wrapper<retry_chain_node>> source_rtc
       = std::nullopt);
 
@@ -386,6 +397,20 @@ private:
       fragmented_vector<model::tx_range> tx,
       std::optional<std::reference_wrapper<retry_chain_node>> source_rtc
       = std::nullopt);
+
+    /// Builds a segment index from the supplied input stream.
+    ///
+    /// \param base_rp_offset The starting offset for the index to be created
+    /// \param ctxlog For logging
+    /// \param index_path The path to which the index will be uploaded, used
+    /// only for logging
+    /// \param stream The data stream from which the index is created
+    /// \return An index on success, nullopt on failure
+    ss::future<std::optional<cloud_storage::offset_index>> make_segment_index(
+      model::offset base_rp_offset,
+      retry_chain_logger& ctxlog,
+      std::string_view index_path,
+      ss::input_stream<char> stream);
 
     /// Upload manifest if it is dirty.  Proceed without raising on issues,
     /// in the expectation that we will be called again in the main upload loop.
@@ -527,6 +552,7 @@ private:
     const cloud_storage_clients::object_tag_formatter _segment_tags;
     const cloud_storage_clients::object_tag_formatter _manifest_tags;
     const cloud_storage_clients::object_tag_formatter _tx_tags;
+    const cloud_storage_clients::object_tag_formatter _segment_index_tags;
 
     // NTP level adjacent segment merging job
     std::unique_ptr<housekeeping_job> _local_segment_merger;

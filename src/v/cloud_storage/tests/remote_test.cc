@@ -66,19 +66,6 @@ static constexpr std::string_view manifest_payload = R"json({
     }
 })json";
 
-static constexpr std::string_view list_response = R"XML(
-<ListBucketResult>
-   <IsTruncated>false</IsTruncated>
-   <Contents>
-      <Key>a</Key>
-   </Contents>
-  <Contents>
-      <Key>b</Key>
-   </Contents>
-   <NextContinuationToken>n</NextContinuationToken>
-</ListBucketResult>
-)XML";
-
 static cloud_storage::lazy_abort_source always_continue{
   []() { return std::nullopt; }};
 
@@ -95,6 +82,14 @@ static partition_manifest load_manifest_from_str(std::string_view v) {
 }
 
 static remote::event_filter allow_all;
+
+static iobuf make_iobuf_from_string(std::string_view s) {
+    iobuf b;
+    b.append(s.data(), s.size());
+    return b;
+}
+
+static const cloud_storage_clients::object_tag_formatter upload_tags{{}};
 
 struct noop_mixin_t {};
 
@@ -483,61 +478,114 @@ FIXTURE_TEST(test_concat_segment_upload, remote_fixture) {
 }
 
 FIXTURE_TEST(test_list_bucket, remote_fixture) {
-    set_expectations_and_listen(
-      {{.url = "/?list-type=2",
-        .body = ss::sstring{list_response.data(), list_response.size()}}});
-
+    set_expectations_and_listen({});
     cloud_storage_clients::bucket_name bucket{"test"};
-    retry_chain_node fib(never_abort, 100ms, 20ms);
-    auto result = remote.local().list_objects(bucket, fib).get();
-    BOOST_REQUIRE(result.has_value());
+    retry_chain_node fib(never_abort, 10s, 20ms);
 
-    auto items = result.value();
-    BOOST_REQUIRE_EQUAL(items.contents.size(), 2);
+    int first = 2;
+    int second = 3;
+    int third = 4;
+    for (int i = 0; i < first; i++) {
+        for (int j = 0; j < second; j++) {
+            for (int k = 0; k < third; k++) {
+                cloud_storage_clients::object_key path{
+                  fmt::format("{}/{}/{}", i, j, k)};
+                auto result = remote.local()
+                                .upload_object(
+                                  bucket, path, iobuf{}, fib, upload_tags)
+                                .get();
+                BOOST_REQUIRE_EQUAL(
+                  cloud_storage::upload_result::success, result);
+            }
+        }
+    }
+    {
+        auto result = remote.local().list_objects(bucket, fib).get();
+        BOOST_REQUIRE(result.has_value());
+        BOOST_REQUIRE_EQUAL(
+          result.value().contents.size(), first * second * third);
+        BOOST_REQUIRE(result.value().common_prefixes.empty());
+    }
+    {
+        cloud_storage_clients::object_key prefix("/");
+        auto result
+          = remote.local().list_objects(bucket, fib, prefix, '/').get();
+        BOOST_REQUIRE(result.has_value());
+        BOOST_REQUIRE_EQUAL(
+          result.value().contents.size(), first * second * third);
+        BOOST_REQUIRE_EQUAL(result.value().common_prefixes.size(), first);
+    }
+    {
+        cloud_storage_clients::object_key prefix("/1/");
+        auto result = remote.local().list_objects(bucket, fib, prefix).get();
+        BOOST_REQUIRE(result.has_value());
+        BOOST_REQUIRE_EQUAL(result.value().contents.size(), second * third);
+        BOOST_REQUIRE(result.value().common_prefixes.empty());
+    }
+    {
+        cloud_storage_clients::object_key prefix("/1/");
+        auto result
+          = remote.local().list_objects(bucket, fib, prefix, '/').get();
+        BOOST_REQUIRE(result.has_value());
+        BOOST_REQUIRE_EQUAL(result.value().contents.size(), second * third);
+        BOOST_REQUIRE_EQUAL(result.value().common_prefixes.size(), second);
+    }
 }
 
 FIXTURE_TEST(test_list_bucket_with_prefix, remote_fixture) {
-    set_expectations_and_listen(
-      {{.url = "/?list-type=2&prefix=x",
-        .body = ss::sstring{list_response.data(), list_response.size()}}});
-
+    set_expectations_and_listen({});
     cloud_storage_clients::bucket_name bucket{"test"};
     retry_chain_node fib(never_abort, 100ms, 20ms);
+    for (const char first : {'x', 'y'}) {
+        for (const char second : {'a', 'b'}) {
+            cloud_storage_clients::object_key path{
+              fmt::format("{}/{}", first, second)};
+            auto result = remote.local()
+                            .upload_object(
+                              bucket, path, iobuf{}, fib, upload_tags)
+                            .get();
+            BOOST_REQUIRE_EQUAL(cloud_storage::upload_result::success, result);
+        }
+    }
+
     auto result = remote.local()
                     .list_objects(
-                      bucket, fib, cloud_storage_clients::object_key{"x"})
+                      bucket, fib, cloud_storage_clients::object_key{"/x/"})
                     .get();
     BOOST_REQUIRE(result.has_value());
     auto items = result.value().contents;
     BOOST_REQUIRE_EQUAL(items.size(), 2);
-    BOOST_REQUIRE_EQUAL(items[0].key, "a");
-    BOOST_REQUIRE_EQUAL(items[1].key, "b");
-    auto request = get_requests()[0];
+    BOOST_REQUIRE_EQUAL(items[0].key, "/x/a");
+    BOOST_REQUIRE_EQUAL(items[1].key, "/x/b");
+    auto request = get_requests().back();
     BOOST_REQUIRE_EQUAL(request.method, "GET");
     BOOST_REQUIRE_EQUAL(request.q_list_type, "2");
-    BOOST_REQUIRE_EQUAL(request.q_prefix, "x");
-    BOOST_REQUIRE_EQUAL(request.h_prefix, "x");
+    BOOST_REQUIRE_EQUAL(request.q_prefix, "/x/");
+    BOOST_REQUIRE_EQUAL(request.h_prefix, "/x/");
 }
 
 FIXTURE_TEST(test_list_bucket_with_filter, remote_fixture) {
-    set_expectations_and_listen(
-      {{.url = "/?list-type=2",
-        .body = ss::sstring{list_response.data(), list_response.size()}}});
-
-    cloud_storage_clients::bucket_name bucket{"test"};
+    set_expectations_and_listen({});
     retry_chain_node fib(never_abort, 100ms, 20ms);
+    cloud_storage_clients::bucket_name bucket{"test"};
+    cloud_storage_clients::object_key path{"b"};
+    auto upl_result = remote.local()
+                        .upload_object(bucket, path, iobuf{}, fib, upload_tags)
+                        .get();
+    BOOST_REQUIRE_EQUAL(cloud_storage::upload_result::success, upl_result);
+
     auto result = remote.local()
                     .list_objects(
                       bucket,
                       fib,
                       std::nullopt,
                       std::nullopt,
-                      [](const auto& item) { return item.key == "b"; })
+                      [](const auto& item) { return item.key == "/b"; })
                     .get();
     BOOST_REQUIRE(result.has_value());
     auto items = result.value().contents;
     BOOST_REQUIRE_EQUAL(items.size(), 1);
-    BOOST_REQUIRE_EQUAL(items[0].key, "b");
+    BOOST_REQUIRE_EQUAL(items[0].key, "/b");
 }
 
 FIXTURE_TEST(test_put_string, remote_fixture) {
@@ -548,7 +596,11 @@ FIXTURE_TEST(test_put_string, remote_fixture) {
     retry_chain_node fib(never_abort, 100ms, 20ms);
 
     cloud_storage_clients::object_key path{"p"};
-    auto result = remote.local().upload_object(bucket, path, "p", fib).get();
+    auto result
+      = remote.local()
+          .upload_object(
+            bucket, path, make_iobuf_from_string("p"), fib, upload_tags)
+          .get();
     BOOST_REQUIRE_EQUAL(cloud_storage::upload_result::success, result);
 
     auto request = get_requests()[0];
@@ -582,12 +634,22 @@ FIXTURE_TEST(test_delete_objects_on_unknown_backend, gcs_remote_fixture) {
     BOOST_REQUIRE_EQUAL(
       cloud_storage::upload_result::success,
       remote.local()
-        .upload_object(bucket, cloud_storage_clients::object_key{"p"}, "p", fib)
+        .upload_object(
+          bucket,
+          cloud_storage_clients::object_key{"p"},
+          make_iobuf_from_string("p"),
+          fib,
+          upload_tags)
         .get());
     BOOST_REQUIRE_EQUAL(
       cloud_storage::upload_result::success,
       remote.local()
-        .upload_object(bucket, cloud_storage_clients::object_key{"q"}, "q", fib)
+        .upload_object(
+          bucket,
+          cloud_storage_clients::object_key{"q"},
+          make_iobuf_from_string("q"),
+          fib,
+          upload_tags)
         .get());
 
     std::vector<cloud_storage_clients::object_key> to_delete{
@@ -619,7 +681,12 @@ FIXTURE_TEST(
     BOOST_REQUIRE_EQUAL(
       cloud_storage::upload_result::success,
       remote.local()
-        .upload_object(bucket, cloud_storage_clients::object_key{"p"}, "p", fib)
+        .upload_object(
+          bucket,
+          cloud_storage_clients::object_key{"p"},
+          make_iobuf_from_string("p"),
+          fib,
+          upload_tags)
         .get());
 
     std::vector<cloud_storage_clients::object_key> to_delete{

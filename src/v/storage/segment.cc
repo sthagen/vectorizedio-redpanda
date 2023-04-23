@@ -455,21 +455,31 @@ ss::future<> segment::do_compaction_index_batch(const model::record_batch& b) {
 }
 ss::future<> segment::compaction_index_batch(const model::record_batch& b) {
     if (!has_compaction_index()) {
-        return ss::now();
+        co_return;
     }
     // do not index not compactible batches
     if (!internal::is_compactible(b)) {
-        return ss::now();
+        co_return;
     }
 
     if (!b.compressed()) {
-        return do_compaction_index_batch(b);
+        co_return co_await do_compaction_index_batch(b);
     }
-    return internal::decompress_batch(b).then([this](model::record_batch&& b) {
-        return ss::do_with(std::move(b), [this](model::record_batch& b) {
-            return do_compaction_index_batch(b);
-        });
-    });
+
+    // Compressed batches have to be uncompressed before we can index them
+    // by key for compaction.  This is potentially _very_ expensive in memory:
+    // clients can simply send us 100MiB of zeros, which will compress small
+    // enough to pass batch size checks, but consume huge amounts of memory
+    // in this step.
+    //
+    // To mitigate this, we tightly limit how many of these we will do in
+    // parallel.  Users should consider _not_ using compression on their
+    // compacted topics, and/or avoiding huge batches on compacted topics.
+    auto units = co_await _resources.get_compaction_compression_units();
+
+    auto decompressed = co_await internal::decompress_batch(b);
+
+    co_return co_await do_compaction_index_batch(decompressed);
 }
 
 ss::future<append_result> segment::do_append(const model::record_batch& b) {
@@ -796,6 +806,16 @@ ss::future<ss::lw_shared_ptr<segment>> make_segment(
                   });
             });
       });
+}
+
+ss::future<model::timestamp> segment::get_file_timestamp() const {
+    auto file_path = path().string();
+
+    auto stat = co_await ss::file_stat(file_path);
+    co_return model::timestamp(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        stat.time_modified.time_since_epoch())
+        .count());
 }
 
 } // namespace storage

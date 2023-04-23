@@ -11,10 +11,11 @@ import json
 import pprint
 import struct
 from collections import defaultdict, namedtuple
-from typing import Sequence, Optional
+from typing import Sequence, Optional, NewType
+
 import xxhash
 
-from rptest.archival.s3_client import ObjectMetadata, S3Client
+from rptest.archival.s3_client import ObjectMetadata
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
 from rptest.services.redpanda import MetricsEndpoint, RESTART_LOG_ALLOW_LIST
@@ -210,8 +211,10 @@ def verify_file_layout(baseline_per_host,
             orig_ntp_size -= size_overrides[ntp]
         assert ntp in restored_ntps, f"NTP {ntp} is missing in the restored data"
         rest_ntp_size = restored_ntps[ntp]
-        assert rest_ntp_size <= orig_ntp_size, \
-            f"NTP {ntp} the restored partition is larger {rest_ntp_size} than the original one {orig_ntp_size}."
+        fraction = float(max(rest_ntp_size, orig_ntp_size)) / float(
+            min(rest_ntp_size, orig_ntp_size))
+        assert fraction < 1.1, \
+            f"NTP {ntp} the size of the restored partition is too different {rest_ntp_size} compared to the original one {orig_ntp_size}."
 
         delta = orig_ntp_size - rest_ntp_size
         assert delta <= BLOCK_SIZE, \
@@ -271,10 +274,11 @@ def get_on_disk_size_per_ntp(chk):
     return size_bytes_per_ntp
 
 
-def get_expected_ntp_restored_size(nodes_segments_report: dict[str,
-                                                               dict[str,
-                                                                    (str,
-                                                                     int)]],
+NodeReport = NewType('NodeReport', dict[str, (str, int)])
+NodeSegmentsReport = NewType('NodeSegmentsReport', dict[str, NodeReport])
+
+
+def get_expected_ntp_restored_size(nodes_segments_report: NodeSegmentsReport,
                                    retention_policy: int):
     """ Get expected retestored ntp disk size
     We expect that redpanda will restore max
@@ -485,11 +489,28 @@ class BucketView:
             return None
 
         start_model_offset = manifest['start_offset']
-        first_segment = min(manifest['segments'].values(),
-                            key=lambda seg: seg['base_offset'])
-        delta = first_segment['delta_offset']
+        for seg in manifest['segments'].values():
+            if seg['base_offset'] == start_model_offset:
+                # Usually, the manifest's 'start_offset' will match the 'base_offset'
+                # of a 'segment' as retention normally advances the start offset to
+                # another segment's base offset. This branch covers this case.
+                delta = seg['delta_offset']
+                return start_model_offset - delta
+            elif start_model_offset == seg['committed_offset'] + 1:
+                # When retention decides to remove all current segments from the cloud
+                # according to the retention policy, it advances the manifest's start
+                # offset to `committed_offset + 1` of the latest segment present at the time.
+                # Since, there's no guarantee that new segments haven't been added in the
+                # meantime, we look for a match in all segments.
+                delta = seg['delta_offset_end']
+                return start_model_offset - delta
 
-        return start_model_offset - delta
+        assert (
+            False,
+            "'start_offset' in manifest is inconsistent with contents of 'segments'."
+            "'start_offset' should match either the 'base_offset' or 'committed_offset + 1'"
+            f"of a segment in 'segments': start_offset={start_model_offset}, segments={manifest['segments']}"
+        )
 
     @staticmethod
     def kafka_last_offset(manifest) -> Optional[int]:

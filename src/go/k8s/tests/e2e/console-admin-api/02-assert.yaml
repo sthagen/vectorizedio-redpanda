@@ -12,7 +12,4 @@ collectors:
 - type: pod
   selector: app.kubernetes.io/name=redpanda-console
   tail: -1
-- type: pod
-  namespace: redpanda-system
-  selector: control-plane=controller-manager
-  tail: -1
+- command: ../../../hack/get-redpanda-info.sh console-admin-api
