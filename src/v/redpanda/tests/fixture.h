@@ -30,6 +30,7 @@
 #include "kafka/protocol/fetch.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
 #include "kafka/server/server.h"
+#include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "model/timeout_clock.h"
@@ -45,12 +46,15 @@
 #include "test_utils/fixture.h"
 #include "test_utils/logs.h"
 
+#include <seastar/core/sstring.hh>
 #include <seastar/util/log.hh>
 
 #include <fmt/format.h>
 
 #include <chrono>
 #include <filesystem>
+#include <unordered_set>
+#include <vector>
 
 // Whether or not the fixtures should be configured with a node ID.
 // NOTE: several fixtures may still require a node ID be supplied for the sake
@@ -115,6 +119,7 @@ public:
         proto = std::make_unique<kafka::server>(
           &configs,
           app.smp_service_groups.kafka_smp_sg(),
+          app.sched_groups.fetch_sg(),
           app.metadata_cache,
           app.controller->get_topics_frontend(),
           app.controller->get_config_frontend(),
@@ -433,6 +438,25 @@ public:
           });
     }
 
+    // Wait for the Raft leader of the given partition to become leader.
+    ss::future<> wait_for_leader(
+      model::ntp ntp, model::timeout_clock::duration timeout = 3s) {
+        return tests::cooperative_spin_wait_with_timeout(
+          timeout, [this, ntp = std::move(ntp)]() {
+              auto shard = app.shard_table.local().shard_for(ntp);
+              if (!shard) {
+                  return ss::make_ready_future<bool>(false);
+              }
+              return app.partition_manager.invoke_on(
+                *shard, [ntp](cluster::partition_manager& mgr) {
+                    auto partition = mgr.get(ntp);
+                    return partition
+                           && partition->raft()->term() != model::term_id{}
+                           && partition->raft()->is_leader();
+                });
+          });
+    }
+
     ss::future<kafka::client::transport>
     make_kafka_client(std::optional<ss::sstring> client_id = "test_client") {
         return ss::make_ready_future<kafka::client::transport>(
@@ -474,10 +498,15 @@ public:
           });
     }
 
-    ss::future<>
-    add_topic(model::topic_namespace_view tp_ns, int partitions = 1) {
-        std::vector<cluster::topic_configuration> cfgs{
-          cluster::topic_configuration(tp_ns.ns, tp_ns.tp, partitions, 1)};
+    ss::future<> add_topic(
+      model::topic_namespace_view tp_ns,
+      int partitions = 1,
+      std::optional<cluster::topic_properties> props = std::nullopt) {
+        std::vector<cluster::topic_configuration> cfgs = {
+          cluster::topic_configuration{tp_ns.ns, tp_ns.tp, partitions, 1}};
+        if (props.has_value()) {
+            cfgs[0].properties = std::move(props.value());
+        }
         return app.controller->get_topics_frontend()
           .local()
           .create_topics(
@@ -596,7 +625,10 @@ public:
           std::move(sasl),
           false,
           std::nullopt,
-          config::mock_property<uint32_t>(100_MiB).bind());
+          config::mock_property<uint32_t>(100_MiB).bind(),
+          config::mock_property<std::vector<ss::sstring>>({"produce", "fetch"})
+            .bind<std::vector<bool>>(
+              &kafka::server::convert_api_names_to_key_bitmap));
 
         kafka::request_header header;
         auto encoder_context = kafka::request_context(

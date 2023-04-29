@@ -41,7 +41,9 @@ from ducktape.errors import TimeoutError
 from ducktape.tests.test import TestContext
 
 from rptest.archival.abs_client import build_connection_string
+from rptest.clients.helm import HelmTool
 from rptest.clients.kafka_cat import KafkaCat
+from rptest.clients.kubectl import KubectlTool
 from rptest.clients.rpk import RpkTool
 from rptest.clients.rpk_remote import RpkRemoteTool
 from rptest.clients.python_librdkafka import PythonLibrdkafka
@@ -80,7 +82,14 @@ DEFAULT_LOG_ALLOW_LIST = [
     # This is expected when tests are intentionally run on low memory configurations
     re.compile(r"Memory: '\d+' below recommended"),
     # A client disconnecting is not bad behaviour on redpanda's part
-    re.compile(r"kafka rpc protocol.*(Connection reset by peer|Broken pipe)")
+    re.compile(r"kafka rpc protocol.*(Connection reset by peer|Broken pipe)"),
+
+    # ubsan supports supressions, but it appears to not support supressions for
+    # generic "undefined behavior", rather only specific ones like invalid
+    # value for type, overflow, alignment, etc...
+    re.compile(
+        r"SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior aead.c:(182|214)"
+    )
 ]
 
 # Log errors that are expected in tests that restart nodes mid-test
@@ -676,13 +685,83 @@ class SchemaRegistryConfig(TlsConfig):
 
 
 class RedpandaServiceBase(Service):
+    PERSISTENT_ROOT = "/var/lib/redpanda"
+    TRIM_LOGS_KEY = "trim_logs"
+    DATA_DIR = os.path.join(PERSISTENT_ROOT, "data")
+    NODE_CONFIG_FILE = "/etc/redpanda/redpanda.yaml"
+    CLUSTER_BOOTSTRAP_CONFIG_FILE = "/etc/redpanda/.bootstrap.yaml"
+    TLS_SERVER_KEY_FILE = "/etc/redpanda/server.key"
+    TLS_SERVER_CRT_FILE = "/etc/redpanda/server.crt"
+    TLS_CA_CRT_FILE = "/etc/redpanda/ca.crt"
+    STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda.log")
+    BACKTRACE_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda_backtrace.log")
+    COVERAGE_PROFRAW_CAPTURE = os.path.join(PERSISTENT_ROOT,
+                                            "redpanda.profraw")
+    DEFAULT_NODE_READY_TIMEOUT_SEC = 20
+    DEDICATED_NODE_KEY = "dedicated_nodes"
+    RAISE_ON_ERRORS_KEY = "raise_on_error"
+    LOG_LEVEL_KEY = "redpanda_log_level"
+    DEFAULT_LOG_LEVEL = "info"
+    SUPERUSER_CREDENTIALS: SaslCredentials = SaslCredentials(
+        "admin", "admin", "SCRAM-SHA-256")
+    COV_KEY = "enable_cov"
+    DEFAULT_COV_OPT = "OFF"
+
+    # Where we put a compressed binary if saving it after failure
+    EXECUTABLE_SAVE_PATH = "/tmp/redpanda.gz"
+
+    # When configuring multiple listeners for testing, a secondary port to use
+    # instead of the default.
+    KAFKA_ALTERNATE_PORT = 9093
+    KAFKA_KERBEROS_PORT = 9094
+    ADMIN_ALTERNATE_PORT = 9647
+
+    CLUSTER_CONFIG_DEFAULTS = {
+        'join_retry_timeout_ms': 200,
+        'default_topic_partitions': 4,
+        'enable_metrics_reporter': False,
+        'superusers': [SUPERUSER_CREDENTIALS[0]],
+        # Disable segment size jitter to make tests more deterministic if they rely on
+        # inspecting storage internals (e.g. number of segments after writing a certain
+        # amount of data).
+        'log_segment_size_jitter_percent': 0,
+
+        # This is high enough not to interfere with the logic in any tests, while also
+        # providing some background coverage of the connection limit code (i.e. that it
+        # doesn't crash, it doesn't limit when it shouldn't)
+        'kafka_connections_max': 2048,
+        'kafka_connections_max_per_ip': 1024,
+        'kafka_connections_max_overrides': ["1.2.3.4:5"],
+    }
+
+    logs = {
+        "redpanda_start_stdout_stderr": {
+            "path": STDOUT_STDERR_CAPTURE,
+            "collect_default": True
+        },
+        "code_coverage_profraw_file": {
+            "path": COVERAGE_PROFRAW_CAPTURE,
+            "collect_default": True
+        },
+        "executable": {
+            "path": EXECUTABLE_SAVE_PATH,
+            "collect_default": False
+        },
+        "backtraces": {
+            "path": BACKTRACE_CAPTURE,
+            "collect_default": True
+        }
+    }
+
     def __init__(
         self,
         context,
         num_brokers,
+        *,
         extra_rp_conf=None,
         resource_settings=None,
         si_settings=None,
+        superuser: Optional[SaslCredentials] = None,
     ):
         super(RedpandaServiceBase, self).__init__(context,
                                                   num_nodes=num_brokers)
@@ -694,9 +773,27 @@ class RedpandaServiceBase(Service):
         else:
             self._si_settings = None
 
+        if superuser is None:
+            superuser = self.SUPERUSER_CREDENTIALS
+            self._skip_create_superuser = False
+        else:
+            # When we are passed explicit superuser credentials, presume that the caller
+            # is taking care of user creation themselves (e.g. when testing credential bootstrap)
+            self._skip_create_superuser = True
+
+        self._superuser = superuser
+
+        self._admin = Admin(self,
+                            auth=(self._superuser.username,
+                                  self._superuser.password))
+
         if resource_settings is None:
             resource_settings = ResourceSettings()
         self._resource_settings = resource_settings
+
+        self._trim_logs = self._context.globals.get(self.TRIM_LOGS_KEY, True)
+
+        self._node_id_by_idx = {}
 
     def start_node(self, node, **kwargs):
         pass
@@ -868,83 +965,153 @@ class RedpandaServiceBase(Service):
     def set_resource_settings(self, rs):
         self._resource_settings = rs
 
+    @property
+    def si_settings(self):
+        return self._si_settings
+
+    def _for_nodes(self, nodes, cb: callable, *, parallel: bool) -> list:
+        if not parallel:
+            # Trivial case: just loop and call
+            for n in nodes:
+                cb(n)
+            return list(map(cb, nodes))
+
+        n_workers = len(nodes)
+        if n_workers > 0:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=n_workers) as executor:
+                # The list() wrapper is to cause futures to be evaluated here+now
+                # (including throwing any exceptions) and not just spawned in background.
+                return list(executor.map(cb, nodes))
+        else:
+            return []
+
+    def trim_logs(self):
+        if not self._trim_logs:
+            return
+
+        # Excessive logging may cause disks to fill up quickly.
+        # Call this method to removes TRACE and DEBUG log lines from redpanda logs
+        # Ensure this is only done on tests that have passed
+        def prune(node):
+            node.account.ssh(
+                f"sed -i -E -e '/TRACE|DEBUG/d' {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
+            )
+
+        self._for_nodes(self.nodes, prune, parallel=True)
+
+    def node_id(self, node, force_refresh=False, timeout_sec=30):
+        """
+        Returns the node ID of a given node. Uses a cached value unless
+        'force_refresh' is set to True.
+
+        NOTE: this is not thread-safe.
+        """
+        idx = self.idx(node)
+        if not force_refresh:
+            if idx in self._node_id_by_idx:
+                return self._node_id_by_idx[idx]
+
+        def _try_get_node_id():
+            try:
+                node_cfg = self._admin.get_node_config(node)
+            except:
+                return (False, -1)
+            return (True, node_cfg["node_id"])
+
+        node_id = wait_until_result(
+            _try_get_node_id,
+            timeout_sec=timeout_sec,
+            err_msg=f"couldn't reach admin endpoint for {node.account.hostname}"
+        )
+        self.logger.info(f"Got node ID for {node.account.hostname}: {node_id}")
+        self._node_id_by_idx[idx] = node_id
+        return node_id
+
+
+class RedpandaServiceK8s(RedpandaServiceBase):
+    def __init__(self, context, num_brokers):
+        super(RedpandaServiceK8s, self).__init__(context, num_brokers)
+        self._trim_logs = False
+        self._helm = HelmTool(self)
+        self._kubectl = KubectlTool(self)
+
+    def start_node(self, node, **kwargs):
+        """
+        Install the helm chart which will launch the entire cluster. If
+        the cluster is already running, then noop. This function will not
+        return until redpanda appears to have started successfully. If
+        redpanda does not start within a timeout period the service will
+        fail to start.
+        """
+        self._helm.install()
+
+    def stop_node(self, node, **kwargs):
+        """
+        Uninstall the helm chart which will tear down the entire cluster. If
+        the cluster is already uninstalled, then noop.
+        """
+        self._helm.uninstall()
+
+    def clean_node(self, node, **kwargs):
+        self._helm.uninstall()
+
+    def get_node_memory_mb(self):
+        line = self._kubectl.exec("cat /proc/meminfo | grep MemTotal")
+        memory_kb = int(line.strip().split()[1])
+        return memory_kb / 1024
+
+    def get_node_cpu_count(self):
+        core_count_str = self._kubectl.exec(
+            "cat /proc/cpuinfo | grep ^processor | wc -l")
+        return int(core_count_str.strip())
+
+    def get_node_disk_free(self):
+        if self._kubectl.exists(self.PERSISTENT_ROOT):
+            df_path = self.PERSISTENT_ROOT
+        else:
+            # If dir doesn't exist yet, use the parent.
+            df_path = os.path.dirname(self.PERSISTENT_ROOT)
+        df_out = self._kubectl.exec(f"df --output=avail {df_path}")
+        avail_kb = int(df_out.strip().split(b"\n")[1].strip())
+        return avail_kb * 1024
+
+    def lsof_node(self, node: ClusterNode, filter: Optional[str] = None):
+        """
+        Get the list of open files for a running node
+
+        :param filter: If given, this is a grep regex that will filter the files we list
+
+        :return: yields strings
+        """
+        first = True
+        cmd = f"ls -l /proc/$(ls -l /proc/*/exe | grep /opt/redpanda/libexec/redpanda | head -1 | cut -d' ' -f 9 | cut -d / -f 3)/fd"
+        if filter is not None:
+            cmd += f" | grep {filter}"
+        for line in self._kubectl.exec(cmd):
+            if first and not filter:
+                # First line is a header, skip it
+                first = False
+                continue
+            try:
+                filename = line.split()[-1]
+            except IndexError:
+                # Malformed line
+                pass
+            else:
+                yield filename
+
+    def node_id(self, node, force_refresh=False, timeout_sec=30):
+        pass
+
+    def set_cluster_config(self, values: dict, timeout: int = 300):
+        """
+        Updates the values of the helm release
+        """
+        self._helm.upgrade_config_cluster(values)
+
 
 class RedpandaService(RedpandaServiceBase):
-    PERSISTENT_ROOT = "/var/lib/redpanda"
-    DATA_DIR = os.path.join(PERSISTENT_ROOT, "data")
-    NODE_CONFIG_FILE = "/etc/redpanda/redpanda.yaml"
-    CLUSTER_BOOTSTRAP_CONFIG_FILE = "/etc/redpanda/.bootstrap.yaml"
-    TLS_SERVER_KEY_FILE = "/etc/redpanda/server.key"
-    TLS_SERVER_CRT_FILE = "/etc/redpanda/server.crt"
-    TLS_CA_CRT_FILE = "/etc/redpanda/ca.crt"
-    STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda.log")
-    BACKTRACE_CAPTURE = os.path.join(PERSISTENT_ROOT, "redpanda_backtrace.log")
-    COVERAGE_PROFRAW_CAPTURE = os.path.join(PERSISTENT_ROOT,
-                                            "redpanda.profraw")
-
-    DEFAULT_NODE_READY_TIMEOUT_SEC = 20
-
-    DEDICATED_NODE_KEY = "dedicated_nodes"
-
-    RAISE_ON_ERRORS_KEY = "raise_on_error"
-
-    TRIM_LOGS_KEY = "trim_logs"
-
-    LOG_LEVEL_KEY = "redpanda_log_level"
-    DEFAULT_LOG_LEVEL = "info"
-
-    SUPERUSER_CREDENTIALS: SaslCredentials = SaslCredentials(
-        "admin", "admin", "SCRAM-SHA-256")
-
-    COV_KEY = "enable_cov"
-    DEFAULT_COV_OPT = "OFF"
-
-    # Where we put a compressed binary if saving it after failure
-    EXECUTABLE_SAVE_PATH = "/tmp/redpanda.gz"
-
-    # When configuring multiple listeners for testing, a secondary port to use
-    # instead of the default.
-    KAFKA_ALTERNATE_PORT = 9093
-    KAFKA_KERBEROS_PORT = 9094
-    ADMIN_ALTERNATE_PORT = 9647
-
-    CLUSTER_CONFIG_DEFAULTS = {
-        'join_retry_timeout_ms': 200,
-        'default_topic_partitions': 4,
-        'enable_metrics_reporter': False,
-        'superusers': [SUPERUSER_CREDENTIALS[0]],
-        # Disable segment size jitter to make tests more deterministic if they rely on
-        # inspecting storage internals (e.g. number of segments after writing a certain
-        # amount of data).
-        'log_segment_size_jitter_percent': 0,
-
-        # This is high enough not to interfere with the logic in any tests, while also
-        # providing some background coverage of the connection limit code (i.e. that it
-        # doesn't crash, it doesn't limit when it shouldn't)
-        'kafka_connections_max': 2048,
-        'kafka_connections_max_per_ip': 1024,
-        'kafka_connections_max_overrides': ["1.2.3.4:5"],
-    }
-
-    logs = {
-        "redpanda_start_stdout_stderr": {
-            "path": STDOUT_STDERR_CAPTURE,
-            "collect_default": True
-        },
-        "code_coverage_profraw_file": {
-            "path": COVERAGE_PROFRAW_CAPTURE,
-            "collect_default": True
-        },
-        "executable": {
-            "path": EXECUTABLE_SAVE_PATH,
-            "collect_default": False
-        },
-        "backtraces": {
-            "path": BACKTRACE_CAPTURE,
-            "collect_default": True
-        }
-    }
-
     def __init__(self,
                  context,
                  num_brokers,
@@ -963,23 +1130,18 @@ class RedpandaService(RedpandaServiceBase):
                  pandaproxy_config: Optional[PandaproxyConfig] = None,
                  schema_registry_config: Optional[SchemaRegistryConfig] = None,
                  disable_cloud_storage_diagnostics=False):
-        super(RedpandaService,
-              self).__init__(context, num_brokers, extra_rp_conf,
-                             resource_settings, si_settings)
+        super(RedpandaService, self).__init__(
+            context,
+            num_brokers,
+            extra_rp_conf=extra_rp_conf,
+            resource_settings=resource_settings,
+            si_settings=si_settings,
+            superuser=superuser,
+        )
         self._security = security
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
         self._pandaproxy_config = pandaproxy_config
         self._schema_registry_config = schema_registry_config
-
-        if superuser is None:
-            superuser = self.SUPERUSER_CREDENTIALS
-            self._skip_create_superuser = False
-        else:
-            # When we are passed explicit superuser credentials, presume that the caller
-            # is taking care of user creation themselves (e.g. when testing credential bootstrap)
-            self._skip_create_superuser = True
-
-        self._superuser = superuser
 
         if node_ready_timeout_s is None:
             node_ready_timeout_s = RedpandaService.DEFAULT_NODE_READY_TIMEOUT_SEC
@@ -1003,9 +1165,6 @@ class RedpandaService(RedpandaServiceBase):
                 'seastar_memory': 'debug'
             })
 
-        self._admin = Admin(self,
-                            auth=(self._superuser.username,
-                                  self._superuser.password))
         self._started = []
         self._security_config = dict()
 
@@ -1014,8 +1173,6 @@ class RedpandaService(RedpandaServiceBase):
 
         self._dedicated_nodes = self._context.globals.get(
             self.DEDICATED_NODE_KEY, False)
-
-        self._trim_logs = self._context.globals.get(self.TRIM_LOGS_KEY, True)
 
         self.logger.info(
             f"ResourceSettings: dedicated_nodes={self._dedicated_nodes}")
@@ -1047,8 +1204,6 @@ class RedpandaService(RedpandaServiceBase):
         # stash a copy here so that we can quickly look up e.g. addresses later.
         self._node_configs = {}
 
-        self._node_id_by_idx = {}
-
         self._seed_servers = [self.nodes[0]] if len(self.nodes) > 0 else []
 
     def set_seed_servers(self, node_list):
@@ -1060,10 +1215,6 @@ class RedpandaService(RedpandaServiceBase):
 
     def set_environment(self, environment: dict[str, str]):
         self._environment.update(environment)
-
-    @property
-    def si_settings(self):
-        return self._si_settings
 
     def set_extra_node_conf(self, node, conf):
         assert node in self.nodes, f"where node is {node.name}"
@@ -1180,23 +1331,6 @@ class RedpandaService(RedpandaServiceBase):
             if self.PERSISTENT_ROOT in line:
                 return int(line.split()[2])
         assert False, "couldn't parse df output"
-
-    def _for_nodes(self, nodes, cb: callable, *, parallel: bool) -> list:
-        if not parallel:
-            # Trivial case: just loop and call
-            for n in nodes:
-                cb(n)
-            return list(map(cb, nodes))
-
-        n_workers = len(nodes)
-        if n_workers > 0:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=n_workers) as executor:
-                # The list() wrapper is to cause futures to be evaluated here+now
-                # (including throwing any exceptions) and not just spawned in background.
-                return list(executor.map(cb, nodes))
-        else:
-            return []
 
     def _startup_poll_interval(self, first_start):
         """
@@ -1999,7 +2133,8 @@ class RedpandaService(RedpandaServiceBase):
 
             # List of regexes that will fail the test on if they appear in the log
             match_terms = [
-                "Segmentation fault", "[Aa]ssert", "Exceptional future ignored"
+                "Segmentation fault", "[Aa]ssert",
+                "Exceptional future ignored", "UndefinedBehaviorSanitizer"
             ]
             if self._raise_on_errors:
                 match_terms.append("^ERROR")
@@ -2234,20 +2369,6 @@ class RedpandaService(RedpandaServiceBase):
             # NOTE: if the installer hasn't been started, there is no
             # installation to preserve!
             self._installer.reset_current_install([node])
-
-    def trim_logs(self):
-        if not self._trim_logs:
-            return
-
-        # Excessive logging may cause disks to fill up quickly.
-        # Call this method to removes TRACE and DEBUG log lines from redpanda logs
-        # Ensure this is only done on tests that have passed
-        def prune(node):
-            node.account.ssh(
-                f"sed -i -E -e '/TRACE|DEBUG/d' {RedpandaService.STDOUT_STDERR_CAPTURE} || true"
-            )
-
-        self._for_nodes(self.nodes, prune, parallel=True)
 
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
@@ -2789,34 +2910,6 @@ class RedpandaService(RedpandaServiceBase):
             shards_per_node[self.idx(node)] = num_shards
         return shards_per_node
 
-    def node_id(self, node, force_refresh=False, timeout_sec=30):
-        """
-        Returns the node ID of a given node. Uses a cached value unless
-        'force_refresh' is set to True.
-
-        NOTE: this is not thread-safe.
-        """
-        idx = self.idx(node)
-        if not force_refresh:
-            if idx in self._node_id_by_idx:
-                return self._node_id_by_idx[idx]
-
-        def _try_get_node_id():
-            try:
-                node_cfg = self._admin.get_node_config(node)
-            except:
-                return (False, -1)
-            return (True, node_cfg["node_id"])
-
-        node_id = wait_until_result(
-            _try_get_node_id,
-            timeout_sec=timeout_sec,
-            err_msg=f"couldn't reach admin endpoint for {node.account.hostname}"
-        )
-        self.logger.info(f"Got node ID for {node.account.hostname}: {node_id}")
-        self._node_id_by_idx[idx] = node_id
-        return node_id
-
     def cov_enabled(self):
         cov_option = self._context.globals.get(self.COV_KEY,
                                                self.DEFAULT_COV_OPT)
@@ -3054,3 +3147,8 @@ class RedpandaService(RedpandaServiceBase):
                 raise RuntimeError(
                     f"Object storage scrub detected fatal anomalies of type {fatal_anomalies}"
                 )
+
+
+def make_redpanda_service(environment):
+    """Factory function for instatiating the appropriate RedpandaServiceBase subclass."""
+    pass

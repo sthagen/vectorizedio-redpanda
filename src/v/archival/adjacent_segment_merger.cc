@@ -85,13 +85,12 @@ std::optional<adjacent_segment_run> adjacent_segment_merger::scan_manifest(
 
     adjacent_segment_run run(_archiver.get_ntp());
     for (auto it = manifest.segment_containing(so); it != manifest.end();
-         it++) {
-        if (!_is_local && it->second.committed_offset >= local_start_offset) {
+         ++it) {
+        if (!_is_local && it->committed_offset >= local_start_offset) {
             // We're looking for the remote segment
             break;
         }
-        auto [key, meta] = *it;
-        if (run.maybe_add_segment(meta, max_segment_size)) {
+        if (run.maybe_add_segment(*it, max_segment_size)) {
             // We have found a run whith the size close to max_segment_size
             // and can proceed early.
             break;
@@ -160,11 +159,13 @@ adjacent_segment_merger::run(retry_chain_node& rtc, run_quota_t quota) {
                          const cloud_storage::partition_manifest& manifest) {
             return scan_manifest(local_start_offset, manifest);
         };
-        auto upl = co_await _archiver.find_reupload_candidate(scanner);
+        auto [archiver_units, upl] = co_await _archiver.find_reupload_candidate(
+          scanner);
         if (!upl.has_value()) {
             vlog(_ctxlog.debug, "No more upload candidates");
             co_return result;
         }
+        vassert(archiver_units.has_value(), "Must take archiver units");
         auto next = model::next_offset(upl->candidate.final_offset);
         vlog(
           _ctxlog.debug,
@@ -180,7 +181,7 @@ adjacent_segment_merger::run(retry_chain_node& rtc, run_quota_t quota) {
               src->size_bytes());
         }
         auto uploaded = co_await _archiver.upload(
-          std::move(*upl), std::ref(rtc));
+          std::move(*archiver_units), std::move(*upl), std::ref(rtc));
         if (uploaded) {
             _last = next;
             result.status = run_status::ok;

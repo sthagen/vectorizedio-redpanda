@@ -168,7 +168,7 @@ segment_from_meta(const cloud_storage::segment_meta& meta) {
 command_batch_builder::command_batch_builder(
   archival_metadata_stm& stm,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as)
+  ss::abort_source& as)
   : _stm(stm)
   , _builder(model::record_batch_type::archival_metadata, model::offset(0))
   , _deadline(deadline)
@@ -266,9 +266,7 @@ command_batch_builder::cleanup_archive(model::offset start_rp_offset) {
 }
 
 ss::future<std::error_code> command_batch_builder::replicate() {
-    if (_as) {
-        _as->get().check();
-    }
+    _as.check();
     return _stm.get()._lock.with([this]() {
         vlog(
           _stm.get()._logger.debug, "command_batch_builder::replicate called");
@@ -285,8 +283,7 @@ ss::future<std::error_code> command_batch_builder::replicate() {
 }
 
 command_batch_builder archival_metadata_stm::batch_start(
-  ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::lowres_clock::time_point deadline, ss::abort_source& as) {
     return {*this, deadline, as};
 }
 
@@ -294,7 +291,7 @@ fragmented_vector<archival_metadata_stm::segment>
 archival_metadata_stm::segments_from_manifest(
   const cloud_storage::partition_manifest& manifest) {
     fragmented_vector<segment> segments;
-    for (auto [key, meta] : manifest) {
+    for (auto meta : manifest) {
         if (meta.ntp_revision == model::initial_revision_id{}) {
             meta.ntp_revision = manifest.get_revision_id();
         }
@@ -338,8 +335,7 @@ archival_metadata_stm::serialize_manifest_as_batches(
     bb.emplace(model::record_batch_type::archival_metadata, base_offset);
     ss::circular_buffer<model::record_batch> result;
     int batch_size = 0;
-    for (auto kv : m) {
-        auto meta = kv.second;
+    for (auto meta : m) {
         iobuf key_buf = serde::to_iobuf(add_segment_cmd::key);
         if (meta.ntp_revision == model::initial_revision_id{}) {
             meta.ntp_revision = m.get_revision_id();
@@ -454,7 +450,7 @@ archival_metadata_stm::archival_metadata_stm(
 ss::future<std::error_code> archival_metadata_stm::truncate(
   model::offset start_rp_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     if (start_rp_offset < get_start_offset()) {
         co_return errc::success;
     }
@@ -467,7 +463,7 @@ ss::future<std::error_code> archival_metadata_stm::truncate(
 ss::future<std::error_code> archival_metadata_stm::truncate(
   kafka::offset start_kafka_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     auto builder = batch_start(deadline, as);
     builder.truncate(start_kafka_offset);
     co_return co_await builder.replicate();
@@ -476,7 +472,7 @@ ss::future<std::error_code> archival_metadata_stm::truncate(
 ss::future<std::error_code> archival_metadata_stm::spillover(
   model::offset start_rp_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     if (start_rp_offset < get_start_offset()) {
         co_return errc::success;
     }
@@ -489,7 +485,7 @@ ss::future<std::error_code> archival_metadata_stm::truncate_archive_init(
   model::offset start_rp_offset,
   model::offset_delta delta,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     if (start_rp_offset < get_archive_start_offset()) {
         co_return errc::success;
     }
@@ -501,7 +497,7 @@ ss::future<std::error_code> archival_metadata_stm::truncate_archive_init(
 ss::future<std::error_code> archival_metadata_stm::cleanup_archive(
   model::offset start_rp_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     if (start_rp_offset < get_archive_clean_offset()) {
         co_return errc::success;
     }
@@ -511,28 +507,24 @@ ss::future<std::error_code> archival_metadata_stm::cleanup_archive(
 }
 
 ss::future<std::error_code> archival_metadata_stm::cleanup_metadata(
-  ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::lowres_clock::time_point deadline, ss::abort_source& as) {
     auto builder = batch_start(deadline, as);
     builder.cleanup_metadata();
     co_return co_await builder.replicate();
 }
 
 ss::future<std::error_code> archival_metadata_stm::do_replicate_commands(
-  model::record_batch batch,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  model::record_batch batch, ss::abort_source& as) {
     auto current_term = _insync_term;
     auto fut = _raft->replicate(
       current_term,
       model::make_memory_record_batch_reader(std::move(batch)),
       raft::replicate_options{raft::consistency_level::quorum_ack});
 
-    // Run with an abort source so shutdown doesn't have to wait a full
-    // replication timeout to proceed.
-    if (as) {
-        fut = ssx::with_timeout_abortable(
-          std::move(fut), model::no_timeout, *as);
-    }
+    // Raft's replicate() doesn't take an external abort source, and
+    // archiver is shut down before consensus, so we must wrap this
+    // with our abort source
+    fut = ssx::with_timeout_abortable(std::move(fut), model::no_timeout, as);
 
     auto result = co_await std::move(fut);
     if (!result) {
@@ -554,9 +546,11 @@ ss::future<std::error_code> archival_metadata_stm::do_replicate_commands(
     auto applied = co_await wait_no_throw(
       result.value().last_offset, model::no_timeout, as);
     if (!applied) {
-        if (
-          as.has_value() && !as.value().get().abort_requested()
-          && _c->is_leader() && _c->term() == current_term) {
+        if (as.abort_requested()) {
+            co_return errc::shutting_down;
+        }
+
+        if (_c->is_leader() && _c->term() == current_term) {
             co_await _c->step_down(ssx::sformat(
               "failed to replicate archival batch in term {}", current_term));
         }
@@ -579,12 +573,12 @@ ss::future<std::error_code> archival_metadata_stm::add_segments(
   std::vector<cloud_storage::segment_meta> segments,
   std::optional<model::offset> clean_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     auto now = ss::lowres_clock::now();
     auto timeout = now < deadline ? deadline - now : 0ms;
     return _lock.with(
       timeout,
-      [this, s = std::move(segments), clean_offset, deadline, as]() mutable {
+      [this, s = std::move(segments), clean_offset, deadline, &as]() mutable {
           return do_add_segments(std::move(s), clean_offset, deadline, as);
       });
 }
@@ -593,7 +587,7 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
   std::vector<cloud_storage::segment_meta> add_segments,
   std::optional<model::offset> clean_offset,
   ss::lowres_clock::time_point deadline,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+  ss::abort_source& as) {
     {
         auto now = ss::lowres_clock::now();
         auto timeout = now < deadline ? deadline - now : 0ms;
@@ -602,9 +596,7 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
         }
     }
 
-    if (as) {
-        as->get().check();
-    }
+    as.check();
 
     if (add_segments.empty()) {
         co_return errc::success;
@@ -1039,10 +1031,9 @@ archival_metadata_stm::get_segments_to_cleanup() const {
             if (it == _manifest->end()) {
                 return false;
             }
-            const auto& s = it->second;
             auto m_name = _manifest->generate_remote_segment_name(
               cloud_storage::partition_manifest::lw_segment_meta::convert(m));
-            auto s_name = _manifest->generate_remote_segment_name(s);
+            auto s_name = _manifest->generate_remote_segment_name(*it);
             // The segment will have the same path as the one we have in
             // manifest in S3 so if we will delete it the data will be lost.
             if (m_name == s_name) {
@@ -1069,8 +1060,8 @@ archival_metadata_stm::get_segments_to_cleanup() const {
 
     auto so = _manifest->get_start_offset().value_or(model::offset(0));
     for (const auto& m : *_manifest) {
-        if (m.second.committed_offset < so) {
-            backlog.push_back(lw_segment_meta::convert(m.second));
+        if (m.committed_offset < so) {
+            backlog.push_back(lw_segment_meta::convert(m));
         } else {
             break;
         }

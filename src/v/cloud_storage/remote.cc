@@ -209,29 +209,33 @@ ss::future<download_result> remote::do_download_manifest(
 
         if (resp) {
             vlog(ctxlog.debug, "Receive OK response from {}", path);
-            co_await manifest.update(resp.value()->as_input_stream());
-            switch (manifest.get_manifest_type()) {
-            case manifest_type::partition:
-                _probe.partition_manifest_download();
-                break;
-            case manifest_type::topic:
-                _probe.topic_manifest_download();
-                break;
-            case manifest_type::tx_range:
-                _probe.txrange_manifest_download();
-                break;
+            try {
+                co_await manifest.update(resp.value()->as_input_stream());
+
+                switch (manifest.get_manifest_type()) {
+                case manifest_type::partition:
+                    _probe.partition_manifest_download();
+                    break;
+                case manifest_type::topic:
+                    _probe.topic_manifest_download();
+                    break;
+                case manifest_type::tx_range:
+                    _probe.txrange_manifest_download();
+                    break;
+                }
+                co_return download_result::success;
+            } catch (...) {
+                // Draining the response stream may throw I/O errors: convert
+                // those into an error outcome.
+                resp
+                  = cloud_storage_clients::util::handle_client_transport_error(
+                    std::current_exception(), cst_log);
             }
-            co_return download_result::success;
         }
 
         lease.client->shutdown();
 
         switch (resp.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -244,8 +248,6 @@ ss::future<download_result> remote::do_download_manifest(
               retry_permit.delay, fib.root_abort_source());
             retry_permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = download_result::failed;
             vlog(
@@ -320,11 +322,6 @@ ss::future<upload_result> remote::upload_manifest(
         lease.client->shutdown();
 
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -339,8 +336,6 @@ ss::future<upload_result> remote::upload_manifest(
             break;
         case cloud_storage_clients::error_outcome::key_not_found:
             // not expected during upload
-            [[fallthrough]];
-        case cloud_storage_clients::error_outcome::bucket_not_found:
             [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = upload_result::failed;
@@ -451,11 +446,6 @@ ss::future<upload_result> remote::upload_segment(
 
         lease.client->shutdown();
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -473,8 +463,6 @@ ss::future<upload_result> remote::upload_segment(
             break;
         case cloud_storage_clients::error_outcome::key_not_found:
             // not expected during upload
-            [[fallthrough]];
-        case cloud_storage_clients::error_outcome::bucket_not_found:
             [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = upload_result::failed;
@@ -506,7 +494,8 @@ ss::future<download_result> remote::download_segment(
   const cloud_storage_clients::bucket_name& bucket,
   const remote_segment_path& segment_path,
   const try_consume_stream& cons_str,
-  retry_chain_node& parent) {
+  retry_chain_node& parent,
+  std::optional<cloud_storage_clients::http_byte_range> byte_range) {
     gate_guard guard{_gate};
     retry_chain_node fib(&parent);
     retry_chain_logger ctxlog(cst_log, fib);
@@ -520,7 +509,7 @@ ss::future<download_result> remote::download_segment(
         notify_external_subscribers(
           api_activity_notification::segment_download, parent);
         auto resp = co_await lease.client->get_object(
-          bucket, path, fib.get_timeout());
+          bucket, path, fib.get_timeout(), false, byte_range);
 
         if (resp) {
             vlog(ctxlog.debug, "Receive OK response from {}", path);
@@ -537,11 +526,6 @@ ss::future<download_result> remote::download_segment(
         lease.client->shutdown();
 
         switch (resp.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -553,8 +537,6 @@ ss::future<download_result> remote::download_segment(
             co_await ss::sleep_abortable(permit.delay, fib.root_abort_source());
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = download_result::failed;
             break;
@@ -617,11 +599,6 @@ ss::future<download_result> remote::download_index(
         lease.client->shutdown();
 
         switch (resp.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -633,8 +610,6 @@ ss::future<download_result> remote::download_index(
             co_await ss::sleep_abortable(permit.delay, fib.root_abort_source());
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = download_result::failed;
             break;
@@ -692,11 +667,6 @@ ss::future<download_result> remote::segment_exists(
         // Error path
         lease.client->shutdown();
         switch (resp.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -707,8 +677,6 @@ ss::future<download_result> remote::segment_exists(
             co_await ss::sleep_abortable(permit.delay, fib.root_abort_source());
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = download_result::failed;
             break;
@@ -765,11 +733,6 @@ ss::future<upload_result> remote::delete_object(
         lease.client->shutdown();
 
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -780,8 +743,6 @@ ss::future<upload_result> remote::delete_object(
             co_await ss::sleep_abortable(permit.delay, fib.root_abort_source());
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = upload_result::failed;
             break;
@@ -848,11 +809,6 @@ ss::future<upload_result> remote::delete_objects(
         lease.client->shutdown();
 
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -863,8 +819,6 @@ ss::future<upload_result> remote::delete_objects(
             co_await ss::sleep_abortable(permit.delay, _as);
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = upload_result::failed;
             break;
@@ -1031,11 +985,6 @@ ss::future<remote::list_result> remote::list_objects(
         lease.client->shutdown();
 
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -1046,8 +995,6 @@ ss::future<remote::list_result> remote::list_objects(
             co_await ss::sleep_abortable(permit.delay, _as);
             permit = fib.retry();
             break;
-        case cloud_storage_clients::error_outcome::bucket_not_found:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = cloud_storage_clients::error_outcome::fail;
             break;
@@ -1115,11 +1062,6 @@ ss::future<upload_result> remote::upload_object(
 
         lease.client->shutdown();
         switch (res.error()) {
-        case cloud_storage_clients::error_outcome::none:
-            vassert(
-              false, "s3:error_outcome::none not expected on failure path");
-        case cloud_storage_clients::error_outcome::retry_slowdown:
-            [[fallthrough]];
         case cloud_storage_clients::error_outcome::retry:
             vlog(
               ctxlog.debug,
@@ -1133,8 +1075,6 @@ ss::future<upload_result> remote::upload_object(
             permit = fib.retry();
             break;
         case cloud_storage_clients::error_outcome::key_not_found:
-            [[fallthrough]];
-        case cloud_storage_clients::error_outcome::bucket_not_found:
             [[fallthrough]];
         case cloud_storage_clients::error_outcome::fail:
             result = upload_result::failed;

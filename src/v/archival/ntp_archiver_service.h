@@ -210,16 +210,20 @@ public:
     /// candidate.remote_segments).
     ///
     /// \param scanner is a user provided function used to find upload candidate
-    /// \return nullopt or the upload candidate
-    ss::future<std::optional<upload_candidate_with_locks>>
+    /// \return {nullopt, nullopt} or the archiver lock and upload candidate
+    ss::future<std::pair<
+      std::optional<ssx::semaphore_units>,
+      std::optional<upload_candidate_with_locks>>>
     find_reupload_candidate(manifest_scanner_t scanner);
 
     /**
-     * Upload segment provided from the outside of the ntp_archiver
+     * Upload segment provided from the outside of the ntp_archiver.
      *
      * The method can be used to upload segments stored locally in the
      * redpanda data directory or remotely in cloud storage.
      *
+     * \param archiver_units are the units for the archiver that must have
+     *        already been taken
      * \param candidate is an upload candidate
      * \param source_rtc is used to pass retry_chain_node that belongs
      *        to the caller. This way the caller can use its own abort_source
@@ -228,6 +232,7 @@ public:
      * \return true on success and false otherwise
      */
     ss::future<bool> upload(
+      ssx::semaphore_units archiver_units,
       upload_candidate_with_locks candidate,
       std::optional<std::reference_wrapper<retry_chain_node>> source_rtc);
 
@@ -254,6 +259,16 @@ public:
     const storage::ntp_config& ntp_config() const {
         return _parent.log().config();
     }
+
+    /// If we have a projected manifest clean offset, then flush it to
+    /// the persistent stm clean offset.
+    ss::future<> flush_manifest_clean_offset();
+
+    /// Upload manifest to the pre-defined S3 location
+    ss::future<cloud_storage::upload_result> upload_manifest(
+      const char* upload_ctx,
+      std::optional<std::reference_wrapper<retry_chain_node>> source_rtc
+      = std::nullopt);
 
 private:
     // Labels for contexts in which manifest uploads occur. Used for logging.
@@ -304,8 +319,7 @@ private:
     /// An upload context represents a range of offsets to be uploaded. It
     /// will search for segments within this range and upload them, it also
     /// carries some context information like whether re-uploads are
-    /// allowed, what is the maximum number of in-flight uploads that can be
-    /// processed etc.
+    /// allowed.
     struct upload_context {
         /// The kind of segment being uploaded
         segment_upload_kind upload_kind;
@@ -316,19 +330,6 @@ private:
         /// Controls checks for reuploads, compacted segments have this
         /// check disabled
         allow_reuploads_t allow_reuploads;
-        /// Collection of uploads scheduled so far
-        std::vector<scheduled_upload> uploads{};
-
-        /// Schedules a single upload, adds it to upload collection and
-        /// progresses the start offset
-        ss::future<ss::stop_iteration>
-        schedule_single_upload(ntp_archiver& archiver);
-
-        upload_context(
-          segment_upload_kind upload_kind,
-          model::offset start_offset,
-          model::offset last_offset,
-          allow_reuploads_t allow_reuploads);
     };
 
     /// Start upload without waiting for it to complete
@@ -418,21 +419,11 @@ private:
     /// will have been updated if so)
     ss::future<bool> maybe_upload_manifest(const char* upload_ctx);
 
-    /// If we have a projected manifest clean offset, then flush it to
-    /// the persistent stm clean offset.
-    ss::future<> flush_manifest_clean_offset();
-
     /// Lazy variant of flush_manifest_clean_offset, for use in situations
     /// where we didn't just upload the manifest, but want to make sure we
     /// will eventually flush projected_manifest_clean_at in case it was
     /// set by some background operation.
     ss::future<> maybe_flush_manifest_clean_offset();
-
-    /// Upload manifest to the pre-defined S3 location
-    ss::future<cloud_storage::upload_result> upload_manifest(
-      const char* upload_ctx,
-      std::optional<std::reference_wrapper<retry_chain_node>> source_rtc
-      = std::nullopt);
 
     /// While leader, within a particular term, keep trying to upload data
     /// from local storage to remote storage until our term changes or
@@ -502,7 +493,15 @@ private:
     ss::abort_source _as;
     retry_chain_node _rtcnode;
     retry_chain_logger _rtclog;
+
+    // Ensures that operations on the archival state are only performed by a
+    // single driving fiber (archiver loop, housekeeping job, etc) at a time.
+    //
+    // NOTE: must be taken before doing anything that acquires segment read
+    // locks (e.g. selecting segments for upload, replicating and waiting on
+    // the underlying Raft STM).
     ssx::semaphore _mutex{1, "archive/ntp"};
+
     ss::lw_shared_ptr<const configuration> _conf;
     config::binding<std::chrono::milliseconds> _sync_manifest_timeout;
     config::binding<size_t> _max_segments_pending_deletion;

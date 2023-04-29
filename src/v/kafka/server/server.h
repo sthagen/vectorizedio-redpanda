@@ -28,6 +28,7 @@
 #include "utils/ema.h"
 
 #include <seastar/core/future.hh>
+#include <seastar/core/scheduling.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/smp.hh>
 
@@ -38,6 +39,7 @@ public:
     server(
       ss::sharded<net::server_configuration>*,
       ss::smp_service_group,
+      ss::scheduling_group,
       ss::sharded<cluster::metadata_cache>&,
       ss::sharded<cluster::topics_frontend>&,
       ss::sharded<cluster::config_frontend>&,
@@ -71,6 +73,16 @@ public:
     ss::future<> apply(ss::lw_shared_ptr<net::connection>) final;
 
     ss::smp_service_group smp_group() const { return _smp_group; }
+
+    /**
+     * @brief Return the scheduling group to use for fetch requests.
+     *
+     * By default, fetches use a dedicated scheduling group, but this may
+     * be changed by configuration to restore the old behavior of lumping
+     * them with most other tasks in the default scheduling group.
+     */
+    ss::scheduling_group fetch_scheduling_group() const;
+
     cluster::topics_frontend& topics_frontend() {
         return _topics_frontend.local();
     }
@@ -146,8 +158,18 @@ public:
 
     ssx::thread_worker& thread_worker() { return _thread_worker; }
 
+    /**
+     * \param api_names list of Kafka API names
+     * \return std::vector<bool> always sized to index the entire Kafka API key
+     * space, with true values at indexes whose names have appeared in
+     * \p api_names
+     */
+    static std::vector<bool>
+    convert_api_names_to_key_bitmap(const std::vector<ss::sstring>& api_names);
+
 private:
     ss::smp_service_group _smp_group;
+    ss::scheduling_group _fetch_scheduling_group;
     ss::sharded<cluster::topics_frontend>& _topics_frontend;
     ss::sharded<cluster::config_frontend>& _config_frontend;
     ss::sharded<features::feature_table>& _feature_table;

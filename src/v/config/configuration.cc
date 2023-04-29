@@ -517,6 +517,12 @@ configuration::configuration()
       "Maximum number of bytes returned in fetch request",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       55_MiB)
+  , use_fetch_scheduler_group(
+      *this,
+      "use_fetch_scheduler_group",
+      "Use a separate scheduler group for fetch processing",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , metadata_status_wait_timeout_ms(
       *this,
       "metadata_status_wait_timeout_ms",
@@ -1922,6 +1928,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       256,
       {.min = 0})
+  , kafka_throughput_controlled_api_keys(
+      *this,
+      "kafka_throughput_controlled_api_keys",
+      "List of Kafka API keys that are subject to cluster-wide "
+      "and node-wide thoughput limit control",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"produce", "fetch"})
   , node_isolation_heartbeat_timeout(
       *this,
       "node_isolation_heartbeat_timeout",

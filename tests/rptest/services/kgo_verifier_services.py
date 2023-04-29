@@ -586,7 +586,8 @@ class KgoVerifierProducer(KgoVerifierService):
                  use_transactions=False,
                  transaction_abort_rate=None,
                  msgs_per_transaction=None,
-                 rate_limit_bps=None):
+                 rate_limit_bps=None,
+                 key_set_cardinality=None):
         super(KgoVerifierProducer,
               self).__init__(context, redpanda, topic, msg_size, custom_node,
                              debug_logs, trace_logs)
@@ -598,6 +599,7 @@ class KgoVerifierProducer(KgoVerifierService):
         self._transaction_abort_rate = transaction_abort_rate
         self._msgs_per_transaction = msgs_per_transaction
         self._rate_limit_bps = rate_limit_bps
+        self._key_set_cardinality = key_set_cardinality
 
     @property
     def produce_status(self):
@@ -618,6 +620,14 @@ class KgoVerifierProducer(KgoVerifierService):
             raise
 
         self._status_thread.raise_on_error()
+
+        if self._status.bad_offsets != 0:
+            # This either means that the test sent multiple producers' traffic to
+            # the same topic, or that Redpanda showed a buggy behavior with
+            # idempotency: producer records should always land at the next offset
+            # after the last record they wrote.
+            raise RuntimeError(
+                f"{self.who_am_i()} possible idempotency bug: {self._status}")
 
         return super().wait_node(node, timeout_sec=timeout_sec)
 
@@ -663,6 +673,9 @@ class KgoVerifierProducer(KgoVerifierService):
 
         if self._rate_limit_bps is not None:
             cmd = cmd + f' --produce-throughput-bps {self._rate_limit_bps}'
+
+        if self._key_set_cardinality is not None:
+            cmd += f" --key-set-cardinality {self._key_set_cardinality}"
 
         self.spawn(cmd, node)
 

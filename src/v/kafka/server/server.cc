@@ -27,6 +27,7 @@
 #include "kafka/server/handlers/describe_groups.h"
 #include "kafka/server/handlers/details/security.h"
 #include "kafka/server/handlers/end_txn.h"
+#include "kafka/server/handlers/handler_interface.h"
 #include "kafka/server/handlers/heartbeat.h"
 #include "kafka/server/handlers/init_producer_id.h"
 #include "kafka/server/handlers/join_group.h"
@@ -59,6 +60,7 @@
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/metrics.hh>
+#include <seastar/core/sstring.hh>
 #include <seastar/net/api.hh>
 #include <seastar/net/socket_defs.hh>
 #include <seastar/util/log.hh>
@@ -71,12 +73,14 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace kafka {
 
 server::server(
   ss::sharded<net::server_configuration>* cfg,
   ss::smp_service_group smp,
+  ss::scheduling_group fetch_sg,
   ss::sharded<cluster::metadata_cache>& meta,
   ss::sharded<cluster::topics_frontend>& tf,
   ss::sharded<cluster::config_frontend>& cf,
@@ -99,6 +103,7 @@ server::server(
   ssx::thread_worker& tw) noexcept
   : net::server(cfg, klog)
   , _smp_group(smp)
+  , _fetch_scheduling_group(fetch_sg)
   , _topics_frontend(tf)
   , _config_frontend(cf)
   , _feature_table(ft)
@@ -132,6 +137,12 @@ server::server(
     }
     _probe.setup_metrics();
     _probe.setup_public_metrics();
+}
+
+ss::scheduling_group server::fetch_scheduling_group() const {
+    return config::shard_local_cfg().use_fetch_scheduler_group()
+             ? _fetch_scheduling_group
+             : ss::default_scheduling_group();
 }
 
 coordinator_ntp_mapper& server::coordinator_mapper() {
@@ -200,6 +211,20 @@ ss::future<security::tls::mtls_state> get_mtls_principal_state(
       });
 }
 
+/*static*/ std::vector<bool> server::convert_api_names_to_key_bitmap(
+  const std::vector<ss::sstring>& api_names) {
+    std::vector<bool> res;
+    res.resize(max_api_key() + 1);
+    for (const ss::sstring& api_name : api_names) {
+        if (const auto api_key = api_name_to_key(api_name); api_key) {
+            res.at(*api_key) = true;
+            continue;
+        }
+        vlog(klog.warn, "Unrecognized Kafka API name: {}", api_name);
+    }
+    return res;
+}
+
 ss::future<> server::apply(ss::lw_shared_ptr<net::connection> conn) {
     const bool authz_enabled
       = config::shard_local_cfg().kafka_enable_authorization().value_or(
@@ -225,7 +250,10 @@ ss::future<> server::apply(ss::lw_shared_ptr<net::connection> conn) {
       std::move(sasl),
       authz_enabled,
       mtls_state,
-      config::shard_local_cfg().kafka_request_max_bytes.bind());
+      config::shard_local_cfg().kafka_request_max_bytes.bind(),
+      config::shard_local_cfg()
+        .kafka_throughput_controlled_api_keys.bind<std::vector<bool>>(
+          &convert_api_names_to_key_bitmap));
 
     try {
         co_await ctx->process();
