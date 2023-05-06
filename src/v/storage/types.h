@@ -17,6 +17,7 @@
 #include "model/timeout_clock.h"
 #include "model/timestamp.h"
 #include "resource_mgmt/storage.h"
+#include "storage/file_sanitizer_types.h"
 #include "storage/fwd.h"
 #include "tristate.h"
 
@@ -30,7 +31,6 @@
 
 namespace storage {
 using log_clock = ss::lowres_clock;
-using debug_sanitize_files = ss::bool_class<struct debug_sanitize_files_tag>;
 using jitter_percents = named_type<int, struct jitter_percents_tag>;
 
 struct disk
@@ -338,36 +338,64 @@ struct log_reader_config {
     friend std::ostream& operator<<(std::ostream& o, const log_reader_config&);
 };
 
-struct compaction_config {
-    explicit compaction_config(
-      model::timestamp upper,
-      std::optional<size_t> max_bytes_in_log,
-      model::offset max_collect_offset,
-      ss::io_priority_class p,
-      ss::abort_source& as,
-      debug_sanitize_files should_sanitize = debug_sanitize_files::no)
+struct gc_config {
+    gc_config(model::timestamp upper, std::optional<size_t> max_bytes_in_log)
       : eviction_time(upper)
-      , max_bytes(max_bytes_in_log)
-      , max_collectible_offset(max_collect_offset)
-      , iopc(p)
-      , sanitize(should_sanitize)
-      , asrc(&as) {}
+      , max_bytes(max_bytes_in_log) {}
 
     // remove everything below eviction time
     model::timestamp eviction_time;
     // remove one segment if log is > max_bytes
     std::optional<size_t> max_bytes;
+
+    friend std::ostream& operator<<(std::ostream&, const gc_config&);
+};
+
+struct compaction_config {
+    compaction_config(
+      model::offset max_collect_offset,
+      ss::io_priority_class p,
+      ss::abort_source& as,
+      std::optional<ntp_sanitizer_config> san_cfg = std::nullopt)
+      : max_collectible_offset(max_collect_offset)
+      , iopc(p)
+      , sanitizer_config(std::move(san_cfg))
+      , asrc(&as) {}
+
     // Cannot delete or compact past this offset (i.e. for unresolved txn
     // records): that is, only offsets <= this may be compacted.
     model::offset max_collectible_offset;
     // priority for all IO in compaction
     ss::io_priority_class iopc;
-    // use proxy fileops with assertions
-    debug_sanitize_files sanitize;
+    // use proxy fileops with assertions and/or failure injection
+    std::optional<ntp_sanitizer_config> sanitizer_config;
     // abort source for compaction task
     ss::abort_source* asrc;
 
     friend std::ostream& operator<<(std::ostream&, const compaction_config&);
+};
+
+/*
+ * Compaction and garbage collection are two distinct processes with their own
+ * configuration. However, the vast majority of the time they are invoked
+ * together as a single operation in a form of periodic housekeeping. This
+ * structure is a convenience wrapper around the two configs.
+ */
+struct housekeeping_config {
+    housekeeping_config(
+      model::timestamp upper,
+      std::optional<size_t> max_bytes_in_log,
+      model::offset max_collect_offset,
+      ss::io_priority_class p,
+      ss::abort_source& as,
+      std::optional<ntp_sanitizer_config> san_cfg = std::nullopt)
+      : compact(max_collect_offset, p, as, std::move(san_cfg))
+      , gc(upper, max_bytes_in_log) {}
+
+    compaction_config compact;
+    gc_config gc;
+
+    friend std::ostream& operator<<(std::ostream&, const housekeeping_config&);
 };
 
 struct compaction_result {
@@ -408,6 +436,13 @@ struct compaction_result {
 struct reclaim_size_limits {
     size_t retention{0};
     size_t available{0};
+
+    friend reclaim_size_limits
+    operator+(reclaim_size_limits lhs, const reclaim_size_limits& rhs) {
+        lhs.retention += rhs.retention;
+        lhs.available += rhs.available;
+        return lhs;
+    }
 };
 
 /*
@@ -441,6 +476,12 @@ struct usage {
 struct usage_report {
     usage usage;
     reclaim_size_limits reclaim;
+
+    friend usage_report operator+(usage_report lhs, const usage_report& rhs) {
+        lhs.usage = lhs.usage + rhs.usage;
+        lhs.reclaim = lhs.reclaim + rhs.reclaim;
+        return lhs;
+    }
 };
 
 } // namespace storage

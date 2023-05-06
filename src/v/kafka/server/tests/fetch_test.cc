@@ -171,10 +171,10 @@ FIXTURE_TEST(read_from_ntp_max_bytes, redpanda_thread_fixture) {
         return octx.rctx.partition_manager()
           .invoke_on(
             shard,
-            [&octx, ntp, config](cluster::partition_manager& pm) {
+            [ntp, config, &octx](cluster::partition_manager& pm) {
                 return kafka::read_from_ntp(
                   pm,
-                  octx.rctx.coproc_partition_manager().local(),
+                  octx.rctx.replica_selector(),
                   ntp,
                   config,
                   true,

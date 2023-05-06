@@ -16,6 +16,7 @@
 #include "model/fundamental.h"
 #include "vassert.h"
 
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/weak_ptr.hh>
 #include <seastar/util/noncopyable_function.hh>
 
@@ -179,12 +180,7 @@ struct allocation_units {
     using pointer = ss::foreign_ptr<std::unique_ptr<allocation_units>>;
 
     allocation_units(
-      std::vector<partition_assignment>,
-      allocation_state&,
-      partition_allocation_domain);
-    allocation_units(
-      std::vector<partition_assignment>,
-      std::vector<model::broker_shard>,
+      ss::chunked_fifo<partition_assignment>,
       allocation_state&,
       partition_allocation_domain);
     allocation_units& operator=(allocation_units&&) = default;
@@ -194,18 +190,55 @@ struct allocation_units {
 
     ~allocation_units();
 
-    const std::vector<partition_assignment>& get_assignments() const {
+    const ss::chunked_fifo<partition_assignment>& get_assignments() const {
         return _assignments;
     }
 
+    ss::chunked_fifo<partition_assignment> copy_assignments() {
+        ss::chunked_fifo<partition_assignment> p_as;
+        p_as.reserve(_assignments.size());
+        std::copy(
+          _assignments.begin(), _assignments.end(), std::back_inserter(p_as));
+        return p_as;
+    }
+
 private:
-    std::vector<partition_assignment> _assignments;
-    // set of previous replicas, they will not be reverted when allocation units
-    // goes out of scope
-    absl::node_hash_set<model::broker_shard> _previous;
+    ss::chunked_fifo<partition_assignment> _assignments;
     // keep the pointer to make this type movable
     ss::weak_ptr<allocation_state> _state;
     partition_allocation_domain _domain;
+    // oncore checker to ensure destruction happens on the same core
+    [[no_unique_address]] oncore _oncore;
+};
+
+class allocated_partition {
+public:
+    // construct an object from an original assignment
+    allocated_partition(
+      std::vector<model::broker_shard>, partition_allocation_domain);
+
+    const std::vector<model::broker_shard>& replicas() const {
+        return _replicas;
+    }
+    bool is_original(const model::broker_shard&) const;
+
+    allocated_partition& operator=(allocated_partition&&) = default;
+    allocated_partition& operator=(const allocated_partition&) = delete;
+    allocated_partition(const allocated_partition&) = delete;
+    allocated_partition(allocated_partition&&) = default;
+    ~allocated_partition();
+
+private:
+    friend class partition_allocator;
+    void add_replica(model::broker_shard, allocation_state&);
+    // used to move the allocation to allocation_units
+    std::vector<model::broker_shard> release_new_partition();
+
+private:
+    std::vector<model::broker_shard> _replicas;
+    std::optional<absl::flat_hash_set<model::broker_shard>> _original;
+    partition_allocation_domain _domain;
+    ss::weak_ptr<allocation_state> _state;
     // oncore checker to ensure destruction happens on the same core
     [[no_unique_address]] oncore _oncore;
 };
@@ -239,7 +272,7 @@ struct allocation_request {
     allocation_request& operator=(allocation_request&&) = default;
     ~allocation_request() = default;
 
-    std::vector<partition_constraints> partitions;
+    ss::chunked_fifo<partition_constraints> partitions;
     partition_allocation_domain domain;
 
     friend std::ostream& operator<<(std::ostream&, const allocation_request&);

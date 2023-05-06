@@ -559,7 +559,8 @@ ss::future<topic_result> topics_frontend::replicate_create_topic(
     auto tp_ns = cfg.tp_ns;
     create_topic_cmd cmd(
       tp_ns,
-      topic_configuration_assignment(std::move(cfg), units->get_assignments()));
+      topic_configuration_assignment(
+        std::move(cfg), units->copy_assignments()));
 
     for (auto& p_as : cmd.value.assignments) {
         std::shuffle(
@@ -621,7 +622,71 @@ ss::future<std::vector<topic_result>> topics_frontend::delete_topics(
 
 ss::future<topic_result> topics_frontend::do_delete_topic(
   model::topic_namespace tp_ns, model::timeout_clock::time_point timeout) {
-    delete_topic_cmd cmd(tp_ns, tp_ns);
+    // Look up config
+    auto topic_meta_opt = _topics.local().get_topic_metadata_ref(tp_ns);
+    if (!topic_meta_opt.has_value()) {
+        topic_result result(std::move(tp_ns), errc::topic_not_exists);
+        return ss::make_ready_future<topic_result>(result);
+    }
+    auto& topic_meta = topic_meta_opt.value().get();
+
+    // Lifecycle marker driven deletion is added alongside the v2 manifest
+    // format in Redpanda 23.2.  Before that, we write legacy one-shot
+    // deletion records.
+    if (!_features.local().is_active(
+          features::feature::cloud_storage_manifest_format_v2)) {
+        // This is not unsafe, but emit a warning in case we have some bug that
+        // causes a cluster to indefinitely use the legacy path, so that
+        // someone has a chance to notice.
+        vlog(
+          clusterlog.warn,
+          "Cluster upgrade in progress, using legacy deletion.",
+          tp_ns);
+        delete_topic_cmd cmd(tp_ns, tp_ns);
+
+        return replicate_and_wait(_stm, _features, _as, std::move(cmd), timeout)
+          .then_wrapped(
+            [tp_ns = std::move(tp_ns)](ss::future<std::error_code> f) mutable {
+                try {
+                    auto ec = f.get0();
+                    if (ec != errc::success) {
+                        return topic_result(std::move(tp_ns), map_errc(ec));
+                    }
+                    return topic_result(std::move(tp_ns), errc::success);
+                } catch (...) {
+                    vlog(
+                      clusterlog.warn,
+                      "Unable to delete topic - {}",
+                      std::current_exception());
+                    return topic_result(
+                      std::move(tp_ns), errc::replication_error);
+                }
+            });
+    }
+
+    // Default to traditional deletion, without tombstones
+    // Use tombstones for tiered storage topics that require remote erase
+    topic_lifecycle_transition_mode mode
+      = topic_meta.get_configuration().properties.requires_remote_erase()
+          ? topic_lifecycle_transition_mode::pending_gc
+          : topic_lifecycle_transition_mode::oneshot_delete;
+
+    if (mode == topic_lifecycle_transition_mode::oneshot_delete) {
+        vlog(clusterlog.debug, "Deleting {} without tombstone", tp_ns);
+    } else if (mode == topic_lifecycle_transition_mode::pending_gc) {
+        vlog(
+          clusterlog.debug,
+          "Deleting {} with tombstone (tiered storage enabled)",
+          tp_ns);
+    }
+
+    auto remote_revision = topic_meta.get_remote_revision().value_or(
+      model::initial_revision_id{topic_meta.get_revision()});
+
+    topic_lifecycle_transition_cmd cmd(
+      tp_ns,
+      {.topic = {.nt = tp_ns, .initial_revision_id = remote_revision},
+       .mode = mode});
 
     return replicate_and_wait(_stm, _features, _as, std::move(cmd), timeout)
       .then_wrapped(
@@ -640,6 +705,51 @@ ss::future<topic_result> topics_frontend::do_delete_topic(
                 return topic_result(std::move(tp_ns), errc::replication_error);
             }
         });
+}
+
+ss::future<topic_result> topics_frontend::purged_topic(
+  nt_revision topic, model::timeout_clock::duration timeout) {
+    auto leader = _leaders.local().get_leader(model::controller_ntp);
+
+    // no leader available
+    if (!leader) {
+        return ss::make_ready_future<topic_result>(
+          topic_result(topic.nt, errc::no_leader_controller));
+    }
+    // current node is a leader controller
+    if (leader == _self) {
+        return do_purged_topic(
+          std::move(topic), model::timeout_clock::now() + timeout);
+    } else {
+        return dispatch_purged_topic_to_leader(
+          leader.value(), std::move(topic), timeout);
+    }
+}
+
+ss::future<topic_result> topics_frontend::do_purged_topic(
+  nt_revision topic, model::timeout_clock::time_point deadline) {
+    topic_lifecycle_transition_cmd cmd(
+      topic.nt,
+      topic_lifecycle_transition{
+        .topic = topic, .mode = topic_lifecycle_transition_mode::drop});
+    std::error_code repl_ec;
+    try {
+        repl_ec = co_await replicate_and_wait(
+          _stm, _features, _as, std::move(cmd), deadline);
+    } catch (...) {
+        vlog(
+          clusterlog.warn,
+          "Unable to mark topic {} purged - {}",
+          topic.nt,
+          std::current_exception());
+        co_return topic_result(std::move(topic.nt), errc::replication_error);
+    }
+
+    if (repl_ec != errc::success) {
+        co_return topic_result(std::move(topic.nt), map_errc(repl_ec));
+    } else {
+        co_return topic_result(std::move(topic.nt), errc::success);
+    }
 }
 
 ss::future<std::vector<topic_result>> topics_frontend::autocreate_topics(
@@ -691,6 +801,37 @@ topics_frontend::dispatch_create_to_leader(
             }
             return std::move(r.value().results);
         });
+}
+
+ss::future<topic_result> topics_frontend::dispatch_purged_topic_to_leader(
+  model::node_id leader,
+  nt_revision topic,
+  model::timeout_clock::duration timeout) {
+    vlog(
+      clusterlog.trace,
+      "Dispatching purged topic ({}) to {}",
+      topic.nt,
+      leader);
+
+    return _connections.local()
+      .with_node_client<cluster::controller_client_protocol>(
+        _self,
+        ss::this_shard_id(),
+        leader,
+        timeout,
+        [topic, timeout](controller_client_protocol cp) mutable {
+            return cp.purged_topic(
+              purged_topic_request{
+                .topic = std::move(topic), .timeout = timeout},
+              rpc::client_opts(model::timeout_clock::now() + timeout));
+        })
+      .then(&rpc::get_ctx_data<purged_topic_reply>)
+      .then([topic = std::move(topic)](result<purged_topic_reply> r) mutable {
+          if (r.has_error()) {
+              return topic_result(topic.nt, map_errc(r.error()));
+          }
+          return std::move(r.value().result);
+      });
 }
 
 bool topics_frontend::validate_topic_name(const model::topic_namespace& topic) {
@@ -935,7 +1076,7 @@ ss::future<topic_result> topics_frontend::do_create_partition(
 
     auto tp_ns = p_cfg.tp_ns;
     create_partitions_configuration_assignment payload(
-      std::move(p_cfg), units.value()->get_assignments());
+      std::move(p_cfg), units.value()->copy_assignments());
     create_partition_cmd cmd = create_partition_cmd(tp_ns, std::move(payload));
 
     try {
@@ -1185,7 +1326,7 @@ ss::future<std::error_code> topics_frontend::increase_replication_factor(
 
     // units shold exist during replicate_and_wait call
     using units_from_allocator
-      = ss::foreign_ptr<std::unique_ptr<allocation_units>>;
+      = ss::foreign_ptr<std::unique_ptr<allocated_partition>>;
     std::vector<units_from_allocator> units;
     units.reserve(partition_count);
 
@@ -1245,7 +1386,7 @@ ss::future<std::error_code> topics_frontend::increase_replication_factor(
                     get_allocation_domain(ntp));
               })
             .then([&error, &units, &new_assignments, topic, p_id](
-                    result<allocation_units> reallocation) {
+                    result<allocated_partition> reallocation) {
                 if (!reallocation) {
                     vlog(
                       clusterlog.warn,
@@ -1258,13 +1399,13 @@ ss::future<std::error_code> topics_frontend::increase_replication_factor(
                     return;
                 }
 
-                units_from_allocator ptr = std::make_unique<allocation_units>(
-                  std::move(reallocation.value()));
+                units_from_allocator ptr
+                  = std::make_unique<allocated_partition>(
+                    std::move(reallocation.value()));
 
                 units.emplace_back(std::move(ptr));
 
-                new_assignments.emplace_back(
-                  p_id, units.back()->get_assignments().front().replicas);
+                new_assignments.emplace_back(p_id, units.back()->replicas());
             });
       });
 
@@ -1340,7 +1481,7 @@ allocation_request make_allocation_request(
     return req;
 }
 
-ss::future<result<std::vector<partition_assignment>>>
+ss::future<result<ss::chunked_fifo<partition_assignment>>>
 topics_frontend::generate_reassignments(
   model::ntp ntp, std::vector<model::node_id> new_replicas) {
     auto tp_metadata = _topics.local().get_topic_metadata_ref(
@@ -1364,7 +1505,7 @@ topics_frontend::generate_reassignments(
         co_return units.error();
     }
 
-    auto assignments = units.value()->get_assignments();
+    auto assignments = units.value()->copy_assignments();
     if (assignments.empty()) {
         co_return errc::no_partition_assignments;
     }

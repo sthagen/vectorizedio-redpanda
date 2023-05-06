@@ -58,13 +58,13 @@ struct manual_deletion_fixture : public raft_test_fixture {
           [this] {
               for (auto& [_, n] : gr.get_members()) {
                   n.log
-                    ->compact(storage::compaction_config(
+                    ->housekeeping(storage::housekeeping_config(
                       retention_timestamp,
                       100_MiB,
                       model::offset::max(),
                       ss::default_priority_class(),
                       as,
-                      storage::debug_sanitize_files::yes))
+                      storage::ntp_sanitizer_config{.sanitize_only = true}))
                     .get0();
                   if (n.log->offsets().start_offset <= model::offset(0)) {
                       return false;

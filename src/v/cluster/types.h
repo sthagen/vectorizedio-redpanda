@@ -32,9 +32,11 @@
 #include "utils/to_string.h"
 #include "v8_engine/data_policy.h"
 
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sstring.hh>
 
 #include <absl/container/btree_set.h>
+#include <absl/hash/hash.h>
 #include <fmt/format.h>
 
 #include <cstdint>
@@ -1293,6 +1295,7 @@ struct topic_properties
 
     bool is_compacted() const;
     bool has_overrides() const;
+    bool requires_remote_erase() const;
 
     storage::ntp_config::default_overrides get_ntp_cfg_overrides() const;
 
@@ -1668,56 +1671,151 @@ struct create_partitions_configuration
     operator<<(std::ostream&, const create_partitions_configuration&);
 };
 
-struct topic_configuration_assignment
+template<typename T>
+struct configuration_with_assignment
   : serde::envelope<
-      topic_configuration_assignment,
+      configuration_with_assignment<T>,
       serde::version<0>,
       serde::compat_version<0>> {
-    topic_configuration_assignment() = default;
+    configuration_with_assignment() = default;
 
-    topic_configuration_assignment(
-      topic_configuration cfg, std::vector<partition_assignment> pas)
-      : cfg(std::move(cfg))
+    configuration_with_assignment(
+      T value, ss::chunked_fifo<partition_assignment> pas)
+      : cfg(std::move(value))
       , assignments(std::move(pas)) {}
 
-    topic_configuration cfg;
-    std::vector<partition_assignment> assignments;
-
-    model::topic_metadata get_metadata() const;
+    configuration_with_assignment(
+      configuration_with_assignment&&) noexcept = default;
+    configuration_with_assignment&
+    operator=(configuration_with_assignment&&) noexcept = default;
+    configuration_with_assignment&
+    operator=(const configuration_with_assignment&)
+      = delete;
+    ~configuration_with_assignment() = default;
+    // we need to make the type copyable as it is being copied when dispatched
+    // to remote shards
+    configuration_with_assignment(const configuration_with_assignment& src)
+      : cfg(src.cfg) {
+        ss::chunked_fifo<partition_assignment> assignments_cp;
+        assignments_cp.reserve(assignments.size());
+        std::copy(
+          src.assignments.begin(),
+          src.assignments.end(),
+          std::back_inserter(assignments_cp));
+        assignments = std::move(assignments_cp);
+    }
+    T cfg;
+    ss::chunked_fifo<partition_assignment> assignments;
 
     auto serde_fields() { return std::tie(cfg, assignments); }
 
     friend bool operator==(
-      const topic_configuration_assignment&,
-      const topic_configuration_assignment&)
-      = default;
+      const configuration_with_assignment<T>& lhs,
+      const configuration_with_assignment<T>& rhs) {
+        return lhs.cfg == rhs.cfg
+               && std::equal(
+                 lhs.assignments.begin(),
+                 lhs.assignments.end(),
+                 rhs.assignments.begin(),
+                 rhs.assignments.end());
+    };
+
+    template<typename V>
+    friend std::ostream&
+    operator<<(std::ostream&, const configuration_with_assignment<V>&);
 };
 
-struct create_partitions_configuration_assignment
+using create_partitions_configuration_assignment
+  = configuration_with_assignment<create_partitions_configuration>;
+
+/**
+ * Soft-deleting a topic may put it into different modes: initially this is
+ * just a two stage thing: create a marker that acts as a tombstone, later
+ * drop the marker once deletion is complete.
+ * In future this might include a "flushing" mode for writing out the last
+ * of a topic's data to tiered storage before deleting it locally, or
+ * an "offloaded" mode for topics that are parked in tiered storage with
+ * no intention of deletion.
+ */
+enum class topic_lifecycle_transition_mode : uint8_t {
+    // Drop the lifecycle marker: we do this after we're done with any
+    // garbage collection.
+    drop = 0,
+
+    // Enter garbage collection phase: the topic appears deleted externally,
+    // while internally we are garbage collecting any data that belonged
+    // to it.
+    pending_gc = 1,
+
+    // Legacy-style deletion, where we attempt to delete local data and drop
+    // the topic entirely from the topic table in one step.
+    oneshot_delete = 2,
+};
+
+struct nt_lifecycle_marker
   : serde::envelope<
-      create_partitions_configuration_assignment,
+      nt_lifecycle_marker,
       serde::version<0>,
       serde::compat_version<0>> {
-    create_partitions_configuration_assignment() = default;
-    create_partitions_configuration_assignment(
-      create_partitions_configuration cfg,
-      std::vector<partition_assignment> pas)
-      : cfg(std::move(cfg))
-      , assignments(std::move(pas)) {}
+    topic_configuration config;
 
-    create_partitions_configuration cfg;
-    std::vector<partition_assignment> assignments;
+    model::initial_revision_id initial_revision_id;
 
-    auto serde_fields() { return std::tie(cfg, assignments); }
-
-    friend std::ostream& operator<<(
-      std::ostream&, const create_partitions_configuration_assignment&);
-
-    friend bool operator==(
-      const create_partitions_configuration_assignment&,
-      const create_partitions_configuration_assignment&)
-      = default;
+    auto serde_fields() { return std::tie(config, initial_revision_id); }
 };
+
+/**
+ * The namespace-topic-revision tuple refers to a particular incarnation
+ * of a named topic.  For topic lifecycle markers,
+ */
+struct nt_revision
+  : serde::envelope<nt_revision, serde::version<0>, serde::compat_version<0>> {
+    model::topic_namespace nt;
+
+    // The initial revision ID of partition 0.
+    model::initial_revision_id initial_revision_id;
+
+    template<typename H>
+    friend H AbslHashValue(H h, const nt_revision& ntr) {
+        return H::combine(std::move(h), ntr.nt, ntr.initial_revision_id);
+    }
+
+    friend std::ostream& operator<<(std::ostream&, const nt_revision&);
+
+    auto serde_fields() { return std::tie(nt, initial_revision_id); }
+};
+
+struct nt_revision_hash {
+    using is_transparent = void;
+
+    size_t operator()(const nt_revision& v) const {
+        return absl::Hash<nt_revision>{}(v);
+    }
+};
+
+struct nt_revision_eq {
+    using is_transparent = void;
+
+    bool operator()(const nt_revision& lhs, const nt_revision& rhs) const {
+        return lhs.nt == rhs.nt
+               && lhs.initial_revision_id == rhs.initial_revision_id;
+    }
+};
+
+struct topic_lifecycle_transition
+  : serde::envelope<
+      topic_lifecycle_transition,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    nt_revision topic;
+
+    topic_lifecycle_transition_mode mode;
+
+    auto serde_fields() { return std::tie(topic, mode); }
+};
+
+using topic_configuration_assignment
+  = configuration_with_assignment<topic_configuration>;
 
 struct topic_result
   : serde::envelope<topic_result, serde::version<0>, serde::compat_version<0>> {
@@ -1778,6 +1876,46 @@ struct create_topics_reply
     friend std::ostream& operator<<(std::ostream&, const create_topics_reply&);
 
     auto serde_fields() { return std::tie(results, metadata, configs); }
+};
+
+struct purged_topic_request
+  : serde::envelope<
+      purged_topic_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    nt_revision topic;
+    model::timeout_clock::duration timeout;
+
+    friend bool
+    operator==(const purged_topic_request&, const purged_topic_request&)
+      = default;
+
+    friend std::ostream& operator<<(std::ostream&, const purged_topic_request&);
+
+    auto serde_fields() { return std::tie(topic, timeout); }
+};
+
+struct purged_topic_reply
+  : serde::envelope<
+      purged_topic_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    topic_result result;
+
+    purged_topic_reply() noexcept = default;
+    purged_topic_reply(topic_result r)
+      : result(r) {}
+
+    friend bool operator==(const purged_topic_reply&, const purged_topic_reply&)
+      = default;
+
+    friend std::ostream& operator<<(std::ostream&, const purged_topic_reply&);
+
+    auto serde_fields() { return std::tie(result); }
 };
 
 struct finish_partition_update_request
@@ -3531,6 +3669,16 @@ struct metrics_reporter_cluster_info
     auto serde_fields() { return std::tie(uuid, creation_timestamp); }
 };
 
+template<typename V>
+std::ostream& operator<<(
+  std::ostream& o, const configuration_with_assignment<V>& with_assignment) {
+    fmt::print(
+      o,
+      "{{configuration: {}, assignments: {}}}",
+      with_assignment.cfg,
+      with_assignment.assignments);
+    return o;
+}
 } // namespace cluster
 namespace std {
 template<>
@@ -3611,10 +3759,22 @@ struct adl<cluster::create_topics_reply> {
     cluster::create_topics_reply from(iobuf);
     cluster::create_topics_reply from(iobuf_parser&);
 };
-template<>
-struct adl<cluster::topic_configuration_assignment> {
-    void to(iobuf&, cluster::topic_configuration_assignment&&);
-    cluster::topic_configuration_assignment from(iobuf_parser&);
+template<typename T>
+struct adl<cluster::configuration_with_assignment<T>> {
+    void
+    to(iobuf& b, cluster::configuration_with_assignment<T>&& with_assignment) {
+        reflection::serialize(
+          b,
+          std::move(with_assignment.cfg),
+          std::move(with_assignment.assignments));
+    }
+
+    cluster::configuration_with_assignment<T> from(iobuf_parser& in) {
+        auto cfg = adl<T>{}.from(in);
+        auto assignments
+          = adl<ss::chunked_fifo<cluster::partition_assignment>>{}.from(in);
+        return {std::move(cfg), std::move(assignments)};
+    }
 };
 
 template<>
@@ -3656,12 +3816,6 @@ template<>
 struct adl<cluster::create_partitions_configuration> {
     void to(iobuf&, cluster::create_partitions_configuration&&);
     cluster::create_partitions_configuration from(iobuf_parser&);
-};
-
-template<>
-struct adl<cluster::create_partitions_configuration_assignment> {
-    void to(iobuf&, cluster::create_partitions_configuration_assignment&&);
-    cluster::create_partitions_configuration_assignment from(iobuf_parser&);
 };
 
 template<>

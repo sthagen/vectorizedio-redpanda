@@ -18,6 +18,7 @@
 #include "kafka/protocol/wire.h"
 #include "kafka/server/connection_context.h"
 #include "kafka/server/fetch_session_cache.h"
+#include "kafka/server/handlers/fetch/replica_selector.h"
 #include "kafka/server/logger.h"
 #include "kafka/server/response.h"
 #include "kafka/server/server.h"
@@ -143,10 +144,6 @@ public:
 
     cluster::shard_table& shards() { return _conn->server().shard_table(); }
 
-    ss::sharded<coproc::partition_manager>& coproc_partition_manager() {
-        return _conn->server().coproc_partition_manager();
-    }
-
     ss::sharded<cluster::partition_manager>& partition_manager() {
         return _conn->server().partition_manager();
     }
@@ -233,6 +230,10 @@ public:
 
     cluster::controller_api& controller_api() {
         return _conn->server().controller_api();
+    }
+
+    const replica_selector& replica_selector() const {
+        return _conn->server().get_replica_selector();
     }
 
 private:

@@ -124,7 +124,6 @@ public:
     ss::sharded<features::feature_table> feature_table;
 
     ss::sharded<kafka::coordinator_ntp_mapper> coordinator_ntp_mapper;
-    ss::sharded<kafka::fetch_session_cache> fetch_session_cache;
     ss::sharded<kafka::group_router> group_router;
     ss::sharded<kafka::quota_manager> quota_mgr;
     ss::sharded<kafka::snc_quota_manager> snc_quota_mgr;
@@ -132,7 +131,7 @@ public:
     ss::sharded<kafka::usage_manager> usage_manager;
 
     ss::sharded<raft::group_manager> raft_group_manager;
-    ss::sharded<raft::recovery_throttle> recovery_throttle;
+    ss::sharded<raft::coordinated_recovery_throttle> recovery_throttle;
 
     ss::sharded<storage::api> storage;
     ss::sharded<storage::node_api> storage_node;
@@ -169,6 +168,8 @@ private:
     void wire_up_redpanda_services(model::node_id);
 
     void load_feature_table_snapshot();
+
+    void trigger_abort_source();
 
     // Starts the services meant for Redpanda runtime. Must be called after
     // having constructed the subsystems via the corresponding `wire_up` calls.
@@ -250,6 +251,7 @@ private:
     ss::sharded<archival::upload_housekeeping_service>
       _archival_upload_housekeeping;
     std::unique_ptr<monitor_unsafe_log_flag> _monitor_unsafe_log_flag;
+    ss::sharded<archival::scrubber> _archival_scrubber;
 
     ss::metrics::metric_groups _metrics;
     ss::sharded<ssx::metrics::public_metrics_group> _public_metrics;
@@ -262,6 +264,8 @@ private:
 
     // run these first on destruction
     deferred_actions _deferred;
+
+    ss::sharded<ss::abort_source> _as;
 };
 
 namespace debug {

@@ -26,6 +26,7 @@
 #include "partition_balancer_types.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sharded.hh>
 
 #include <absl/container/flat_hash_map.h>
@@ -59,6 +60,14 @@ public:
 
     ss::future<std::vector<topic_result>> delete_topics(
       std::vector<model::topic_namespace>, model::timeout_clock::time_point);
+
+    // May be called on any node
+    ss::future<topic_result>
+      purged_topic(nt_revision, model::timeout_clock::duration);
+
+    // May only be called on leader
+    ss::future<topic_result>
+      do_purged_topic(nt_revision, model::timeout_clock::time_point);
 
     ss::future<std::vector<topic_result>> autocreate_topics(
       std::vector<topic_configuration>, model::timeout_clock::duration);
@@ -165,6 +174,9 @@ private:
       std::vector<topic_configuration>,
       model::timeout_clock::duration);
 
+    ss::future<topic_result> dispatch_purged_topic_to_leader(
+      model::node_id, nt_revision, model::timeout_clock::duration);
+
     ss::future<std::vector<topic_result>>
     dispatch_create_non_replicable_to_leader(
       model::node_id leader,
@@ -220,7 +232,7 @@ private:
       model::topic_namespace topic, int32_t partition_count) const;
 
     // Generates a new partition assignment for a single partition
-    ss::future<result<std::vector<partition_assignment>>>
+    ss::future<result<ss::chunked_fifo<partition_assignment>>>
     generate_reassignments(
       model::ntp, std::vector<model::node_id> new_replicas);
 

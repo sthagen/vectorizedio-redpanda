@@ -348,16 +348,11 @@ static json::Document parse_json_body(ss::http::request const& req) {
  */
 static void
 apply_validator(json::validator& validator, json::Document const& doc) {
-    validator.schema_validator.Reset();
-    validator.schema_validator.ResetError();
-
-    if (!doc.Accept(validator.schema_validator)) {
-        json::StringBuffer val_buf;
-        json::Writer<json::StringBuffer> w{val_buf};
-        validator.schema_validator.GetError().Accept(w);
-        auto s = ss::sstring{val_buf.GetString(), val_buf.GetSize()};
-        throw ss::httpd::bad_request_exception(
-          fmt::format("JSON request body does not conform to schema: {}", s));
+    try {
+        json::validate(validator, doc);
+    } catch (json::json_validation_error& err) {
+        throw ss::httpd::bad_request_exception(fmt::format(
+          "JSON request body does not conform to schema: {}", err.what()));
     }
 }
 
@@ -3993,6 +3988,62 @@ void admin_server::register_debug_routes() {
         -> ss::future<ss::json::json_return_type> {
           return get_partition_state_handler(std::move(req));
       });
+
+    register_route<superuser>(
+      ss::httpd::debug_json::set_storage_failure_injection_enabled,
+      [](std::unique_ptr<ss::http::request> req) {
+          auto value = req->get_query_param("value");
+          if (value != "true" && value != "false") {
+              throw ss::httpd::bad_param_exception(fmt::format(
+                "Invalid parameter 'value' {{{}}}. Should be 'true' or "
+                "'false'",
+                value));
+          }
+
+          config::node().storage_failure_injection_enabled.set_value(
+            value == "true");
+
+          return ss::make_ready_future<ss::json::json_return_type>(
+            ss::json::json_void());
+      });
+
+    register_route<user>(
+      seastar::httpd::debug_json::get_local_storage_usage,
+      [this](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          return get_local_storage_usage_handler(std::move(req));
+      });
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::get_local_storage_usage_handler(
+  std::unique_ptr<ss::http::request>) {
+    /*
+     * In order to get an accurate view of disk usage we need to account for
+     * three things:
+     *
+     * 1. partition-based log usage (controller, kafka topics, etc...)
+     * 2. non-partition-based logs (kvstore, ...)
+     * 3. everything else (stm snapshots, etc...)
+     *
+     * The storage API disk usage interface gives is 1 and 2. But we need to
+     * access the partition abstraction to reason about the usage that state
+     * machines and raft account for.
+     *
+     * TODO: this accumulation across sub-systems will be moved up a level in
+     * short order and wont' remain here in the admin interface for long.
+     */
+    const auto other
+      = co_await _partition_manager.local().non_log_disk_size_bytes();
+
+    const auto disk = co_await _controller->get_storage().local().disk_usage();
+
+    seastar::httpd::debug_json::local_storage_usage ret;
+    ret.data = disk.usage.data + other;
+    ret.index = disk.usage.index;
+    ret.compaction = disk.usage.compaction;
+
+    co_return ret;
 }
 
 ss::future<ss::json::json_return_type>

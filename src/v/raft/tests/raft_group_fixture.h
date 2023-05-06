@@ -110,7 +110,9 @@ struct raft_node {
             [](features::feature_table& f) { f.testing_activate_all(); })
           .get();
 
-        cache.start().get();
+        as_service.start().get();
+
+        cache.start(std::ref(as_service)).get();
 
         storage
           .start(
@@ -119,13 +121,14 @@ struct raft_node {
                   1_MiB,
                   config::mock_binding(10ms),
                   storage_dir,
-                  storage::debug_sanitize_files::yes);
+                  storage::make_sanitized_file_config());
             },
             [storage_dir, segment_size]() {
                 return storage::log_config(
                   storage_dir,
                   segment_size,
-                  storage::debug_sanitize_files::yes);
+                  ss::default_priority_class(),
+                  storage::make_sanitized_file_config());
             },
             std::ref(feature_table))
           .get();
@@ -146,10 +149,15 @@ struct raft_node {
           storage.local().log_mgr().manage(std::move(ntp_cfg)).get0());
 
         recovery_throttle
-          .start(ss::sharded_parameter([] {
-              return config::shard_local_cfg()
-                .raft_learner_recovery_rate.bind();
-          }))
+          .start(
+            ss::sharded_parameter([] {
+                return config::shard_local_cfg()
+                  .raft_learner_recovery_rate.bind();
+            }),
+            ss::sharded_parameter([] {
+                return config::shard_local_cfg()
+                  .raft_recovery_throttle_disable_dynamic_mode.bind();
+            }))
           .get();
 
         // setup consensus
@@ -230,7 +238,10 @@ struct raft_node {
 
         tstlog.info("Stopping node stack {}", broker.id());
         _as.request_abort();
-        return recovery_throttle.stop()
+        auto abort_f = as_service.invoke_on_all(
+          [](auto& local) { local.request_abort(); });
+        return std::move(abort_f)
+          .then([this] { return recovery_throttle.stop(); })
           .then([this] { return server.stop(); })
           .then([this] {
               if (hbeats) {
@@ -280,6 +291,7 @@ struct raft_node {
               return storage.stop();
           })
           .then([this] { return feature_table.stop(); })
+          .then([this] { return as_service.stop(); })
           .then([this] {
               tstlog.info("Node {} stopped", broker.id());
               started = false;
@@ -338,8 +350,9 @@ struct raft_node {
     bool started = false;
     model::broker broker;
     ss::sharded<storage::api> storage;
-    ss::sharded<raft::recovery_throttle> recovery_throttle;
+    ss::sharded<raft::coordinated_recovery_throttle> recovery_throttle;
     std::unique_ptr<storage::log> log;
+    ss::sharded<ss::abort_source> as_service;
     ss::sharded<rpc::connection_cache> cache;
     ss::sharded<rpc::rpc_server> server;
     ss::sharded<test_raft_manager> raft_manager;

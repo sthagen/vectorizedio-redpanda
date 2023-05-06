@@ -51,7 +51,7 @@ struct mux_state_machine_fixture {
           8192,
           config::mock_binding(std::chrono::milliseconds(10)),
           _data_dir,
-          storage::debug_sanitize_files::yes);
+          storage::make_sanitized_file_config());
 
         _storage
           .start(
@@ -60,10 +60,12 @@ struct mux_state_machine_fixture {
             std::ref(_feature_table))
           .get0();
         _storage.invoke_on_all(&storage::api::start).get0();
-        _connections.start().get0();
+        _as.start().get();
+        _connections.start(std::ref(_as)).get0();
         _recovery_throttle
           .start(
-            ss::sharded_parameter([] { return config::mock_binding(100_MiB); }))
+            ss::sharded_parameter([] { return config::mock_binding(100_MiB); }),
+            ss::sharded_parameter([] { return config::mock_binding(false); }))
           .get();
 
         _feature_table.start().get();
@@ -128,6 +130,10 @@ struct mux_state_machine_fixture {
 
     void stop_all() {
         if (_started) {
+            _as
+              .invoke_on_all(
+                [](auto& local) noexcept { local.request_abort(); })
+              .get();
             _recovery_throttle.stop().get();
             _group_mgr.stop().get0();
             if (_raft) {
@@ -136,6 +142,7 @@ struct mux_state_machine_fixture {
             _connections.stop().get0();
             _feature_table.stop().get0();
             _storage.stop().get0();
+            _as.stop().get();
         }
     }
 
@@ -143,9 +150,9 @@ struct mux_state_machine_fixture {
         return storage::log_config(
           _data_dir,
           100_MiB,
-          storage::debug_sanitize_files::yes,
           ss::default_priority_class(),
-          storage::with_cache::yes);
+          storage::with_cache::yes,
+          storage::make_sanitized_file_config());
     }
 
     model::broker self_broker() {
@@ -184,10 +191,11 @@ struct mux_state_machine_fixture {
 
     ss::sstring _data_dir;
     cluster::consensus_ptr _raft;
+    ss::sharded<ss::abort_source> _as;
     ss::sharded<rpc::connection_cache> _connections;
     ss::sharded<storage::api> _storage;
     ss::sharded<features::feature_table> _feature_table;
     ss::sharded<raft::group_manager> _group_mgr;
-    ss::sharded<raft::recovery_throttle> _recovery_throttle;
+    ss::sharded<raft::coordinated_recovery_throttle> _recovery_throttle;
     bool _started = false;
 };

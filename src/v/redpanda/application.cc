@@ -11,6 +11,7 @@
 
 #include "archival/fwd.h"
 #include "archival/ntp_archiver_service.h"
+#include "archival/scrubber.h"
 #include "archival/upload_controller.h"
 #include "archival/upload_housekeeping_service.h"
 #include "cli_parser.h"
@@ -61,7 +62,6 @@
 #include "features/fwd.h"
 #include "kafka/client/configuration.h"
 #include "kafka/server/coordinator_ntp_mapper.h"
-#include "kafka/server/fetch_session_cache.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/queue_depth_monitor.h"
@@ -75,9 +75,10 @@
 #include "model/metadata.h"
 #include "net/server.h"
 #include "pandaproxy/rest/api.h"
+#include "pandaproxy/rest/configuration.h"
 #include "pandaproxy/schema_registry/api.h"
+#include "raft/coordinated_recovery_throttle.h"
 #include "raft/group_manager.h"
-#include "raft/recovery_throttle.h"
 #include "raft/service.h"
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/io_priority.h"
@@ -145,6 +146,20 @@ static void set_local_kafka_client_config(
     }
 }
 
+static void set_pp_kafka_client_defaults(
+  pandaproxy::rest::configuration& proxy_config,
+  kafka::client::configuration& client_config) {
+    // override pandaparoxy_client.consumer_session_timeout_ms with
+    // pandaproxy.consumer_instance_timeout_ms
+    client_config.consumer_session_timeout.set_value(
+      proxy_config.consumer_instance_timeout.value());
+
+    if (!client_config.client_identifier.is_overriden()) {
+        client_config.client_identifier.set_value(
+          std::make_optional<ss::sstring>("pandaproxy_client"));
+    }
+}
+
 static void
 set_sr_kafka_client_defaults(kafka::client::configuration& client_config) {
     if (!client_config.produce_batch_delay.is_overriden()) {
@@ -155,6 +170,10 @@ set_sr_kafka_client_defaults(kafka::client::configuration& client_config) {
     }
     if (!client_config.produce_batch_size_bytes.is_overriden()) {
         client_config.produce_batch_size_bytes.set_value(int32_t(0));
+    }
+    if (!client_config.client_identifier.is_overriden()) {
+        client_config.client_identifier.set_value(
+          std::make_optional<ss::sstring>("schema_registry_client"));
     }
 }
 
@@ -359,6 +378,7 @@ int application::run(int ac, char** av) {
                 wire_up_and_start(app_signal);
                 post_start_tasks();
                 app_signal.wait().get();
+                trigger_abort_source();
                 vlog(_log.info, "Stopping...");
             } catch (const ss::abort_requested_exception&) {
                 vlog(_log.info, "Redpanda startup aborted");
@@ -650,10 +670,7 @@ void application::hydrate_config(const po::variables_map& cfg) {
         } else {
             set_local_kafka_client_config(_proxy_client_config, config::node());
         }
-        // override pandaparoxy_client.consumer_session_timeout_ms with
-        // pandaproxy.consumer_instance_timeout_ms
-        _proxy_client_config->consumer_session_timeout.set_value(
-          _proxy_config->consumer_instance_timeout.value());
+        set_pp_kafka_client_defaults(*_proxy_config, *_proxy_client_config);
         config_printer("pandaproxy", *_proxy_config);
         config_printer("pandaproxy_client", *_proxy_client_config);
     }
@@ -835,10 +852,25 @@ void application::configure_admin_server() {
       .get();
 }
 
-static storage::kvstore_config kvstore_config_from_global_config() {
+static std::optional<storage::file_sanitize_config>
+read_file_sanitizer_config() {
+    std::optional<storage::file_sanitize_config> file_config = std::nullopt;
+    if (config::node().storage_failure_injection_config_path()) {
+        file_config
+          = storage::make_finjector_file_config(
+              config::node().storage_failure_injection_config_path().value())
+              .get();
+    }
+
+    return file_config;
+}
+
+static storage::kvstore_config kvstore_config_from_global_config(
+  std::optional<storage::file_sanitize_config> sanitizer_config) {
     /*
-     * The key-value store is rooted at the configured data directory, and
-     * the internal kvstore topic-namespace results in a storage layout of:
+     * The key-value store is rooted at the configured data directory,
+     * and the internal kvstore topic-namespace results in a storage
+     * layout of:
      *
      *    /var/lib/redpanda/data/
      *       - redpanda/kvstore/
@@ -850,11 +882,12 @@ static storage::kvstore_config kvstore_config_from_global_config() {
       config::shard_local_cfg().kvstore_max_segment_size(),
       config::shard_local_cfg().kvstore_flush_interval.bind(),
       config::node().data_directory().as_sstring(),
-      storage::debug_sanitize_files::no);
+      sanitizer_config);
 }
 
-static storage::log_config
-manager_config_from_global_config(scheduling_groups& sgs) {
+static storage::log_config manager_config_from_global_config(
+  scheduling_groups& sgs,
+  std::optional<storage::file_sanitize_config> sanitizer_config) {
     return storage::log_config(
       config::node().data_directory().as_sstring(),
       config::shard_local_cfg().log_segment_size.bind(),
@@ -862,7 +895,6 @@ manager_config_from_global_config(scheduling_groups& sgs) {
       config::shard_local_cfg().max_compacted_log_segment_size.bind(),
       storage::jitter_percents(
         config::shard_local_cfg().log_segment_size_jitter_percent()),
-      storage::debug_sanitize_files::no,
       priority_manager::local().compaction_priority(),
       config::shard_local_cfg().retention_bytes.bind(),
       config::shard_local_cfg().log_compaction_interval_ms.bind(),
@@ -877,7 +909,8 @@ manager_config_from_global_config(scheduling_groups& sgs) {
         = config::shard_local_cfg().reclaim_batch_cache_min_free(),
       },
       config::shard_local_cfg().readers_cache_eviction_timeout_ms(),
-      sgs.compaction_sg());
+      sgs.compaction_sg(),
+      std::move(sanitizer_config));
 }
 
 static storage::backlog_controller_config compaction_controller_config(
@@ -999,15 +1032,23 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
 
     // cluster
     syschecks::systemd_message("Initializing connection cache").get();
-    construct_service(_connection_cache).get();
+    construct_service(_connection_cache, std::ref(_as)).get();
     syschecks::systemd_message("Building shard-lookup tables").get();
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing raft recovery throttle").get();
     recovery_throttle
-      .start(ss::sharded_parameter([] {
-          return config::shard_local_cfg().raft_learner_recovery_rate.bind();
-      }))
+      .start(
+        ss::sharded_parameter([] {
+            return config::shard_local_cfg().raft_learner_recovery_rate.bind();
+        }),
+        ss::sharded_parameter([] {
+            return config::shard_local_cfg()
+              .raft_recovery_throttle_disable_dynamic_mode.bind();
+        }))
+      .get();
+
+    recovery_throttle.invoke_on_all(&raft::coordinated_recovery_throttle::start)
       .get();
 
     syschecks::systemd_message("Intializing raft group manager").get();
@@ -1044,7 +1085,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
     // that are being throttled are released so that they can make be quickly
     // shutdown by the group manager.
     _deferred.emplace_back([this] {
-        recovery_throttle.invoke_on_all(&raft::recovery_throttle::shutdown)
+        recovery_throttle
+          .invoke_on_all(&raft::coordinated_recovery_throttle::shutdown)
           .get();
         raft_group_manager.stop().get();
         recovery_throttle.stop().get();
@@ -1149,6 +1191,36 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(cloud_storage_api));
     controller->wire_up().get0();
 
+    if (archival_storage_enabled()) {
+        construct_service(
+          _archival_scrubber,
+          ss::sharded_parameter(
+            [&api = cloud_storage_api]() { return std::ref(api.local()); }),
+          ss::sharded_parameter([&t = controller->get_topics_state()]() {
+              return std::ref(t.local());
+          }),
+          std::ref(controller->get_topics_frontend()),
+          std::ref(controller->get_members_table()))
+          .get();
+
+        _archival_scrubber
+          .invoke_on_all([&housekeeping = _archival_upload_housekeeping](
+                           archival::scrubber& s) {
+              housekeeping.local().register_jobs({s});
+          })
+          .get();
+
+        _deferred.emplace_back([this] {
+            _archival_scrubber
+              .invoke_on_all([&housekeeping = _archival_upload_housekeeping,
+                              this](archival::scrubber& s) {
+                  vlog(_log.debug, "Deregistering scrubber housekeeping jobs");
+                  housekeeping.local().deregister_jobs({s});
+              })
+              .get();
+        });
+    }
+
     construct_single_service_sharded(
       self_test_backend,
       node_id,
@@ -1174,7 +1246,8 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       std::ref(feature_table),
       std::ref(node_status_table),
       ss::sharded_parameter(
-        [] { return config::shard_local_cfg().node_status_interval.bind(); }))
+        [] { return config::shard_local_cfg().node_status_interval.bind(); }),
+      std::ref(_as))
       .get();
 
     syschecks::systemd_message("Creating kafka metadata cache").get();
@@ -1524,20 +1597,14 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         std::ref(usage_manager),
         std::ref(shard_table),
         std::ref(partition_manager),
-        std::ref(fetch_session_cache),
         std::ref(id_allocator_frontend),
         std::ref(controller->get_credential_store()),
         std::ref(controller->get_authorizer()),
         std::ref(controller->get_security_frontend()),
         std::ref(controller->get_api()),
         std::ref(tx_gateway_frontend),
-        std::ref(cp_partition_manager),
         qdc_config,
         std::ref(*thread_worker))
-      .get();
-    construct_service(
-      fetch_session_cache,
-      config::shard_local_cfg().fetch_session_eviction_timeout_ms())
       .get();
     construct_service(
       _compaction_controller,
@@ -1562,6 +1629,10 @@ application::set_proxy_client_config(ss::sstring name, std::any val) {
     return _proxy->set_client_config(std::move(name), std::move(val));
 }
 
+void application::trigger_abort_source() {
+    _as.invoke_on_all([](auto& local_as) { local_as.request_abort(); }).get();
+}
+
 void application::wire_up_bootstrap_services() {
     // Wire up local storage.
     ss::smp::invoke_on_all([] {
@@ -1581,11 +1652,16 @@ void application::wire_up_bootstrap_services() {
       std::ref(storage))
       .get();
 
+    const auto sanitizer_config = read_file_sanitizer_config();
+
     construct_service(
       storage,
-      []() { return kvstore_config_from_global_config(); },
-      [this]() {
-          auto log_cfg = manager_config_from_global_config(sched_groups);
+      [c = sanitizer_config]() mutable {
+          return kvstore_config_from_global_config(std::move(c));
+      },
+      [this, c = sanitizer_config]() mutable {
+          auto log_cfg = manager_config_from_global_config(
+            sched_groups, std::move(c));
           log_cfg.reclaim_opts.background_reclaimer_sg
             = sched_groups.cache_background_reclaim_sg();
           return log_cfg;
@@ -1812,6 +1888,10 @@ void application::start_bootstrap_services() {
 }
 
 void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
+    // Setup the app level abort service
+    construct_service(_as).get();
+
+    // Bootstrap services.
     wire_up_bootstrap_services();
     start_bootstrap_services();
 
@@ -2090,6 +2170,26 @@ void application::start_kafka(
       .local()
       .await_membership(node_id, app_signal.abort_source())
       .get();
+
+    // Before starting the Kafka API, wait for the cluster ID to be initialized,
+    // because Kafka clients interpret a changing cluster ID as a client
+    // connecting to multiple clusters and print warnings.
+    if (
+      !config::shard_local_cfg().cluster_id().has_value()
+      && feature_table.local().get_original_version()
+           >= cluster::cluster_version{10}) {
+        // This check only applies for clusters created with Redpanda >=23.2,
+        // because this is the version that has fast initialization of
+        // cluster_id, whereas older versions may wait several minutes to
+        // initialize it, causing issues during fast upgrades where the previous
+        // version may have run too briefly to have initialized cluster_id
+        vlog(_log.info, "Waiting for Cluster ID to initialize...");
+        ss::condition_variable cvar;
+        auto binding = config::shard_local_cfg().cluster_id.bind();
+        binding.watch([&cvar] { cvar.signal(); });
+        cvar.wait().get();
+    }
+
     _kafka_server.invoke_on_all(&net::server::start).get();
     vlog(
       _log.info,

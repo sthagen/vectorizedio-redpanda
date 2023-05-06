@@ -537,13 +537,13 @@ FIXTURE_TEST(test_collected_log_recovery, raft_test_fixture) {
     info("Compacting log of node: {}", leader_id);
     retry_with_leader(gr, 5, 2s, [first_ts, &as](raft_node& n) {
         return n.log
-          ->compact(storage::compaction_config(
+          ->housekeeping(storage::housekeeping_config(
             first_ts,
             100_MiB,
             model::offset::max(),
             ss::default_priority_class(),
             as,
-            storage::debug_sanitize_files::yes))
+            storage::ntp_sanitizer_config{.sanitize_only = true}))
           .then([] { return true; });
     }).get0();
 

@@ -22,18 +22,23 @@
 #include <absl/container/flat_hash_set.h>
 #include <boost/test/tools/old/interface.hpp>
 
-void validate_replica_set_diversity(
-  const std::vector<cluster::partition_assignment> assignments) {
+static void validate_replica_set_diversity(
+  const std::vector<model::broker_shard>& replicas) {
+    if (replicas.size() > 1) {
+        auto sentinel = replicas.front();
+        BOOST_TEST_REQUIRE(std::all_of(
+          std::next(replicas.begin()),
+          replicas.end(),
+          [sentinel](const model::broker_shard bs) {
+              return sentinel.node_id != bs.node_id;
+          }));
+    }
+}
+
+static void validate_replica_set_diversity(
+  const ss::chunked_fifo<cluster::partition_assignment>& assignments) {
     for (const auto& assignment : assignments) {
-        if (assignment.replicas.size() > 1) {
-            auto sentinel = assignment.replicas.front();
-            BOOST_TEST_REQUIRE(std::all_of(
-              std::next(assignment.replicas.begin()),
-              assignment.replicas.end(),
-              [sentinel](const model::broker_shard bs) {
-                  return sentinel.node_id != bs.node_id;
-              }));
-        }
+        validate_replica_set_diversity(assignment.replicas);
     }
 }
 
@@ -151,7 +156,7 @@ FIXTURE_TEST(diverse_replica_sets, partition_allocator_fixture) {
         auto req = make_allocation_request(1, r);
         auto result = allocator.allocate(std::move(req)).get();
         BOOST_REQUIRE(result);
-        auto assignments = result.value()->get_assignments();
+        auto assignments = result.value()->copy_assignments();
         BOOST_REQUIRE(assignments.size() == 1);
         auto replicas = assignments.front().replicas;
         // we need to sort the replica set
@@ -348,7 +353,7 @@ FIXTURE_TEST(allocator_exception_safety_test, partition_allocator_fixture) {
     auto capacity = max_capacity();
     for (int i = 0; i < 500; ++i) {
         auto req = make_allocation_request(1, 1);
-        req.partitions[0].constraints.hard_constraints.push_back(
+        req.partitions.front().constraints.hard_constraints.push_back(
           ss::make_lw_shared<cluster::hard_constraint>(random_evaluator()));
         try {
             auto res = allocator.allocate(std::move(req)).get();
@@ -428,7 +433,7 @@ FIXTURE_TEST(change_replication_factor, partition_allocator_fixture) {
       cluster::partition_allocation_domains::common);
 
     BOOST_CHECK_EQUAL(expected_success.has_value(), true);
-    validate_replica_set_diversity(expected_success.value().get_assignments());
+    validate_replica_set_diversity({expected_success.value().replicas()});
 }
 FIXTURE_TEST(rack_aware_assignment_1, partition_allocator_fixture) {
     std::vector<std::tuple<int, model::rack_id, int>> id_rack_ncpu = {

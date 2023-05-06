@@ -97,7 +97,8 @@ consensus::consensus(
   consensus_client_protocol client,
   consensus::leader_cb_t cb,
   storage::api& storage,
-  std::optional<std::reference_wrapper<recovery_throttle>> recovery_throttle,
+  std::optional<std::reference_wrapper<coordinated_recovery_throttle>>
+    recovery_throttle,
   recovery_memory_quota& recovery_mem_quota,
   features::feature_table& ft,
   std::optional<voter_priority> voter_priority_override,
@@ -1841,6 +1842,8 @@ consensus::do_append_entries(append_entries_request&& r) {
           lstats.dirty_offset, r.meta.last_visible_index);
         // on the follower leader control visibility of entries in the log
         maybe_update_last_visible_index(last_visible);
+        _last_leader_visible_offset = std::max(
+          r.meta.last_visible_index, _last_leader_visible_offset);
         return maybe_update_follower_commit_idx(
                  model::offset(r.meta.commit_index))
           .then([reply = std::move(reply)]() mutable {
@@ -1930,6 +1933,8 @@ consensus::do_append_entries(append_entries_request&& r) {
           auto f = ss::make_ready_future<>();
           auto last_visible = std::min(ofs.last_offset, m.last_visible_index);
           maybe_update_last_visible_index(last_visible);
+          _last_leader_visible_offset = std::max(
+            m.last_visible_index, _last_leader_visible_offset);
           return maybe_update_follower_commit_idx(model::offset(m.commit_index))
             .then([this, ofs, target] {
                 return make_append_entries_reply(target, ofs);

@@ -151,8 +151,12 @@ ss::future<> ntp_archiver::start() {
 }
 
 void ntp_archiver::notify_leadership(std::optional<model::node_id> leader_id) {
-    if (leader_id && *leader_id == _parent.raft()->self().id()) {
+    bool is_leader = leader_id && *leader_id == _parent.raft()->self().id();
+    if (is_leader) {
         _leader_cond.signal();
+    }
+    if (_local_segment_merger) {
+        _local_segment_merger->set_enabled(is_leader);
     }
 }
 
@@ -883,7 +887,7 @@ ntp_archiver::segment_path_for_candidate(const upload_candidate& candidate) {
 static std::pair<ss::input_stream<char>, ss::input_stream<char>>
 split_segment_stream(
   upload_candidate candidate, ss::io_priority_class priority) {
-    return input_stream_fanout<2>(
+    auto res = input_stream_fanout<2>(
       storage::concat_segment_reader_view{
         candidate.sources,
         candidate.file_offset,
@@ -891,6 +895,8 @@ split_segment_stream(
         priority}
         .take_stream(),
       config::shard_local_cfg().storage_read_readahead_count());
+    return std::make_pair(
+      std::move(std::get<0>(res)), std::move(std::get<1>(res)));
 }
 
 ss::future<cloud_storage::upload_result> ntp_archiver::do_upload_segment(
