@@ -319,25 +319,67 @@ public:
                   "Invoking 'read_some' on current log reader with config: "
                   "{}",
                   _reader->config());
-                auto result = co_await _reader->read_some(deadline, *_ot_state);
-                if (!result) {
+
+                try {
+                    auto result = co_await _reader->read_some(
+                      deadline, *_ot_state);
+                    if (!result) {
+                        vlog(
+                          _ctxlog.debug,
+                          "Error while reading from stream '{}'",
+                          result.error());
+                        co_await set_end_of_stream();
+                        throw std::system_error(result.error());
+                    }
+                    data_t d = std::move(result.value());
+                    for (const auto& batch : d) {
+                        _partition->_probe.add_bytes_read(
+                          batch.header().size_bytes);
+                        _partition->_probe.add_records_read(
+                          batch.record_count());
+                    }
+                    if (
+                      _first_produced_offset == model::offset{} && !d.empty()) {
+                        _first_produced_offset = d.front().base_offset();
+                    }
+                    co_return storage_t{std::move(d)};
+                } catch (const stuck_reader_exception& ex) {
                     vlog(
-                      _ctxlog.debug,
-                      "Error while reading from stream '{}'",
-                      result.error());
-                    co_await set_end_of_stream();
-                    throw std::system_error(result.error());
+                      _ctxlog.warn,
+                      "stuck reader: current rp offset: {}, max rp offset: {}",
+                      ex.rp_offset,
+                      _reader->max_rp_offset());
+
+                    // If the reader is stuck because of a mismatch between
+                    // segment data and manifest entry, set reader to EOF and
+                    // try to reset reader on the next loop iteration. We only
+                    // do this when the reader has not reached eof. For example,
+                    // the segment ends at offset 10 but the manifest has max
+                    // offset at 11 for the segment, with offset 11 actually
+                    // present in the next segment. When the reader is stuck,
+                    // the current offset will be 10 which we will not be able
+                    // to read from. Switching to the next segment should enable
+                    // reads to proceed.
+                    if (
+                      model::next_offset(ex.rp_offset)
+                        >= _next_segment_base_offset
+                      && !_reader->is_eof()) {
+                        vlog(
+                          _ctxlog.info,
+                          "mismatch between current segment end and manifest "
+                          "data: current rp offset {}, manifest max rp offset "
+                          "{}, next segment base offset {}, reader is EOF: {}. "
+                          "set EOF on reader and try to "
+                          "reset",
+                          ex.rp_offset,
+                          _reader->max_rp_offset(),
+                          _next_segment_base_offset,
+                          _reader->is_eof());
+                        _reader->set_eof();
+                        continue;
+                    }
+                    throw;
                 }
-                data_t d = std::move(result.value());
-                for (const auto& batch : d) {
-                    _partition->_probe.add_bytes_read(
-                      batch.header().size_bytes);
-                    _partition->_probe.add_records_read(batch.record_count());
-                }
-                if (_first_produced_offset == model::offset{} && !d.empty()) {
-                    _first_produced_offset = d.front().base_offset();
-                }
-                co_return storage_t{std::move(d)};
             }
         } catch (const ss::gate_closed_exception&) {
             vlog(
@@ -455,6 +497,11 @@ private:
           "{}",
           _reader->config().start_offset,
           _reader->max_rp_offset());
+
+        // The next offset should be below the next segment base offset if the
+        // reader has not finished. If the next offset to be read from has
+        // reached the next segment but the reader is not finished, then the
+        // state is inconsistent.
         if (_reader->is_eof()) {
             auto prev_max_offset = _reader->max_rp_offset();
             auto config = _reader->config();
@@ -839,8 +886,8 @@ remote_partition::finalize(ss::abort_source& as) {
     if (manifest_get_result != download_result::success) {
         vlog(
           _ctxlog.debug,
-          "Failed to fetch manifest during finalize(), maybe another node"
-          "already completed deletino. Error: {}",
+          "Failed to fetch manifest during finalize(), maybe another node "
+          "already completed deletion. Error: {}",
           manifest_get_result);
         co_return finalize_result{.get_status = manifest_get_result};
     }
@@ -905,10 +952,18 @@ ss::future<remote_partition::erase_result> remote_partition::erase(
     // and construct a special one.
     retry_chain_node local_rtc(as, erase_timeout, erase_backoff);
 
+    auto replaced_segments = manifest.replaced_segments();
+
     // Erase all segments
+    // Loop over normal segments and replaced (pending deletion) segments
+    // at the same time, to batch them together into as few DeleteObjects
+    // requests as possible
     const size_t batch_size = 1000;
     auto segment_i = manifest.begin();
-    while (segment_i != manifest.end()) {
+    auto replaced_i = replaced_segments.begin();
+
+    while (segment_i != manifest.end()
+           || replaced_i != replaced_segments.end()) {
         std::vector<cloud_storage_clients::object_key> batch_keys;
         batch_keys.reserve(batch_size);
 
@@ -918,9 +973,22 @@ ss::future<remote_partition::erase_result> remote_partition::erase(
         std::vector<cloud_storage_clients::object_key> index_keys;
         index_keys.reserve(batch_size);
 
-        for (size_t k = 0; k < batch_size && segment_i != manifest.end();
-             ++k, ++segment_i) {
-            auto segment_path = manifest.generate_segment_path(*segment_i);
+        for (
+          size_t k = 0;
+          k < batch_size
+          && (segment_i != manifest.end() || replaced_i != replaced_segments.end());
+          ++k) {
+            remote_segment_path segment_path;
+            if (segment_i != manifest.end()) {
+                segment_path = manifest.generate_segment_path(*segment_i);
+                ++segment_i;
+            } else {
+                vassert(
+                  replaced_i != replaced_segments.end(),
+                  "Loop condition should ensure one iterator is always valid");
+                segment_path = manifest.generate_segment_path(*replaced_i);
+                ++replaced_i;
+            }
             batch_keys.emplace_back(segment_path);
             tx_batch_keys.emplace_back(
               tx_range_manifest(segment_path).get_manifest_path());

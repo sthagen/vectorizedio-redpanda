@@ -45,23 +45,23 @@ func TestRedpandaProperties(t *testing.T) {
 
 func TestFlatProperties(t *testing.T) {
 	config := configuration.GlobalConfiguration{Mode: configuration.GlobalConfigurationModeCentralized}
-	err := config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "node_uuid": "uuid"})
+	err := config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "redpanda.node_id": "33"})
 	require.NoError(t, err)
+	assert.Equal(t, 33, *config.NodeConfiguration.Redpanda.ID)
 	assert.Equal(t, "b", config.ClusterConfiguration["a"])
-	assert.Equal(t, "uuid", config.NodeConfiguration.NodeUUID)
 	assert.NotContains(t, config.NodeConfiguration.Redpanda.Other, "a")
 
 	config = configuration.GlobalConfiguration{Mode: configuration.GlobalConfigurationModeClassic}
-	err = config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "node_uuid": "uuid"})
+	err = config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "redpanda.node_id": "33"})
 	require.NoError(t, err)
-	assert.Equal(t, "uuid", config.NodeConfiguration.NodeUUID)
+	assert.Equal(t, 33, *config.NodeConfiguration.Redpanda.ID)
 	assert.Equal(t, "b", config.NodeConfiguration.Redpanda.Other["a"])
 	assert.NotContains(t, config.ClusterConfiguration, "a")
 
 	config = configuration.GlobalConfiguration{Mode: configuration.GlobalConfigurationModeMixed}
-	err = config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "node_uuid": "uuid"})
+	err = config.SetAdditionalFlatProperties(map[string]string{"redpanda.a": "b", "redpanda.node_id": "33"})
 	require.NoError(t, err)
-	assert.Equal(t, "uuid", config.NodeConfiguration.NodeUUID)
+	assert.Equal(t, 33, *config.NodeConfiguration.Redpanda.ID)
 	assert.Equal(t, "b", config.NodeConfiguration.Redpanda.Other["a"])
 	assert.Equal(t, "b", config.ClusterConfiguration["a"])
 }
@@ -109,6 +109,7 @@ func TestStringSliceProperties(t *testing.T) {
 		configuration.GlobalConfigurationModeCentralized,
 		configuration.GlobalConfigurationModeMixed,
 	}
+
 	for i, mode := range tests {
 		func(m configuration.GlobalConfigurationMode) bool {
 			return t.Run(fmt.Sprintf("test property slices %d", i), func(t *testing.T) {

@@ -225,6 +225,35 @@ FIXTURE_TEST(test_scan_by_kafka_offset, cloud_storage_fixture) {
     BOOST_REQUIRE(check_fetch(*this, kafka::offset(10), false));
 }
 
+FIXTURE_TEST(test_overlapping_segments, cloud_storage_fixture) {
+    batch_t data = {
+      .num_records = 1, .type = model::record_batch_type::raft_data};
+    batch_t conf = {
+      .num_records = 1, .type = model::record_batch_type::raft_configuration};
+    const std::vector<std::vector<batch_t>> batch_types = {
+      {conf, conf, conf, data, data, data},
+      {conf, conf, conf, data, data, data},
+      {conf, conf, conf, data, data, data},
+    };
+
+    auto segments = make_segments(batch_types, model::offset(0));
+    cloud_storage::partition_manifest manifest(manifest_ntp, manifest_revision);
+
+    auto expectations = make_imposter_expectations(
+      manifest, segments, false, model::offset_delta(0));
+
+    std::stringstream sstr;
+    manifest.serialize(sstr);
+
+    auto body = sstr.str();
+    std::string_view to_replace = "\"committed_offset\":5";
+    body.replace(
+      body.find(to_replace), to_replace.size(), "\"committed_offset\":6");
+    expectations.back().body = body;
+    set_expectations_and_listen(expectations);
+    BOOST_REQUIRE(check_scan(*this, kafka::offset(0), 9));
+}
+
 FIXTURE_TEST(test_scan_by_kafka_offset_truncated, cloud_storage_fixture) {
     // mo: 6    11 12   17
     //     [b    ] [c    ] end

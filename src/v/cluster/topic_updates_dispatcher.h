@@ -73,7 +73,8 @@ public:
       create_non_replicable_topic_cmd,
       cancel_moving_partition_replicas_cmd,
       move_topic_replicas_cmd,
-      revert_cancel_partition_move_cmd>();
+      revert_cancel_partition_move_cmd,
+      force_partition_reconfiguration_cmd>();
 
     bool is_batch_applicable(const model::record_batch& batch) const {
         return batch.header().type
@@ -104,13 +105,16 @@ private:
     ss::future<std::error_code> apply(move_topic_replicas_cmd, model::offset);
     ss::future<std::error_code>
       apply(revert_cancel_partition_move_cmd, model::offset);
+    ss::future<std::error_code>
+      apply(force_partition_reconfiguration_cmd, model::offset);
 
     using ntp_leader = std::pair<model::ntp, model::node_id>;
 
     ss::future<>
     update_leaders_with_estimates(ss::chunked_fifo<ntp_leader> leaders);
     template<typename T>
-    void update_allocations(const T&, partition_allocation_domain);
+    void
+    add_allocations_for_new_partitions(const T&, partition_allocation_domain);
 
     void deallocate_topic(
       const model::topic_namespace&,
