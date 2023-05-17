@@ -442,6 +442,12 @@ class Admin:
                 return False
         return True
 
+    def unsafe_reset_cloud_metadata(self, topic, partition, manifest):
+        return self._request(
+            'POST',
+            f"debug/unsafe_reset_metadata/{topic}/{partition}",
+            json=manifest)
+
     def put_feature(self, feature_name, body):
         return self._request("PUT", f"features/{feature_name}", json=body)
 
@@ -631,6 +637,13 @@ class Admin:
         params = "&".join([f"{k}={v}" for k, v in partition_info.items()])
         path = f"transaction/{tid}/delete_partition/?{params}"
         return self._request('post', path, node=node)
+
+    def find_tx_coordinator(self, tid, node=None):
+        """
+        Find tx coordinator by tx.id
+        """
+        path = f"transaction/{tid}/find_coordinator"
+        return self._request('get', path, node=node)
 
     def set_partition_replicas(self,
                                topic,

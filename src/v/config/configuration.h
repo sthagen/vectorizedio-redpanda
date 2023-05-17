@@ -112,6 +112,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> tm_sync_timeout_ms;
     deprecated_property tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
+    property<std::chrono::milliseconds> find_coordinator_timeout_ms;
     property<uint32_t> seq_table_min_size;
     property<std::chrono::milliseconds> tx_timeout_delay_ms;
     deprecated_property rm_violation_recovery_policy;
@@ -403,9 +404,6 @@ struct configuration final : public config_store {
     // security controls
     property<bool> legacy_permit_unsafe_log_operation;
     property<std::chrono::seconds> legacy_unsafe_log_warning_interval_sec;
-
-    bounded_property<double, numeric_bounds> kafka_memory_share_for_fetch;
-    property<size_t> kafka_memory_batch_size_estimate_for_fetch;
 
     configuration();
 

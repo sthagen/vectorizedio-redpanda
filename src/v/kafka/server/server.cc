@@ -98,6 +98,7 @@ server::server(
   ss::sharded<cluster::security_frontend>& sec_fe,
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
+  ss::sharded<cluster::tx_registry_frontend>& tx_registry_frontend,
   std::optional<qdc_monitor::config> qdc_config,
   ssx::thread_worker& tw) noexcept
   : net::server(cfg, klog)
@@ -125,46 +126,20 @@ server::server(
   , _security_frontend(sec_fe)
   , _controller_api(controller_api)
   , _tx_gateway_frontend(tx_gateway_frontend)
+  , _tx_registry_frontend(tx_registry_frontend)
   , _mtls_principal_mapper(
       config::shard_local_cfg().kafka_mtls_principal_mapping_rules.bind())
   , _gssapi_principal_mapper(
       config::shard_local_cfg().sasl_kerberos_principal_mapping.bind())
   , _krb_configurator(config::shard_local_cfg().sasl_kerberos_config.bind())
-  , _memory_fetch_sem(
-      static_cast<size_t>(
-        cfg->local().max_service_memory_per_core
-        * config::shard_local_cfg().kafka_memory_share_for_fetch()),
-      "kafka/server-mem-fetch")
   , _thread_worker(tw)
   , _replica_selector(
       std::make_unique<rack_aware_replica_selector>(_metadata_cache.local())) {
-    vlog(
-      klog.debug,
-      "Starting kafka server with {} byte limit on fetch requests",
-      _memory_fetch_sem.available_units());
     if (qdc_config) {
         _qdc_mon.emplace(*qdc_config);
     }
-    setup_metrics();
     _probe.setup_metrics();
     _probe.setup_public_metrics();
-}
-
-void server::setup_metrics() {
-    namespace sm = ss::metrics;
-    if (config::shard_local_cfg().disable_metrics()) {
-        return;
-    }
-
-    _metrics.add_group(
-      prometheus_sanitize::metrics_name(cfg.name),
-      {
-        sm::make_total_bytes(
-          "fetch_avail_mem_bytes",
-          [this] { return _memory_fetch_sem.current(); },
-          sm::description(ssx::sformat(
-            "{}: Memory available for fetch request processing", cfg.name))),
-      });
 }
 
 ss::scheduling_group server::fetch_scheduling_group() const {

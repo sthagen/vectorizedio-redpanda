@@ -57,6 +57,7 @@ public:
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
+      ss::sharded<cluster::tx_registry_frontend>&,
       std::optional<qdc_monitor::config>,
       ssx::thread_worker&) noexcept;
 
@@ -99,6 +100,9 @@ public:
     }
     cluster::tx_gateway_frontend& tx_gateway_frontend() {
         return _tx_gateway_frontend.local();
+    }
+    cluster::tx_registry_frontend& tx_registry_frontend() {
+        return _tx_registry_frontend.local();
     }
     kafka::group_router& group_router() { return _group_router.local(); }
     cluster::shard_table& shard_table() { return _shard_table.local(); }
@@ -165,11 +169,7 @@ public:
         return *_replica_selector;
     }
 
-    ssx::semaphore& memory_fetch_sem() noexcept { return _memory_fetch_sem; }
-
 private:
-    void setup_metrics();
-
     ss::smp_service_group _smp_group;
     ss::scheduling_group _fetch_scheduling_group;
     ss::sharded<cluster::topics_frontend>& _topics_frontend;
@@ -191,15 +191,13 @@ private:
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
+    ss::sharded<cluster::tx_registry_frontend>& _tx_registry_frontend;
     std::optional<qdc_monitor> _qdc_mon;
     kafka::fetch_metadata_cache _fetch_metadata_cache;
     security::tls::principal_mapper _mtls_principal_mapper;
     security::gssapi_principal_mapper _gssapi_principal_mapper;
     security::krb5::configurator _krb_configurator;
-    ssx::semaphore _memory_fetch_sem;
-
     class latency_probe _probe;
-    ss::metrics::metric_groups _metrics;
     ssx::thread_worker& _thread_worker;
     std::unique_ptr<replica_selector> _replica_selector;
 };

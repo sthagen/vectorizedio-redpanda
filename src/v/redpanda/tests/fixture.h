@@ -114,8 +114,6 @@ public:
         app.wire_up_and_start(*app_signal, true);
 
         configs.start(ss::sstring("fixture_config")).get();
-        configs.local().max_service_memory_per_core
-          = memory_groups::rpc_total_memory();
 
         // used by request context builder
         proto = std::make_unique<kafka::server>(
@@ -138,6 +136,7 @@ public:
           app.controller->get_security_frontend(),
           app.controller->get_api(),
           app.tx_gateway_frontend,
+          app.tx_registry_frontend,
           std::nullopt,
           *app.thread_worker);
 
