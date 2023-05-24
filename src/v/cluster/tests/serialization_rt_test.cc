@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "cluster/commands.h"
+#include "cluster/controller_snapshot.h"
 #include "cluster/health_monitor_types.h"
 #include "cluster/metadata_dissemination_types.h"
 #include "cluster/tests/utils.h"
@@ -763,17 +764,16 @@ cluster::cluster_health_report random_cluster_health_report() {
     }
     std::vector<cluster::node_health_report> node_reports;
     for (auto i = 0, mi = random_generators::get_int(20); i < mi; ++i) {
-        std::vector<cluster::topic_status> topics;
+        ss::chunked_fifo<cluster::topic_status> topics;
         for (auto i = 0, mi = random_generators::get_int(20); i < mi; ++i) {
             topics.push_back(random_topic_status());
         }
-        auto report = cluster::node_health_report{
-          .id = tests::random_named_int<model::node_id>(),
-          .local_state = random_local_state(),
-          .topics = topics,
-          .include_drain_status = true, // so adl considers drain status
-          .drain_status = random_drain_status(),
-        };
+        auto report = cluster::node_health_report(
+          tests::random_named_int<model::node_id>(),
+          random_local_state(),
+          std::move(topics),
+          /*include_drain_status=*/true,
+          random_drain_status());
 
         // Reduce to an ADL-encodable state
         report.local_state.cache_disk = std::nullopt;
@@ -1304,14 +1304,6 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
         roundtrip_test(data);
     }
     {
-        cluster::join_request data{model::random_broker()};
-        roundtrip_test(data);
-    }
-    {
-        cluster::join_reply data{tests::random_bool()};
-        roundtrip_test(data);
-    }
-    {
         std::vector<uint8_t> node_uuid;
         for (int i = 0, mi = random_generators::get_int(100); i < mi; i++) {
             node_uuid.push_back(random_generators::get_int(255));
@@ -1325,7 +1317,8 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
     }
     {
         cluster::join_node_reply data{
-          tests::random_bool(),
+          tests::random_bool() ? cluster::join_node_reply::status_code::success
+                               : cluster::join_node_reply::status_code::error,
           tests::random_named_int<model::node_id>(),
         };
         roundtrip_test(data);
@@ -1652,17 +1645,16 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
         roundtrip_test(data);
     }
     {
-        std::vector<cluster::topic_status> topics;
+        ss::chunked_fifo<cluster::topic_status> topics;
         for (auto i = 0, mi = random_generators::get_int(20); i < mi; ++i) {
             topics.push_back(random_topic_status());
         }
-        cluster::node_health_report data{
-          .id = tests::random_named_int<model::node_id>(),
-          .local_state = random_local_state(),
-          .topics = topics,
-          .drain_status = random_drain_status(),
-        };
-        data.include_drain_status = true; // so adl considers drain status
+        cluster::node_health_report data(
+          tests::random_named_int<model::node_id>(),
+          random_local_state(),
+          std::move(topics),
+          true,
+          random_drain_status());
 
         // Squash local_state to a form that ADL represents, since we will
         // test ADL roundtrip.
@@ -1671,21 +1663,20 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
         roundtrip_test(data);
     }
     {
-        std::vector<cluster::topic_status> topics;
+        ss::chunked_fifo<cluster::topic_status> topics;
         for (auto i = 0, mi = random_generators::get_int(20); i < mi; ++i) {
             topics.push_back(random_topic_status());
         }
-        cluster::node_health_report report{
-          .id = tests::random_named_int<model::node_id>(),
-          .local_state = random_local_state(),
-          .topics = topics,
-          .drain_status = random_drain_status(),
-        };
+        cluster::node_health_report report(
+          tests::random_named_int<model::node_id>(),
+          random_local_state(),
+          std::move(topics),
+          true,
+          random_drain_status());
 
         // Squash to ADL-understood disk state
         report.local_state.cache_disk = report.local_state.data_disk;
 
-        report.include_drain_status = true; // so adl considers drain status
         cluster::get_node_health_reply data{
           .report = report,
         };
@@ -2327,4 +2318,46 @@ SEASTAR_THREAD_TEST_CASE(commands_serialization_test) {
           cluster::cancel_moving_partition_replicas_cmd_data(
             cluster::force_abort_update(tests::random_bool())));
     }
+}
+
+template<typename T>
+static void check_async_serde_no_forgotten_fields() {
+    // Check that there are no forgotten fields in the manual async serde
+    // serialization code of a type by comparing async and sync (generated
+    // automatically by reflection) serializations of a default-constructed
+    // object. We don't compare non-default values because it is just as easy
+    // to forget to add a field to the test as it is to the serialization
+    // code.
+    auto iobuf_to_bytes = [](iobuf buf) {
+        size_t len = buf.size_bytes();
+        iobuf_parser p{std::move(buf)};
+        return p.read_bytes(len);
+    };
+
+    iobuf sync_buf = serde::to_iobuf(T{});
+    iobuf async_buf;
+    serde::write_async(async_buf, T{}).get();
+
+    // This is rather tricky because a forgotten field at the end is
+    // indistinguishable from serialization by an older version and serde is
+    // designed to tolerate that. So we compare byte-by-byte. This is
+    // problematic for hash tables but hopefully they are all empty.
+
+    bytes sync_bytes = iobuf_to_bytes(std::move(sync_buf));
+    bytes async_bytes = iobuf_to_bytes(std::move(async_buf));
+    BOOST_CHECK_MESSAGE(
+      sync_bytes == async_bytes,
+      "Sync and async serializations differ for empty object of type "
+        << ss::pretty_type_name(typeid(T)));
+};
+
+SEASTAR_THREAD_TEST_CASE(test_controller_snapshot_serde_no_forgotten_fields) {
+    // Check for every controller snapshot part with manual async serialization
+    check_async_serde_no_forgotten_fields<cluster::controller_snapshot>();
+    check_async_serde_no_forgotten_fields<
+      cluster::controller_snapshot_parts::topics_t>();
+    check_async_serde_no_forgotten_fields<
+      cluster::controller_snapshot_parts::topics_t::topic_t>();
+    check_async_serde_no_forgotten_fields<
+      cluster::controller_snapshot_parts::security_t>();
 }
