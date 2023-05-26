@@ -592,6 +592,14 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
         co_return make_error_code(errc::shutting_down);
     }
 
+    if (!is_leader()) {
+        // Callers may expect that our offsets (including commit offset) are
+        // all correct after their barrier completes, so do not allow them
+        // to barrier if we are in the state where we are elected but have
+        // not yet finished replicating the first batch of the new term.
+        co_return raft::errc::not_leader;
+    }
+
     if (_vstate != vote_state::leader) {
         co_return result<model::offset>(make_error_code(errc::not_leader));
     }
@@ -1726,7 +1734,8 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
     }
 
     if (_voted_for.id()() < 0) {
-        return write_voted_for({r.node_id, _term})
+        auto node_id = r.node_id;
+        return write_voted_for({node_id, _term})
           .then_wrapped([this, reply = std::move(reply), r = std::move(r)](
                           ss::future<> f) mutable {
               bool granted = false;

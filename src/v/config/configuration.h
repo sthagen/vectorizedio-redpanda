@@ -233,6 +233,7 @@ struct configuration final : public config_store {
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_recv_buf;
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_send_buf;
     bounded_property<std::optional<size_t>> kafka_rpc_server_stream_recv_buf;
+    property<bool> kafka_enable_describe_log_dirs_remote_storage;
 
     // Archival storage
     property<bool> cloud_storage_enabled;
@@ -282,6 +283,8 @@ struct configuration final : public config_store {
       cloud_storage_graceful_transfer_timeout_ms;
     enum_property<model::cloud_storage_backend> cloud_storage_backend;
     property<std::optional<ss::sstring>> cloud_storage_credentials_host;
+    bounded_property<std::optional<size_t>>
+      cloud_storage_spillover_manifest_size;
 
     // Azure Blob Storage
     property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;

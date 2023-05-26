@@ -25,7 +25,7 @@ namespace detail {
  */
 template<typename T>
 concept numeric = requires(const T& x) {
-    {x % x};
+    { x % x };
     { x < x } -> std::same_as<bool>;
     { x > x } -> std::same_as<bool>;
 };
@@ -35,9 +35,7 @@ concept numeric = requires(const T& x) {
  * inner contained type as ::value_type
  */
 template<typename T>
-concept has_value_type = requires(T x) {
-    typename T::value_type;
-};
+concept has_value_type = requires(T x) { typename T::value_type; };
 
 /**
  * inner_type is a struct whose ::inner member reflects
@@ -147,9 +145,24 @@ public:
       , _bounds(bounds)
       , _example(generate_example()) {}
 
+    void set_value(std::any v) override {
+        property<T>::update_value(std::any_cast<T>(std::move(v)));
+    }
     bool set_value(YAML::Node n) override {
         auto val = std::move(n.as<T>());
+        return clamp_and_update(val);
+    }
 
+    std::optional<std::string_view> example() const override {
+        if (!_example.empty()) {
+            return _example;
+        } else {
+            return property<T>::example();
+        }
+    }
+
+private:
+    bool clamp_and_update(T val) {
         using outer_type = std::decay_t<T>;
 
         // If we somehow are applying an invalid value, clamp it
@@ -170,17 +183,8 @@ public:
         } else {
             return property<T>::update_value(std::move(_bounds.clamp(val)));
         }
-    };
-
-    std::optional<std::string_view> example() const override {
-        if (!_example.empty()) {
-            return _example;
-        } else {
-            return property<T>::example();
-        }
     }
 
-private:
     /*
      * Pre-generate an example for docs/api, if the explicit property
      * metadata does not provide one.

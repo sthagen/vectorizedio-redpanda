@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cisco-open/k8s-objectmatcher/patch"
+	"github.com/fluxcd/pkg/runtime/logger"
 	"github.com/prometheus/common/expfmt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -107,7 +108,7 @@ func (r *StatefulSetResource) runUpdate(
 
 func (r *StatefulSetResource) isClusterHealthy(ctx context.Context) error {
 	if !featuregates.ClusterHealth(r.pandaCluster.Status.Version) {
-		r.logger.V(debugLogLevel).Info("Cluster health endpoint is not available", "version", r.pandaCluster.Spec.Version)
+		r.logger.V(logger.DebugLevel).Info("Cluster health endpoint is not available", "version", r.pandaCluster.Spec.Version)
 		return nil
 	}
 
@@ -136,21 +137,29 @@ func (r *StatefulSetResource) isClusterHealthy(ctx context.Context) error {
 	return nil
 }
 
-func (r *StatefulSetResource) rollingUpdate(
-	ctx context.Context, template *corev1.PodTemplateSpec,
-) error {
+func (r *StatefulSetResource) getPodList(ctx context.Context) (*corev1.PodList, error) {
 	var podList corev1.PodList
 	err := r.List(ctx, &podList, &k8sclient.ListOptions{
 		Namespace:     r.pandaCluster.Namespace,
 		LabelSelector: labels.ForCluster(r.pandaCluster).AsClientSelector(),
 	})
 	if err != nil {
-		return fmt.Errorf("unable to list panda pods: %w", err)
+		return nil, fmt.Errorf("unable to list panda pods: %w", err)
 	}
 
 	sort.Slice(podList.Items, func(i, j int) bool {
 		return podList.Items[i].Name < podList.Items[j].Name
 	})
+	return &podList, nil
+}
+
+func (r *StatefulSetResource) rollingUpdate(
+	ctx context.Context, template *corev1.PodTemplateSpec,
+) error {
+	podList, err := r.getPodList(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting pods %w", err)
+	}
 
 	var artificialPod corev1.Pod
 	artificialPod.Annotations = template.Annotations

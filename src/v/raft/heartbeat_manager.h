@@ -23,6 +23,7 @@
 #include <seastar/util/log.hh>
 
 #include <absl/container/btree_map.h>
+#include <absl/container/node_hash_map.h>
 #include <boost/container/flat_set.hpp>
 
 namespace raft::details {
@@ -95,8 +96,8 @@ public:
         follower_request_meta(const follower_request_meta&) = delete;
         follower_request_meta(follower_request_meta&&) noexcept = default;
         follower_request_meta& operator=(const follower_request_meta&) = delete;
-        follower_request_meta&
-        operator=(follower_request_meta&&) noexcept = default;
+        follower_request_meta& operator=(follower_request_meta&&) noexcept
+          = default;
 
         consensus_ptr c;
         follower_req_seq seq;
@@ -108,7 +109,7 @@ public:
         node_heartbeat(
           model::node_id t,
           heartbeat_request req,
-          absl::btree_map<raft::group_id, follower_request_meta> seqs)
+          absl::node_hash_map<raft::group_id, follower_request_meta> seqs)
           : target(t)
           , request(std::move(req))
           , meta_map(std::move(seqs)) {}
@@ -117,7 +118,7 @@ public:
         heartbeat_request request;
         // each raft group has its own follower metadata hence we need map to
         // track a sequence per group
-        absl::btree_map<raft::group_id, follower_request_meta> meta_map;
+        absl::node_hash_map<raft::group_id, follower_request_meta> meta_map;
     };
 
     heartbeat_manager(
@@ -155,7 +156,7 @@ private:
     /// \param result if the node return successful heartbeats
     void process_reply(
       model::node_id n,
-      absl::btree_map<raft::group_id, follower_request_meta> groups,
+      const absl::node_hash_map<raft::group_id, follower_request_meta>& groups,
       result<heartbeat_reply> result);
 
     // private members

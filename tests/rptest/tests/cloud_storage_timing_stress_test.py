@@ -389,13 +389,11 @@ class CloudStorageTimingStressTest(RedpandaTest, PartitionMovementMixin):
         assert self.redpanda.metric_sum(
             "vectorized_cloud_storage_successful_downloads_total") > 0
 
-        assert self.redpanda.metric_sum(
-            "redpanda_cloud_storage_deleted_segments_total",
-            metrics_endpoint=MetricsEndpoint.PUBLIC_METRICS) > 0
+        bucket_view = BucketView(self.redpanda)
+        bucket_view.assert_segments_deleted(self.topic, partition=0)
 
         if "compact" in cleanup_policy:
             # Assert that compacted segment re-upload operated during the test
-            bucket_view = BucketView(self.redpanda)
             bucket_view.assert_at_least_n_uploaded_segments_compacted(
                 self.topic, partition=0, revision=self._initial_revision, n=1)
         else:
@@ -452,7 +450,6 @@ class CloudStorageTimingStressTest(RedpandaTest, PartitionMovementMixin):
             r"Error in hydraton loop: .*Connection reset by peer",
             r"failed to hydrate chunk.*Connection reset by peer",
             r"failed to hydrate chunk.*NotFound",
-            r"failed to hydrate chunk.*abort_requested"
         ])
     @parametrize(cleanup_policy="delete")
     @parametrize(cleanup_policy="compact,delete")
@@ -477,7 +474,6 @@ class CloudStorageTimingStressTest(RedpandaTest, PartitionMovementMixin):
             r"Error in hydraton loop: .*Connection reset by peer",
             r"failed to hydrate chunk.*Connection reset by peer",
             r"failed to hydrate chunk.*NotFound",
-            r"failed to hydrate chunk.*abort_requested"
         ])
     @parametrize(cleanup_policy="delete")
     @parametrize(cleanup_policy="compact,delete")

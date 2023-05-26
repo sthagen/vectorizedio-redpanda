@@ -1170,6 +1170,15 @@ configuration::configuration()
       // permit setting a max below the min).  The maximum is set to forbid
       // contiguous allocations beyond that size.
       {.min = 512, .max = 512_KiB, .align = 4_KiB})
+  , kafka_enable_describe_log_dirs_remote_storage(
+      *this,
+      "kafka_enable_describe_log_dirs_remote_storage",
+      "Whether to include tiered storage as a special remote:// directory in "
+      "DescribeLogDirs Kafka API requests.",
+      {.needs_restart = needs_restart::no,
+       .example = "false",
+       .visibility = visibility::user},
+      true)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",
@@ -1432,6 +1441,17 @@ configuration::configuration()
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       std::nullopt,
       &validate_non_empty_string_opt)
+  , cloud_storage_spillover_manifest_size(
+      *this,
+      "cloud_storage_spillover_manifest_size",
+      "The size of the manifest which can be offloaded to the cloud. If the "
+      "size of the local manifest stored in redpanda exceeds "
+      "cloud_storage_spillover_manifest_size x2 the spillover mechanism will "
+      "split the manifest into two parts and one of them will be uploaded to "
+      "S3.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt,
+      {.min = 4_KiB, .max = 4_MiB})
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",
