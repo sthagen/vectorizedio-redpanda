@@ -66,9 +66,9 @@ allocation_constraints partition_allocator::default_constraints(
     req.add(is_active());
 
     if (domain == partition_allocation_domains::common) {
-        req.add(least_allocated());
+        req.add(max_final_capacity());
     } else {
-        req.add(least_allocated_in_domain(domain));
+        req.add(max_final_capacity_in_domain(domain));
     }
     if (_enable_rack_awareness()) {
         req.add(distinct_rack_preferred(_members.local()));
@@ -380,16 +380,14 @@ result<model::broker_shard> partition_allocator::do_allocate_replica(
         }
     });
 
-    auto replica = _allocation_strategy.allocate_replica(
+    auto node = _allocation_strategy.choose_node(
       partition._replicas, effective_constraints, *_state, partition._domain);
-    if (!replica) {
-        return replica;
+    if (!node) {
+        return node.error();
     }
 
     revert.cancel();
-    partition.add_replica(replica.value(), prev);
-
-    return replica;
+    return partition.add_replica(node.value(), prev);
 }
 
 void partition_allocator::add_allocations(
@@ -405,6 +403,22 @@ void partition_allocator::remove_allocations(
   const partition_allocation_domain domain) {
     for (const auto& bs : to_remove) {
         _state->remove_allocation(bs, domain);
+    }
+}
+
+void partition_allocator::add_final_counts(
+  const std::vector<model::broker_shard>& to_add,
+  const partition_allocation_domain domain) {
+    for (const auto& bs : to_add) {
+        _state->add_final_count(bs, domain);
+    }
+}
+
+void partition_allocator::remove_final_counts(
+  const std::vector<model::broker_shard>& to_remove,
+  const partition_allocation_domain domain) {
+    for (const auto& bs : to_remove) {
+        _state->remove_final_count(bs, domain);
     }
 }
 
@@ -441,6 +455,8 @@ partition_allocator::apply_snapshot(const controller_snapshot& snap) {
                 new_state->add_allocation(bs, domain);
             }
 
+            const std::vector<model::broker_shard>* final_replicas = nullptr;
+
             if (auto it = topic.updates.find(p_id); it != topic.updates.end()) {
                 const auto& update = it->second;
                 // Both old and new replicas contribute to allocator weights
@@ -450,6 +466,24 @@ partition_allocator::apply_snapshot(const controller_snapshot& snap) {
                 for (const auto& bs : additional_replicas) {
                     new_state->add_allocation(bs, domain);
                 }
+
+                // final counts depend on the update state
+                switch (update.state) {
+                case reconfiguration_state::in_progress:
+                case reconfiguration_state::force_update:
+                    final_replicas = &update.target_assignment;
+                    break;
+                case reconfiguration_state::cancelled:
+                case reconfiguration_state::force_cancelled:
+                    final_replicas = &partition.replicas;
+                    break;
+                }
+            } else {
+                final_replicas = &partition.replicas;
+            }
+
+            for (const auto& bs : *final_replicas) {
+                new_state->add_final_count(bs, domain);
             }
 
             co_await ss::coroutine::maybe_yield();

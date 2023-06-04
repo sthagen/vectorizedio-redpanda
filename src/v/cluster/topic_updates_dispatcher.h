@@ -12,7 +12,6 @@
 #pragma once
 #include "cluster/commands.h"
 #include "cluster/fwd.h"
-#include "cluster/scheduling/partition_allocator.h"
 #include "cluster/topic_table.h"
 #include "cluster/types.h"
 #include "model/fundamental.h"
@@ -115,6 +114,11 @@ private:
     template<typename T>
     void
     add_allocations_for_new_partitions(const T&, partition_allocation_domain);
+
+    void update_allocations_for_reconfiguration(
+      const std::vector<model::broker_shard>& previous,
+      const std::vector<model::broker_shard>& target,
+      partition_allocation_domain);
 
     void deallocate_topic(
       const model::topic_namespace&,

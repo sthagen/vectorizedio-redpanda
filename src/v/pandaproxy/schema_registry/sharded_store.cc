@@ -200,6 +200,16 @@ sharded_store::project_ids(subject_schema schema) {
 
 ss::future<bool> sharded_store::upsert(
   seq_marker marker,
+  unparsed_schema schema,
+  schema_id id,
+  schema_version version,
+  is_deleted deleted) {
+    auto canonical = co_await make_canonical_schema(schema);
+    co_return co_await upsert(marker, canonical, id, version, deleted);
+}
+
+ss::future<bool> sharded_store::upsert(
+  seq_marker marker,
   canonical_schema schema,
   schema_id id,
   schema_version version,
@@ -596,6 +606,16 @@ ss::future<bool> sharded_store::is_compatible(
         }
     }
     co_return is_compat;
+}
+
+ss::future<bool> sharded_store::has_version(
+  const subject& sub, schema_id id, include_deleted i) {
+    auto sub_shard{shard_for(sub)};
+    auto has_id = co_await _store.invoke_on(
+      sub_shard, _smp_opts, [id, sub, i](class store& s) mutable {
+          return s.has_version(sub, id, i);
+      });
+    co_return has_id.has_value() && has_id.assume_value();
 }
 
 } // namespace pandaproxy::schema_registry

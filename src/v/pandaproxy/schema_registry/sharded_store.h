@@ -50,6 +50,13 @@ public:
       schema_version version,
       is_deleted deleted);
 
+    ss::future<bool> upsert(
+      seq_marker marker,
+      unparsed_schema schema,
+      schema_id id,
+      schema_version version,
+      is_deleted deleted);
+
     ss::future<bool> has_schema(schema_id id);
     ss::future<subject_schema> has_schema(canonical_schema schema);
 
@@ -124,6 +131,8 @@ public:
     /// otherwise checks are against the version provided and newer.
     ss::future<bool>
     is_compatible(schema_version version, canonical_schema new_schema);
+
+    ss::future<bool> has_version(const subject&, schema_id, include_deleted);
 
 private:
     ss::future<bool>

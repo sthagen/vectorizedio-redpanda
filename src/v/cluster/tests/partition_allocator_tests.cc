@@ -23,6 +23,8 @@
 #include <absl/container/flat_hash_set.h>
 #include <boost/test/tools/old/interface.hpp>
 
+ss::logger logger{"allocator_test"};
+
 static void validate_replica_set_diversity(
   const std::vector<model::broker_shard>& replicas) {
     if (replicas.size() > 1) {
@@ -568,16 +570,32 @@ FIXTURE_TEST(even_distribution_pri_allocation, partition_allocator_fixture) {
     }
 }
 
-void check_partition_counts(
+void check_allocated_counts(
   const cluster::partition_allocator& allocator,
   const std::vector<size_t>& expected,
   cluster::partition_allocation_domain domain
   = cluster::partition_allocation_domains::common) {
-    for (const auto& node : allocator.state().allocation_nodes()) {
-        model::node_id node_id = node.first;
-        auto count = node.second->domain_allocated_partitions(domain);
-        BOOST_REQUIRE_EQUAL(count(), expected.at(node_id()));
+    std::vector<size_t> counts;
+    for (const auto& [id, node] : allocator.state().allocation_nodes()) {
+        BOOST_REQUIRE(id() == counts.size());
+        counts.push_back(node->domain_allocated_partitions(domain));
     }
+    logger.debug("allocated counts: {}, expected: {}", counts, expected);
+    BOOST_CHECK_EQUAL(counts, expected);
+};
+
+void check_final_counts(
+  const cluster::partition_allocator& allocator,
+  const std::vector<size_t>& expected,
+  cluster::partition_allocation_domain domain
+  = cluster::partition_allocation_domains::common) {
+    std::vector<size_t> counts;
+    for (const auto& [id, node] : allocator.state().allocation_nodes()) {
+        BOOST_REQUIRE(id() == counts.size());
+        counts.push_back(node->domain_final_partitions(domain));
+    }
+    logger.debug("final counts: {}, expected: {}", counts, expected);
+    BOOST_CHECK_EQUAL(counts, expected);
 };
 
 FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
@@ -594,7 +612,8 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
     // add another node to move replicas to and from
     register_node(3, 1);
 
-    check_partition_counts(allocator, {1, 1, 1, 0});
+    check_allocated_counts(allocator, {1, 1, 1, 0});
+    check_final_counts(allocator, {1, 1, 1, 0});
 
     {
         cluster::allocated_partition reallocated
@@ -612,7 +631,8 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(
           reallocated.replicas().at(2).node_id, model::node_id{3});
 
-        check_partition_counts(allocator, {1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1});
+        check_final_counts(allocator, {0, 1, 1, 1});
 
         // there is no replica on node 0 any more
         auto moved2 = allocator.reallocate_replica(
@@ -629,7 +649,8 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(
           moved3.error(), cluster::errc::no_eligible_allocation_nodes);
 
-        check_partition_counts(allocator, {1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1});
+        check_final_counts(allocator, {0, 1, 1, 1});
 
         // replicas can move to the same place
         auto moved4 = allocator.reallocate_replica(
@@ -639,16 +660,23 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(
           reallocated.replicas().at(2).node_id, model::node_id{3});
 
-        check_partition_counts(allocator, {1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1});
+        check_final_counts(allocator, {0, 1, 1, 1});
+
+        std::vector node_0(
+          {model::broker_shard{.node_id = model::node_id{0}, .shard = 0}});
+        cluster::allocation_constraints not_on_node0;
+        not_on_node0.add(cluster::distinct_from(node_0));
 
         auto moved5 = allocator.reallocate_replica(
-          reallocated, model::node_id{2}, cluster::allocation_constraints{});
+          reallocated, model::node_id{2}, not_on_node0);
         BOOST_REQUIRE(moved5.has_value());
         BOOST_REQUIRE_EQUAL(moved5.value().node_id, model::node_id{2});
         BOOST_REQUIRE_EQUAL(
           reallocated.replicas().at(2).node_id, model::node_id{2});
 
-        check_partition_counts(allocator, {1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1});
+        check_final_counts(allocator, {0, 1, 1, 1});
 
         std::vector new_replicas(reallocated.replicas());
         cluster::allocation_constraints not_on_new_nodes;
@@ -663,7 +691,8 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(
           reallocated.replicas().at(2).node_id, model::node_id{0});
 
-        check_partition_counts(allocator, {1, 1, 1, 0});
+        check_allocated_counts(allocator, {1, 1, 1, 0});
+        check_final_counts(allocator, {1, 1, 1, 0});
 
         // do another move so that we have something to revert
         auto moved7 = allocator.reallocate_replica(
@@ -674,10 +703,12 @@ FIXTURE_TEST(incrementally_reallocate_replicas, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(
           reallocated.replicas().at(2).node_id, model::node_id{3});
 
-        check_partition_counts(allocator, {1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1});
+        check_final_counts(allocator, {1, 0, 1, 1});
     }
 
-    check_partition_counts(allocator, {1, 1, 1, 0});
+    check_allocated_counts(allocator, {1, 1, 1, 0});
+    check_final_counts(allocator, {1, 1, 1, 0});
 }
 
 FIXTURE_TEST(reallocate_partition_with_move, partition_allocator_fixture) {
@@ -695,7 +726,8 @@ FIXTURE_TEST(reallocate_partition_with_move, partition_allocator_fixture) {
     register_node(3, 1);
     register_node(4, 1);
 
-    check_partition_counts(allocator, {1, 1, 1, 0, 0});
+    check_allocated_counts(allocator, {1, 1, 1, 0, 0});
+    check_final_counts(allocator, {1, 1, 1, 0, 0});
 
     cluster::allocation_constraints not_on_old_nodes;
     not_on_old_nodes.add(cluster::distinct_from(original_assignment.replicas));
@@ -717,7 +749,8 @@ FIXTURE_TEST(reallocate_partition_with_move, partition_allocator_fixture) {
         BOOST_REQUIRE_EQUAL(replicas_set.size(), 4);
         BOOST_REQUIRE(!replicas_set.contains(model::node_id{0}));
 
-        check_partition_counts(allocator, {1, 1, 1, 1, 1});
+        check_allocated_counts(allocator, {1, 1, 1, 1, 1});
+        check_final_counts(allocator, {0, 1, 1, 1, 1});
     }
 
     {
@@ -742,4 +775,94 @@ FIXTURE_TEST(reallocate_partition_with_move, partition_allocator_fixture) {
         BOOST_REQUIRE(res.has_error());
         BOOST_REQUIRE_EQUAL(res.error(), cluster::errc::node_does_not_exists);
     }
+}
+
+FIXTURE_TEST(
+  preserve_shard_for_original_replicas, partition_allocator_fixture) {
+    register_node(0, 4);
+    register_node(1, 4);
+    register_node(2, 4);
+    register_node(3, 4);
+
+    cluster::allocation_constraints not_on_0;
+    std::vector<model::broker_shard> node_0{{model::node_id{0}, 0}};
+    not_on_0.add(cluster::distinct_from(node_0));
+
+    cluster::allocation_constraints not_on_3;
+    std::vector<model::broker_shard> node_3{{model::node_id{3}, 0}};
+    not_on_3.add(cluster::distinct_from(node_3));
+
+    cluster::allocation_units::pointer partition_1;
+    {
+        auto res = allocator.allocate(make_allocation_request(1, 4)).get();
+        BOOST_REQUIRE(res);
+        partition_1 = std::move(res.value());
+    }
+
+    // This is the partition that we are going to modify and check that the
+    // original shards are preserved.
+
+    cluster::allocation_units::pointer partition_2;
+    {
+        auto req = make_allocation_request(1, 3);
+        req.partitions.front().constraints.add(cluster::distinct_from(node_3));
+        auto res = allocator.allocate(std::move(req)).get();
+        BOOST_REQUIRE(res);
+        partition_2 = std::move(res.value());
+    }
+
+    auto original_replicas = partition_2->get_assignments().front().replicas;
+    absl::flat_hash_map<model::node_id, uint32_t> replica2shard;
+    for (const auto& bs : original_replicas) {
+        replica2shard.emplace(bs.node_id, bs.shard);
+    }
+
+    check_allocated_counts(allocator, {2, 2, 2, 1});
+    check_final_counts(allocator, {2, 2, 2, 1});
+
+    cluster::allocated_partition reallocated
+      = allocator.make_allocated_partition(
+        original_replicas, cluster::partition_allocation_domains::common);
+
+    auto moved = allocator.reallocate_replica(
+      reallocated, model::node_id{0}, not_on_0);
+    BOOST_REQUIRE(moved);
+    BOOST_REQUIRE_EQUAL(moved.value().node_id, model::node_id{3});
+    replica2shard[moved.value().node_id] = moved.value().shard;
+
+    // Delete partition 1. This frees up the first shard on all nodes, making it
+    // more attractive. But replicas on nodes 0, 1, and 2 should still end up on
+    // shard 2
+    partition_1.reset();
+    check_allocated_counts(allocator, {1, 1, 1, 1});
+    check_final_counts(allocator, {0, 1, 1, 1});
+
+    // Reallocate replica on node 1 to itself.
+    moved = allocator.reallocate_replica(
+      reallocated, model::node_id{1}, not_on_0);
+    BOOST_REQUIRE(moved);
+    BOOST_REQUIRE_EQUAL(moved.value().node_id, model::node_id{1});
+    BOOST_REQUIRE_EQUAL(
+      moved.value().shard, replica2shard.at(moved.value().node_id));
+
+    // Reallocate replica on node 3 to itself.
+    moved = allocator.reallocate_replica(
+      reallocated, model::node_id{3}, not_on_0);
+    BOOST_REQUIRE(moved);
+    BOOST_REQUIRE_EQUAL(moved.value().node_id, model::node_id{3});
+    // Node 3 is not in the original set, so we don't care that the shard is
+    // preserved.
+    BOOST_REQUIRE_NE(
+      moved.value().shard, replica2shard.at(moved.value().node_id));
+
+    // Reallocate replica on node 3 back to the original node 0.
+    moved = allocator.reallocate_replica(
+      reallocated, model::node_id{3}, not_on_3);
+    BOOST_REQUIRE(moved);
+    BOOST_REQUIRE_EQUAL(moved.value().node_id, model::node_id{0});
+    BOOST_REQUIRE_EQUAL(
+      moved.value().shard, replica2shard.at(moved.value().node_id));
+
+    // The end result is the same: replicas on nodes 0, 1, 2
+    BOOST_REQUIRE(!reallocated.has_changes());
 }

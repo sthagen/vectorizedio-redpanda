@@ -65,6 +65,10 @@ public:
     /// try to substitute an existing replica with a newly allocated one and add
     /// it to the allocated_partition object. If the request fails,
     /// allocated_partition remains unchanged.
+    ///
+    /// Note: if after reallocation the replica ends up on a node from the
+    /// original replica set (doesn't matter if the same as `previous` or a
+    /// different one), its shard id is preserved.
     result<model::broker_shard> reallocate_replica(
       allocated_partition&, model::node_id previous, allocation_constraints);
 
@@ -108,12 +112,17 @@ public:
       const std::vector<model::broker_shard>&, partition_allocation_domain);
     void remove_allocations(
       const std::vector<model::broker_shard>&, partition_allocation_domain);
+    void add_final_counts(
+      const std::vector<model::broker_shard>&, partition_allocation_domain);
+    void remove_final_counts(
+      const std::vector<model::broker_shard>&, partition_allocation_domain);
 
     void add_allocations_for_new_partition(
       const std::vector<model::broker_shard>& replicas,
       raft::group_id group_id,
       partition_allocation_domain domain) {
         add_allocations(replicas, domain);
+        add_final_counts(replicas, domain);
         _state->update_highest_group_id(group_id);
     }
 

@@ -12,7 +12,9 @@
 #pragma once
 
 #include "avro/ValidSchema.hh"
+#include "kafka/protocol/errors.h"
 #include "model/metadata.h"
+#include "outcome.h"
 #include "seastarx.h"
 #include "utils/named_type.h"
 #include "utils/string_switch.h"
@@ -105,7 +107,7 @@ using unparsed_schema_definition
 ///
 /// This form is stored on the topic and returned to the user.
 using canonical_schema_definition
-  = typed_schema_definition<struct canonical_schema_defnition_tag>;
+  = typed_schema_definition<struct canonical_schema_definition_tag>;
 
 static const unparsed_schema_definition invalid_schema_definition{
   "", schema_type::avro};
@@ -130,6 +132,8 @@ public:
     explicit operator canonical_schema_definition() const {
         return {raw(), type()};
     }
+
+    ss::sstring name() const;
 
 private:
     avro::ValidSchema _impl;
@@ -159,6 +163,9 @@ public:
     explicit operator canonical_schema_definition() const {
         return {raw(), type()};
     }
+
+    ::result<ss::sstring, kafka::error_code>
+    name(std::vector<int> const& fields) const;
 
 private:
     pimpl _impl;

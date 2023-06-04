@@ -18,12 +18,16 @@
 #include "seastarx.h"
 #include "utils/copy_range.h"
 
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/timed_out_error.hh>
 #include <seastar/core/with_timeout.hh>
 
 #include <absl/container/flat_hash_map.h>
+
+#include <memory>
+#include <vector>
 
 namespace raft {
 // clang-format off
@@ -75,7 +79,7 @@ public:
               m.meta,
               model::make_memory_record_batch_reader(
                 ss::circular_buffer<model::record_batch>{}),
-              append_entries_request::flush_after_append::no);
+              flush_after_append::no);
             reqs.push_back(std::move(append_req));
         };
 
@@ -97,7 +101,7 @@ public:
           std::back_inserter(group_missing_replies),
           [](append_entries_request& r) {
               return append_entries_reply{
-                .group = r.meta.group,
+                .group = r.metadata().group,
                 .result = append_entries_reply::status::group_unavailable};
           });
 
@@ -137,6 +141,20 @@ public:
               [gr]() { return make_missing_group_reply(gr); },
               [](append_entries_request&& r, consensus_ptr c) {
                   return c->append_entries(std::move(r));
+              });
+        });
+    }
+    [[gnu::always_inline]] ss::future<append_entries_reply>
+    append_entries_full_serde(
+      append_entries_request_serde_wrapper&& r, rpc::streaming_context&) final {
+        return _probe.append_entries().then([this, r = std::move(r)]() mutable {
+            auto request = std::move(r).release();
+            const raft::group_id gr = request.target_group();
+            return dispatch_request(
+              append_entries_request::make_foreign(std::move(request)),
+              [gr]() { return make_missing_group_reply(gr); },
+              [](append_entries_request&& req, consensus_ptr c) {
+                  return c->append_entries(std::move(req));
               });
         });
     }
@@ -185,8 +203,10 @@ private:
     using consensus_ptr = seastar::lw_shared_ptr<consensus>;
     using hbeats_t = std::vector<append_entries_request>;
     using hbeats_ptr = ss::foreign_ptr<std::unique_ptr<hbeats_t>>;
+    using groupped_hbeats_ptr = ss::foreign_ptr<
+      std::unique_ptr<ss::chunked_fifo<append_entries_request>>>;
     struct shard_groupped_hbeat_requests {
-        absl::flat_hash_map<ss::shard_id, hbeats_ptr> shard_requests;
+        absl::flat_hash_map<ss::shard_id, groupped_hbeats_ptr> shard_requests;
         std::vector<append_entries_request> group_missing_requests;
     };
 
@@ -250,7 +270,7 @@ private:
     }
 
     ss::future<std::vector<append_entries_reply>>
-    dispatch_hbeats_to_core(ss::shard_id shard, hbeats_ptr requests) {
+    dispatch_hbeats_to_core(ss::shard_id shard, groupped_hbeats_ptr requests) {
         return with_scheduling_group(
           get_scheduling_group(),
           [this, shard, r = std::move(requests)]() mutable {
@@ -264,7 +284,7 @@ private:
     }
 
     ss::future<std::vector<append_entries_reply>>
-    dispatch_hbeats_to_groups(ConsensusManager& m, hbeats_ptr reqs) {
+    dispatch_hbeats_to_groups(ConsensusManager& m, groupped_hbeats_ptr reqs) {
         std::vector<ss::future<append_entries_reply>> futures;
         futures.reserve(reqs->size());
         // dispatch requests in parallel
@@ -291,28 +311,31 @@ private:
         shard_groupped_hbeat_requests ret;
 
         for (auto& r : reqs) {
-            if (unlikely(!_shard_table.contains(r.meta.group))) {
+            if (unlikely(!_shard_table.contains(r.metadata().group))) {
                 ret.group_missing_requests.push_back(std::move(r));
                 continue;
             }
 
-            auto shard = _shard_table.shard_for(r.meta.group);
-            if (!ret.shard_requests.contains(shard)) {
-                auto hbeats = ss::make_foreign(
-                  std::make_unique<std::vector<append_entries_request>>());
-                hbeats->push_back(std::move(r));
-                ret.shard_requests.emplace(shard, std::move(hbeats));
-                continue;
+            auto shard = _shard_table.shard_for(r.metadata().group);
+            auto it = ret.shard_requests.find(shard);
+            if (it == ret.shard_requests.end()) {
+                auto result = ret.shard_requests.try_emplace(
+                  it,
+                  shard,
+                  ss::make_foreign(
+                    std::make_unique<
+                      ss::chunked_fifo<append_entries_request>>()));
+                it = result;
             }
 
-            ret.shard_requests.find(shard)->second->push_back(std::move(r));
+            it->second->push_back(std::move(r));
         }
         return ret;
     }
 
     ss::future<append_entries_reply>
     dispatch_append_entries(ConsensusManager& m, append_entries_request&& r) {
-        auto group = group_id(r.meta.group);
+        auto group = group_id(r.metadata().group);
         auto c = m.consensus_for(group);
         if (unlikely(!c)) {
             return make_missing_group_reply(group);

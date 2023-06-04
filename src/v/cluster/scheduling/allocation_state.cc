@@ -22,6 +22,7 @@ void allocation_state::rollback(
     for (auto& as : v) {
         for (auto& bs : as.replicas) {
             remove_allocation(bs, domain);
+            remove_final_count(bs, domain);
         }
         // rollback for each assignment as the groups are distinct
         _highest_group = raft::group_id(_highest_group() - 1);
@@ -181,17 +182,33 @@ void allocation_state::remove_allocation(
     }
 }
 
-result<uint32_t> allocation_state::allocate(
+uint32_t allocation_state::allocate(
   model::node_id id, const partition_allocation_domain domain) {
     verify_shard();
-    if (auto it = _nodes.find(id); it != _nodes.end()) {
-        if (it->second->is_full()) {
-            return errc::invalid_node_operation;
-        }
-        return it->second->allocate(domain);
-    }
+    auto it = _nodes.find(id);
+    vassert(
+      it != _nodes.end(), "allocated node with id {} have to be present", id);
+    return it->second->allocate(domain);
+}
 
-    return errc::node_does_not_exists;
+void allocation_state::add_final_count(
+  const model::broker_shard& replica,
+  const partition_allocation_domain domain) {
+    verify_shard();
+    if (auto it = _nodes.find(replica.node_id); it != _nodes.end()) {
+        ++it->second->_final_partitions;
+        ++it->second->_final_domain_partitions[domain];
+    }
+}
+
+void allocation_state::remove_final_count(
+  const model::broker_shard& replica,
+  const partition_allocation_domain domain) {
+    verify_shard();
+    if (auto it = _nodes.find(replica.node_id); it != _nodes.end()) {
+        --it->second->_final_partitions;
+        --it->second->_final_domain_partitions[domain];
+    }
 }
 
 void allocation_state::verify_shard() const {

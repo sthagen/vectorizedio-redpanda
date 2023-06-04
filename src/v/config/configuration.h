@@ -18,6 +18,7 @@
 #include "config/data_directory_path.h"
 #include "config/endpoint_tls_config.h"
 #include "config/property.h"
+#include "config/throughput_control_group.h"
 #include "config/tls_config.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
@@ -346,6 +347,8 @@ struct configuration final : public config_store {
       partition_autobalancing_tick_interval_ms;
     property<size_t> partition_autobalancing_movement_batch_size_bytes;
     property<size_t> partition_autobalancing_concurrent_moves;
+    property<double> partition_autobalancing_tick_moves_drop_threshold;
+    property<std::optional<size_t>> partition_autobalancing_min_size_threshold;
 
     property<bool> enable_leader_balancer;
     enum_property<model::leader_balancer_mode> leader_balancer_mode;
@@ -407,6 +410,7 @@ struct configuration final : public config_store {
     property<double> kafka_quota_balancer_min_shard_throughput_ratio;
     bounded_property<int64_t> kafka_quota_balancer_min_shard_throughput_bps;
     property<std::vector<ss::sstring>> kafka_throughput_controlled_api_keys;
+    property<std::vector<throughput_control_group>> kafka_throughput_control;
 
     bounded_property<int64_t> node_isolation_heartbeat_timeout;
 
@@ -414,6 +418,9 @@ struct configuration final : public config_store {
     // security controls
     property<bool> legacy_permit_unsafe_log_operation;
     property<std::chrono::seconds> legacy_unsafe_log_warning_interval_sec;
+
+    // schema id validation
+    config::property<size_t> kafka_schema_id_validation_cache_capacity;
 
     configuration();
 

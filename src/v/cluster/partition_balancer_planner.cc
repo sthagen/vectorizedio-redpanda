@@ -16,11 +16,13 @@
 #include "cluster/partition_balancer_types.h"
 #include "cluster/scheduling/constraints.h"
 #include "cluster/scheduling/types.h"
+#include "model/namespace.h"
 #include "ssx/sformat.h"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/util/defer.hh>
 
+#include <functional>
 #include <optional>
 
 namespace cluster {
@@ -343,7 +345,7 @@ public:
         return (_reallocated ? _reallocated->replicas() : _orig_replicas);
     };
 
-    bool is_original(const model::broker_shard& replica) const {
+    bool is_original(model::node_id replica) const {
         return !_reallocated || _reallocated->is_original(replica);
     }
 
@@ -370,7 +372,7 @@ private:
       , _ctx(ctx) {}
 
     bool has_changes() const {
-        return _reallocated && _reallocated->has_node_changes();
+        return _reallocated && _reallocated->has_changes();
     }
 
     allocation_constraints
@@ -665,7 +667,7 @@ auto partition_balancer_planner::request_context::do_with_partition(
             reassignment_it->second = std::move(*reassignable._reallocated);
         } else if (
           reassignable._reallocated
-          && reassignable._reallocated->has_node_changes()) {
+          && reassignable._reallocated->has_changes()) {
             _reassignments.emplace(ntp, std::move(*reassignable._reallocated));
             _planned_moves_size_bytes += reassignable._size_bytes;
         }
@@ -807,10 +809,10 @@ void partition_balancer_planner::get_node_drain_actions(
     }
 
     ctx.for_each_partition([&](partition& part) {
-        std::vector<model::broker_shard> to_move;
+        std::vector<model::node_id> to_move;
         for (const auto& bs : part.replicas()) {
             if (nodes.contains(bs.node_id)) {
-                to_move.push_back(bs);
+                to_move.push_back(bs.node_id);
             }
         }
 
@@ -820,11 +822,11 @@ void partition_balancer_planner::get_node_drain_actions(
 
         part.match_variant(
           [&](reassignable_partition& part) {
-              for (const auto& bs : to_move) {
-                  if (part.is_original(bs)) {
+              for (const auto& replica : to_move) {
+                  if (part.is_original(replica)) {
                       // ignore result
                       (void)part.move_replica(
-                        bs.node_id,
+                        replica,
                         ctx.config().hard_max_disk_usage_ratio,
                         reason);
                   }
@@ -841,7 +843,7 @@ void partition_balancer_planner::get_node_drain_actions(
               }
 
               for (const auto& r : to_move) {
-                  if (!previous_replicas_set.contains(r.node_id)) {
+                  if (!previous_replicas_set.contains(r)) {
                       // makes sense to cancel
                       part.request_cancel(reason);
                       break;
@@ -886,14 +888,14 @@ void partition_balancer_planner::get_rack_constraint_repair_actions(
         }
 
         ctx.with_partition(ntp, [&](partition& part) {
-            std::vector<model::broker_shard> to_move;
+            std::vector<model::node_id> to_move;
             absl::flat_hash_set<model::rack_id> cur_racks;
             for (const auto& bs : part.replicas()) {
                 auto rack = ctx.state().members().get_node_rack_id(bs.node_id);
                 if (rack) {
                     auto [it, inserted] = cur_racks.insert(*rack);
                     if (!inserted) {
-                        to_move.push_back(bs);
+                        to_move.push_back(bs.node_id);
                     }
                 }
             }
@@ -910,12 +912,12 @@ void partition_balancer_planner::get_rack_constraint_repair_actions(
 
             part.match_variant(
               [&](reassignable_partition& part) {
-                  for (const auto& bs : to_move) {
-                      if (part.is_original(bs)) {
+                  for (const auto& replica : to_move) {
+                      if (part.is_original(replica)) {
                           // only move replicas that haven't been moved for
                           // other reasons
                           (void)part.move_replica(
-                            bs.node_id,
+                            replica,
                             ctx.config().hard_max_disk_usage_ratio,
                             "rack constraint repair");
                       }
@@ -927,6 +929,82 @@ void partition_balancer_planner::get_rack_constraint_repair_actions(
               [](moving_partition&) {});
         });
     }
+}
+
+/**
+ * This is the place where we decide about the order in which partitions will be
+ * moved in the case when node disk is being full.
+ */
+size_t partition_balancer_planner::calculate_full_disk_partition_move_priority(
+  model::node_id node_id,
+  const reassignable_partition& p,
+  const request_context& ctx) {
+    /**
+     * Definition of priority tiers:
+     *
+     *  - default (not internal one and not the ono that is bellow the size
+     *    threshold) partition
+     *      [max_priority,min_default_priority]
+     *
+     *  - internal partition
+     *      (min_default_priority, min_internal_partition_priority]
+     *
+     *  - small partition (which size is bellow the size threshold)
+     *        (min_internal_partition_priority, min_small_partition_priority]
+     */
+    enum priority_tiers : size_t {
+        max_priority = 1000000,
+        min_default_priority = 500000,
+        min_internal_partition_priority = 300000,
+        min_small_partition_priority = 100000,
+        min_priority = 0
+    };
+
+    auto it = ctx.node_disk_reports.find(node_id);
+    if (it == ctx.node_disk_reports.end()) {
+        return min_priority;
+    }
+
+    static constexpr size_t default_range
+      = priority_tiers::max_priority - priority_tiers::min_default_priority;
+
+    // clamp partition size with the total disk space to have well defined
+    // behavior in case the size is incorrectly reported, this is required as we
+    // normalize the size with disk capacity and we do not want the ration of
+    // p_size/disk_capacity to be larger than 1.0.
+    const auto partition_size = std::min(p.size_bytes(), it->second.total);
+
+    if (partition_size < ctx.config().min_partition_size_threshold) {
+        static constexpr size_t range
+          = priority_tiers::min_internal_partition_priority - 1
+            - priority_tiers::min_small_partition_priority;
+
+        // prioritize from largest to smallest one
+        return (range * partition_size)
+                 / ctx.config().min_partition_size_threshold
+               + min_small_partition_priority;
+    }
+    /**
+     * Assign internal partitions to its priority tier, order from smallest to
+     * largest one (the same as all other partitions)
+     */
+    if (
+      p.ntp().ns == model::kafka_internal_namespace
+      || p.ntp().tp.topic == model::kafka_consumer_offsets_topic) {
+        static constexpr size_t range
+          = priority_tiers::min_default_priority - 1
+            - priority_tiers::min_internal_partition_priority;
+
+        return (range - (range * partition_size) / it->second.total)
+               + priority_tiers::min_internal_partition_priority;
+    }
+
+    // normalize and offset to match the default partition priority tier, where
+    // max value would represent a partition that is of the full disk capacity
+    // size. We subtract it from the max priority to prioritize smallest
+    // partitions.
+    return (default_range - (default_range * partition_size) / it->second.total)
+           + priority_tiers::min_default_priority;
 }
 
 /*
@@ -974,22 +1052,26 @@ void partition_balancer_planner::get_full_node_actions(request_context& ctx) {
     };
 
     // build an index of move candidates: full node -> movement priority -> ntp
-    absl::
-      flat_hash_map<model::node_id, absl::btree_multimap<size_t, model::ntp>>
-        full_node2priority2ntp;
+    absl::flat_hash_map<
+      model::node_id,
+      absl::btree_multimap<size_t, model::ntp, std::greater<>>>
+      full_node2priority2ntp;
     ctx.for_each_partition([&](partition& part) {
         part.match_variant(
           [&](reassignable_partition& part) {
               std::vector<model::node_id> replicas_on_full_nodes;
               for (const auto& bs : part.replicas()) {
-                  if (part.is_original(bs) && find_full_node(bs.node_id)) {
-                      replicas_on_full_nodes.push_back(bs.node_id);
+                  model::node_id replica = bs.node_id;
+                  if (part.is_original(replica) && find_full_node(replica)) {
+                      replicas_on_full_nodes.push_back(replica);
                   }
               }
 
               for (model::node_id node_id : replicas_on_full_nodes) {
                   full_node2priority2ntp[node_id].emplace(
-                    part.size_bytes(), part.ntp());
+                    calculate_full_disk_partition_move_priority(
+                      node_id, part, ctx),
+                    part.ntp());
               }
           },
           [](auto&) {});
@@ -1032,7 +1114,7 @@ void partition_balancer_planner::get_full_node_actions(request_context& ctx) {
                       for (const auto& r : part.replicas()) {
                           if (
                             ctx.timed_out_unavailable_nodes.contains(r.node_id)
-                            || !part.is_original(r)) {
+                            || !part.is_original(r.node_id)) {
                               continue;
                           }
 
