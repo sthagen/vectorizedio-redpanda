@@ -864,13 +864,17 @@ configuration::configuration()
       *this,
       "storage_read_buffer_size",
       "Size of each read buffer (one per in-flight read, per log segment)",
-      {.example = "31768", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "31768",
+       .visibility = visibility::tunable},
       128_KiB)
   , storage_read_readahead_count(
       *this,
       "storage_read_readahead_count",
       "How many additional reads to issue ahead of current read location",
-      {.example = "1", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "1",
+       .visibility = visibility::tunable},
       10)
   , segment_fallocation_step(
       *this,
@@ -1310,20 +1314,20 @@ configuration::configuration()
   , cloud_storage_initial_backoff_ms(
       *this,
       "cloud_storage_initial_backoff_ms",
-      "Initial backoff time for exponetial backoff algorithm (ms)",
-      {.visibility = visibility::tunable},
+      "Initial backoff time for exponential backoff algorithm (ms)",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       100ms)
   , cloud_storage_segment_upload_timeout_ms(
       *this,
       "cloud_storage_segment_upload_timeout_ms",
       "Log segment upload timeout (ms)",
-      {.visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       30s)
   , cloud_storage_manifest_upload_timeout_ms(
       *this,
       "cloud_storage_manifest_upload_timeout_ms",
       "Manifest upload timeout (ms)",
-      {.visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
   , cloud_storage_max_connection_idle_time_ms(
       *this,
@@ -1374,6 +1378,12 @@ configuration::configuration()
       "housekeeping jobs are started.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
+  , cloud_storage_cluster_metadata_upload_interval_ms(
+      *this,
+      "cloud_storage_cluster_metadata_upload_interval_ms",
+      "Time interval to wait between cluster metadata uploads.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      60s)
   , cloud_storage_idle_threshold_rps(
       *this,
       "cloud_storage_idle_threshold_rps",
@@ -1468,6 +1478,28 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt,
       {.min = 4_KiB, .max = 4_MiB})
+  , cloud_storage_manifest_cache_size(
+      *this,
+      "cloud_storage_manifest_cache_size",
+      "Amount of memory that can be used to handle tiered-storage metadata",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1_MiB,
+      {.min = 64_KiB, .max = 64_MiB})
+  , cloud_storage_manifest_cache_ttl_ms(
+      *this,
+      "cloud_storage_materialized_manifest_ttl_ms",
+      "The time interval that determins how long the materialized manifest can "
+      "stay in cache under contention. This parameter is used for performance "
+      "tuning. "
+      "When the spillover manifest is materialized and stored in cache and the "
+      "cache needs to evict it it will use "
+      "'cloud_storage_materialized_manifest_ttl_ms' value as a timeout. "
+      "The cursor that uses the spillover manifest uses this value as a TTL "
+      "interval after which it stops referencing the manifest making it "
+      "available for eviction. This only affects spillover manifests under "
+      "contention.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      10s)
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",
@@ -1858,6 +1890,13 @@ configuration::configuration()
       "the data directory. Redpanda will refuse to start if it is not found.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       false)
+  , enable_storage_space_manager(
+      *this,
+      "enable_storage_space_manager",
+      "Enable the storage space manager that coordinates and control space "
+      "usage between log data and the cloud storage cache.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      true)
   , memory_abort_on_alloc_failure(
       *this,
       "memory_abort_on_alloc_failure",
@@ -2092,7 +2131,24 @@ configuration::configuration()
       "kafka_schema_id_validation_cache_capacity",
       "Per-shard capacity of the cache for validating schema IDs.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      128) {}
+      128)
+  , kafka_memory_share_for_fetch(
+      *this,
+      "kafka_memory_share_for_fetch",
+      "The share of kafka subsystem memory that can be used for fetch read "
+      "buffers, as a fraction of kafka subsystem memory amount",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      0.5,
+      {.min = 0.0, .max = 1.0})
+  , kafka_memory_batch_size_estimate_for_fetch(
+      *this,
+      "kafka_memory_batch_size_estimate_for_fetch",
+      "The size of the batch used to estimate memory consumption for Fetch "
+      "requests, in bytes. Smaller sizes allow more concurrent fetch requests "
+      "per shard, larger sizes prevent running out of memory because of too "
+      "many concurrent fetch requests.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      1_MiB) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

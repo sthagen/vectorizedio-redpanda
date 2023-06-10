@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	redpandav1alpha1 "github.com/redpanda-data/redpanda/src/go/k8s/apis/redpanda/v1alpha1"
+	vectorizedv1alpha1 "github.com/redpanda-data/redpanda/src/go/k8s/apis/vectorized/v1alpha1"
 	labels "github.com/redpanda-data/redpanda/src/go/k8s/pkg/labels"
 	"github.com/redpanda-data/redpanda/src/go/k8s/pkg/resources"
 )
@@ -24,8 +24,8 @@ import (
 type Deployment struct {
 	client.Client
 	scheme     *runtime.Scheme
-	consoleobj *redpandav1alpha1.Console
-	clusterobj *redpandav1alpha1.Cluster
+	consoleobj *vectorizedv1alpha1.Console
+	clusterobj *vectorizedv1alpha1.Cluster
 	store      *Store
 	log        logr.Logger
 }
@@ -34,8 +34,8 @@ type Deployment struct {
 func NewDeployment(
 	cl client.Client,
 	scheme *runtime.Scheme,
-	consoleobj *redpandav1alpha1.Console,
-	clusterobj *redpandav1alpha1.Cluster,
+	consoleobj *vectorizedv1alpha1.Console,
+	clusterobj *vectorizedv1alpha1.Cluster,
 	store *Store,
 	log logr.Logger,
 ) *Deployment {
@@ -244,7 +244,7 @@ func (d *Deployment) syncSchemaRegistrySecret() (map[string][]byte, error) {
 	// Only write CA cert if not using DefaultCaFilePath
 	ca := &SecretTLSCa{
 		NodeSecretRef:  d.clusterobj.SchemaRegistryAPITLS().TLS.NodeSecretRef,
-		UsePublicCerts: UsePublicCerts,
+		UsePublicCerts: !d.consoleobj.Spec.SchemaRegistry.UseSchemaRegistryCA,
 	}
 	if ca.useCaCert() {
 		caCert, exists := d.store.GetSchemaRegistryNodeCert(d.clusterobj)

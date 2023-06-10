@@ -76,8 +76,9 @@ public:
       remote& r,
       cache& cache,
       cloud_storage_clients::bucket_name bucket,
-      const partition_manifest& m,
-      model::offset base_offset,
+      const remote_segment_path& path,
+      const model::ntp& ntp,
+      const segment_meta& meta,
       retry_chain_node& parent);
 
     remote_segment(const remote_segment&) = delete;
@@ -178,6 +179,11 @@ public:
     bool is_fallback_engaged() const {
         return _fallback_mode == fallback_mode::yes;
     }
+
+    // returns the minimum space required by this segment in the cloud storage
+    // cache. if ret.second is false then the returned size is based on segment
+    // granularity, otherwise the size is chunk granularity.
+    std::pair<size_t, bool> min_cache_cost() const;
 
 private:
     /// get a file offset for the corresponding kafka offset

@@ -693,6 +693,7 @@ class RedpandaServiceBase(Service):
     TRIM_LOGS_KEY = "trim_logs"
     DATA_DIR = os.path.join(PERSISTENT_ROOT, "data")
     NODE_CONFIG_FILE = "/etc/redpanda/redpanda.yaml"
+    RPK_CONFIG_FILE = "/root/.config/rpk/rpk.yaml"
     CLUSTER_BOOTSTRAP_CONFIG_FILE = "/etc/redpanda/.bootstrap.yaml"
     TLS_SERVER_KEY_FILE = "/etc/redpanda/server.key"
     TLS_SERVER_CRT_FILE = "/etc/redpanda/server.crt"
@@ -1817,7 +1818,16 @@ class RedpandaService(RedpandaServiceBase):
                             omit_seeds_on_idx_one=omit_seeds_on_idx_one,
                             override_cfg_params=node_overrides)
 
-        self._for_nodes(to_start, start_one, parallel=parallel)
+        try:
+            self._for_nodes(to_start, start_one, parallel=parallel)
+        except TimeoutError as e:
+            if expect_fail:
+                raise e
+            if "failed to start within" in str(e):
+                self.logger.debug(
+                    f"Checking for crashes after start-up error: {e}")
+                self.raise_on_crash()
+            raise e
 
         if expect_fail:
             # If we got here without an exception, it means we failed as expected
@@ -2840,6 +2850,8 @@ class RedpandaService(RedpandaServiceBase):
                         f"{RedpandaService.PERSISTENT_ROOT}/data/*")
         if node.account.exists(RedpandaService.NODE_CONFIG_FILE):
             node.account.remove(f"{RedpandaService.NODE_CONFIG_FILE}")
+        if node.account.exists(RedpandaService.RPK_CONFIG_FILE):
+            node.account.remove(f"{RedpandaService.RPK_CONFIG_FILE}")
         if node.account.exists(RedpandaService.CLUSTER_BOOTSTRAP_CONFIG_FILE):
             node.account.remove(
                 f"{RedpandaService.CLUSTER_BOOTSTRAP_CONFIG_FILE}")
@@ -3585,7 +3597,7 @@ class RedpandaService(RedpandaServiceBase):
         bucket = self.si_settings.cloud_storage_bucket
         environment = ' '.join(f'{k}=\"{v}\"' for k, v in vars.items())
         output = node.account.ssh_output(
-            f"{environment} rp-storage-tool --backend {backend} scan --source {bucket}",
+            f"{environment} rp-storage-tool --backend {backend} scan-metadata --source {bucket}",
             combine_stderr=False,
             allow_fail=True,
             timeout_sec=30)
@@ -3595,6 +3607,8 @@ class RedpandaService(RedpandaServiceBase):
         except:
             self.logger.error(f"Error running bucket scrub: {output}")
             raise
+        else:
+            self.logger.info(json.dumps(report, indent=2))
 
         # Example of a report:
         # {"malformed_manifests":[],
@@ -3617,10 +3631,10 @@ class RedpandaService(RedpandaServiceBase):
         permitted_anomalies = {"segments_outside_manifest"}
 
         # Whether any anomalies were found
-        any_anomalies = any(len(v) for v in report.values())
+        any_anomalies = any(len(v) for v in report['anomalies'].values())
 
         # List of fatal anomalies found
-        fatal_anomalies = set(k for k, v in report.items()
+        fatal_anomalies = set(k for k, v in report['anomalies'].items()
                               if len(v) and k not in permitted_anomalies)
 
         if not any_anomalies:

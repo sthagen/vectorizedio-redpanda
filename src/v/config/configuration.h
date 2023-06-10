@@ -274,6 +274,8 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_metadata_sync_timeout_ms;
     property<std::chrono::milliseconds> cloud_storage_housekeeping_interval_ms;
     property<std::chrono::milliseconds> cloud_storage_idle_timeout_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_cluster_metadata_upload_interval_ms;
     property<double> cloud_storage_idle_threshold_rps;
     property<bool> cloud_storage_enable_segment_merging;
     property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
@@ -287,6 +289,8 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_credentials_host;
     bounded_property<std::optional<size_t>>
       cloud_storage_spillover_manifest_size;
+    bounded_property<size_t> cloud_storage_manifest_cache_size;
+    property<std::chrono::milliseconds> cloud_storage_manifest_cache_ttl_ms;
 
     // Azure Blob Storage
     property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
@@ -366,6 +370,7 @@ struct configuration final : public config_store {
     bounded_property<size_t> storage_space_alert_free_threshold_bytes;
     bounded_property<size_t> storage_min_free_bytes;
     property<bool> storage_strict_data_init;
+    property<bool> enable_storage_space_manager;
 
     // memory related settings
     property<bool> memory_abort_on_alloc_failure;
@@ -421,6 +426,9 @@ struct configuration final : public config_store {
 
     // schema id validation
     config::property<size_t> kafka_schema_id_validation_cache_capacity;
+
+    bounded_property<double, numeric_bounds> kafka_memory_share_for_fetch;
+    property<size_t> kafka_memory_batch_size_estimate_for_fetch;
 
     configuration();
 

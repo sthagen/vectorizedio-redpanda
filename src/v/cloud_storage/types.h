@@ -209,6 +209,8 @@ enum class error_outcome {
     // Represent transient error that can be retried. This is the only error
     // outcome that shouldn't be bubbled up to the client.
     repeat,
+    timed_out,
+    out_of_range,
 };
 
 struct error_outcome_category final : public std::error_category {
@@ -236,6 +238,10 @@ struct error_outcome_category final : public std::error_category {
             return "cloud storage segment not found";
         case error_outcome::repeat:
             return "cloud storage repeat operation";
+        case error_outcome::timed_out:
+            return "cloud storage operation timed out";
+        case error_outcome::out_of_range:
+            return "cloud storage out of range";
         default:
             return "unknown";
         }
@@ -250,6 +256,29 @@ inline const std::error_category& error_category() noexcept {
 inline std::error_code make_error_code(error_outcome e) noexcept {
     return {static_cast<int>(e), error_category()};
 }
+
+// target_min_bytes: the minimum number of bytes that the cache should
+// reserve in order to maintain proper functionality.
+//
+// target_bytes: the minimum number of bytes that the cache should reserve
+// in order to maining "good" functionality, for some definition of good.
+// this may include heuristics to avoid too much thrashing, as well as
+// allowing read-ahead optimizations to be effective.
+struct cache_usage_target {
+    size_t target_min_bytes{0};
+    size_t target_bytes{0};
+    bool chunked{false};
+
+    friend cache_usage_target
+    operator+(cache_usage_target lhs, const cache_usage_target& rhs) {
+        lhs.target_min_bytes += rhs.target_min_bytes;
+        lhs.target_bytes += rhs.target_bytes;
+        // if we have one case of chunked storage, then continue to estimate
+        // as if chunked storage is used.
+        lhs.chunked = lhs.chunked || rhs.chunked;
+        return lhs;
+    }
+};
 
 } // namespace cloud_storage
 
