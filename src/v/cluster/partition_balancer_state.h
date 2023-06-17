@@ -13,6 +13,7 @@
 #include "cluster/fwd.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "utils/stable_iterator_adaptor.h"
 
 #include <seastar/core/sharded.hh>
 
@@ -42,6 +43,22 @@ public:
         return _ntps_with_broken_rack_constraint;
     }
 
+    auto ntps_with_broken_rack_constraint_it_begin() const {
+        return stable_iterator<
+          absl::btree_set<model::ntp>::const_iterator,
+          model::revision_id>(
+          [&]() { return _ntps_with_broken_rack_constraint_revision; },
+          _ntps_with_broken_rack_constraint.begin());
+    }
+
+    auto ntps_with_broken_rack_constraint_it_end() const {
+        return stable_iterator<
+          absl::btree_set<model::ntp>::const_iterator,
+          model::revision_id>(
+          [&]() { return _ntps_with_broken_rack_constraint_revision; },
+          _ntps_with_broken_rack_constraint.end());
+    }
+
     /// Called when the replica set of an ntp changes. Note that this doesn't
     /// account for in-progress moves - the function is called only once when
     /// the move is started.
@@ -51,6 +68,16 @@ public:
       model::partition_id,
       const std::vector<model::broker_shard>& prev,
       const std::vector<model::broker_shard>& next);
+
+    void add_node_to_rebalance(model::node_id id) {
+        _nodes_to_rebalance.insert(id);
+    }
+
+    void remove_node_to_rebalance(model::node_id id) {
+        _nodes_to_rebalance.erase(id);
+    }
+
+    const auto& nodes_to_rebalance() const { return _nodes_to_rebalance; }
 
     ss::future<> apply_snapshot(const controller_snapshot&);
 
@@ -71,6 +98,10 @@ private:
     partition_allocator& _partition_allocator;
     node_status_table& _node_status;
     absl::btree_set<model::ntp> _ntps_with_broken_rack_constraint;
+    // revision increment to be paired with all updates
+    // _ntps_with_broken_rack_constraint set. Relied upon by the iterator.
+    model::revision_id _ntps_with_broken_rack_constraint_revision;
+    absl::flat_hash_set<model::node_id> _nodes_to_rebalance;
     probe _probe;
 };
 

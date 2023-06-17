@@ -14,6 +14,7 @@
 #include "config/node_config.h"
 #include "config/validators.h"
 #include "model/metadata.h"
+#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "security/gssapi_principal_mapper.h"
 #include "security/mtls.h"
 #include "storage/chunk_cache.h"
@@ -1453,6 +1454,18 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt,
       {.min = 4_KiB, .max = 4_MiB})
+  , cloud_storage_spillover_manifest_max_segments(
+      *this,
+      "cloud_storage_spillover_manifest_max_segments",
+      "Maximum number of elements in the spillover manifest that can be "
+      "offloaded to the cloud storage. This property is similar to "
+      "'cloud_storage_spillover_manifest_size' but "
+      "it triggers spillover based on number of segments instead of the size "
+      "of the manifest in bytes. The property exists to simplify testing and "
+      "shouldn't be set in the production "
+      "environment",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::nullopt)
   , cloud_storage_manifest_cache_size(
       *this,
       "cloud_storage_manifest_cache_size",
@@ -1463,7 +1476,8 @@ configuration::configuration()
   , cloud_storage_manifest_cache_ttl_ms(
       *this,
       "cloud_storage_materialized_manifest_ttl_ms",
-      "The time interval that determins how long the materialized manifest can "
+      "The time interval that determines how long the materialized manifest "
+      "can "
       "stay in cache under contention. This parameter is used for performance "
       "tuning. "
       "When the spillover manifest is materialized and stored in cache and the "
@@ -1880,6 +1894,19 @@ configuration::configuration()
       "exception is thrown instead.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       true)
+  , sampled_memory_profile(
+      *this,
+      "memory_enable_memory_sampling",
+      "If true, memory allocations will be sampled and tracked. A sampled live "
+      "set of allocations can then be retrieved from the Admin API. "
+      "Additionally, we will periodically log the top-n allocation sites",
+      {// Enabling/Disabling this dynamically doesn't make much sense as for the
+       // memory profile to be meaning full you'll want to have this on from the
+       // beginning. However, we still provide the option to be able to disable
+       // it dynamically in case something goes wrong
+       .needs_restart = needs_restart::no,
+       .visibility = visibility::tunable},
+      true)
   , enable_metrics_reporter(
       *this,
       "enable_metrics_reporter",
@@ -1924,6 +1951,13 @@ configuration::configuration()
       "establish liveness status outside of the Raft protocol.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       100ms)
+  , node_status_reconnect_max_backoff_ms(
+      *this,
+      "node_status_reconnect_max_backoff_ms",
+      "Maximum backoff (in ms) to reconnect to an unresponsive peer during "
+      "node status liveness checks.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      15s)
   , enable_controller_log_rate_limiting(
       *this,
       "enable_controller_log_rate_limiting",
@@ -2101,6 +2135,15 @@ configuration::configuration()
       "that unsafe strings are permitted",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       300s)
+  , enable_schema_id_validation(
+      *this,
+      "enable_schema_id_validation",
+      "Enable Server Side Schema ID Validation.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      pandaproxy::schema_registry::schema_id_validation_mode::none,
+      {pandaproxy::schema_registry::schema_id_validation_mode::none,
+       pandaproxy::schema_registry::schema_id_validation_mode::redpanda,
+       pandaproxy::schema_registry::schema_id_validation_mode::compat})
   , kafka_schema_id_validation_cache_capacity(
       *this,
       "kafka_schema_id_validation_cache_capacity",

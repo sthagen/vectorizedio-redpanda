@@ -9,6 +9,30 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
   - statefulsets
   verbs:
   - create
@@ -50,6 +74,17 @@ rules:
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
   - get
   - list
   - patch
@@ -183,6 +218,32 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - redpanda.vectorized.io
+  resources:
+  - consoles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - redpanda.vectorized.io
+  resources:
+  - consoles/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - redpanda.vectorized.io
+  resources:
+  - consoles/status
+  verbs:
+  - get
+  - patch
+  - update
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -192,30 +253,6 @@ metadata:
   name: manager-role
   namespace: default
 rules:
-- apiGroups:
-  - apps
-  resources:
-  - configmaps
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - apps
   resources:
@@ -296,6 +333,14 @@ rules:
   - events
   verbs:
   - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
   - get
   - list
   - patch
@@ -304,7 +349,19 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
   verbs:
   - create
   - delete
@@ -335,32 +392,6 @@ rules:
   - helm.toolkit.fluxcd.io
   resources:
   - helmreleases/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - redpanda.vectorized.io
-  resources:
-  - consoles
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - redpanda.vectorized.io
-  resources:
-  - consoles/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - redpanda.vectorized.io
-  resources:
-  - consoles/status
   verbs:
   - get
   - patch

@@ -7,11 +7,12 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-from enum import IntEnum
+from enum import Enum
 import http.client
 import json
 from typing import Optional
 import uuid
+import re
 import requests
 import time
 import random
@@ -30,11 +31,18 @@ from rptest.clients.types import TopicSpec
 from rptest.services import tls
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
-from rptest.services.redpanda import ResourceSettings, SecurityConfig, LoggingConfig, PandaproxyConfig, SchemaRegistryConfig
+from rptest.services.redpanda import DEFAULT_LOG_ALLOW_LIST, ResourceSettings, SecurityConfig, LoggingConfig, PandaproxyConfig, SchemaRegistryConfig
 from rptest.services.serde_client import SerdeClient
+from rptest.tests.cluster_config_test import wait_for_version_status_sync
 from rptest.tests.pandaproxy_test import User, PandaProxyTLSProvider
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import inject_remote_script, search_logs_with_timeout
+
+
+class SchemaIdValidationMode(str, Enum):
+    NONE = "none"
+    REDPANDA = "redpanda"
+    COMPAT = "compat"
 
 
 def create_topic_names(count):
@@ -1264,11 +1272,8 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
                                   validate_schema_id: Optional[bool] = None,
                                   subject_name_strategy: Optional[str] = None,
                                   payload_class: str = "com.redpanda.Payload"):
-        Admin(self.redpanda).put_feature("schema_id_validation",
-                                         {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
+        self.redpanda.set_cluster_config(
+            {'enable_schema_id_validation': SchemaIdValidationMode.COMPAT})
 
         def get_next_strategy(subject_name_strategy):
             all_strategies = list(TopicSpec.SubjectNameStrategyCompat)
@@ -1304,12 +1309,6 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.info(
             f"Connecting to redpanda: {self.redpanda.brokers()} schema_Reg: {schema_reg}"
         )
-
-        Admin(self.redpanda).put_feature("schema_id_validation",
-                                         {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
 
         # Test against misconfigered strategy
         client = self._get_serde_client(
@@ -2158,190 +2157,208 @@ class SchemaRegistryMTLSAndBasicAuthTest(SchemaRegistryMTLSBase):
         assert set(result) == {"PROTOBUF", "AVRO"}
 
 
-class SchemaValidationTopicPropertiesTest(RedpandaTest):
+class SchemaValidationEnableWithoutSchemaRegistry(RedpandaTest):
     def __init__(self, *args, **kwargs):
-        super(SchemaValidationTopicPropertiesTest,
-              self).__init__(*args, **kwargs)
+        super(SchemaValidationEnableWithoutSchemaRegistry,
+              self).__init__(*args, schema_registry_config=None, **kwargs)
         self.rpk = RpkTool(self.redpanda)
         self.admin = Admin(self.redpanda)
 
-    @cluster(num_nodes=3)
-    def test_schema_id_validation_disabled_config(self):
+    @cluster(num_nodes=1)
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_enable_schema_id_validation(self, mode):
+        try:
+            self.redpanda.set_cluster_config(
+                {'enable_schema_id_validation': mode})
+            assert False, "expected failure"
+        except requests.exceptions.HTTPError as ex:
+            print(ex)
+            pass
+
+
+class SchemaValidationWithoutSchemaRegistry(RedpandaTest):
+    INVALID_CONFIG_LOG_ALLOW_LIST = DEFAULT_LOG_ALLOW_LIST + [
+        re.compile(
+            r"enable_schema_id_validation requires schema_registry to be enabled in redpanda.yaml"
+        ),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super(SchemaValidationWithoutSchemaRegistry,
+              self).__init__(*args,
+                             extra_rp_conf={
+                                 'enable_schema_id_validation':
+                                 SchemaIdValidationMode.REDPANDA.value
+                             },
+                             schema_registry_config=None,
+                             **kwargs)
+
+    @cluster(num_nodes=1, log_allow_list=INVALID_CONFIG_LOG_ALLOW_LIST)
+    def test_disabled_schema_registry(self):
+        rpk = RpkTool(self.redpanda)
+        topic = "no_schema_registry"
+        rpk.create_topic(
+            topic,
+            config={
+                TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION: 'true',
+            })
+        try:
+            rpk.produce(topic, "key", "value")
+            assert False, "expected INVALID_RECORD"
+        except RpkException as e:
+            print(e)
+            assert "INVALID_RECORD" in e.stderr
+
+        wait_until(lambda: self.redpanda.search_log_all(
+            "enable_schema_id_validation requires schema_registry to be enabled in redpanda.yaml"
+        ),
+                   timeout_sec=5)
+
+
+class SchemaValidationTopicPropertiesTest(RedpandaTest):
+    def __init__(self, *args, **kwargs):
+        super(SchemaValidationTopicPropertiesTest,
+              self).__init__(*args,
+                             extra_rp_conf={
+                                 'enable_schema_id_validation':
+                                 SchemaIdValidationMode.COMPAT.value
+                             },
+                             schema_registry_config=SchemaRegistryConfig(),
+                             **kwargs)
+        self.rpk = RpkTool(self.redpanda)
+        self.admin = Admin(self.redpanda)
+
+    def _get_topic_properties(self, mode: Optional[SchemaIdValidationMode],
+                              enable: Optional[bool],
+                              strategy: TopicSpec.SubjectNameStrategy):
+        enable_str = f"{enable}".lower()
+        config = {}
+        if mode == SchemaIdValidationMode.REDPANDA:
+            if enable is not None:
+                config.update({
+                    TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION:
+                    enable_str,
+                    TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION:
+                    enable_str,
+                })
+            if strategy is not None:
+                config.update({
+                    TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY:
+                    strategy.value,
+                    TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY:
+                    strategy.value,
+                })
+
+        if mode == SchemaIdValidationMode.COMPAT:
+            if enable is not None:
+                config.update({
+                    TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION_COMPAT:
+                    enable_str,
+                    TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION_COMPAT:
+                    enable_str,
+                })
+            if strategy is not None:
+                if strategy == TopicSpec.SubjectNameStrategy.TOPIC_NAME:
+                    strategy_compat = TopicSpec.SubjectNameStrategyCompat.TOPIC_NAME
+                elif strategy == TopicSpec.SubjectNameStrategy.RECORD_NAME:
+                    strategy_compat = TopicSpec.SubjectNameStrategyCompat.RECORD_NAME
+                elif strategy == TopicSpec.SubjectNameStrategy.TOPIC_RECORD_NAME:
+                    strategy_compat = TopicSpec.SubjectNameStrategyCompat.TOPIC_RECORD_NAME
+
+                config.update({
+                    TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY_COMPAT:
+                    strategy_compat.value,
+                    TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY_COMPAT:
+                    strategy_compat.value,
+                })
+        return config
+
+    @cluster(num_nodes=1)
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_schema_id_validation_disabled_config(self, mode):
         '''
         When the feature is disabled, the configs should not appear
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "disabled"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    False,
-                                    timeout_sec=10)
+        self.redpanda.set_cluster_config(
+            {'enable_schema_id_validation': SchemaIdValidationMode.NONE})
+
         topic = "default-topic"
         self.rpk.create_topic(topic)
         desc = self.rpk.describe_topic_configs(topic)
 
-        assert TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION not in desc
-        assert TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY not in desc
-        assert TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION not in desc
-        assert TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY not in desc
+        all_config = self._get_topic_properties(
+            mode, False, TopicSpec.SubjectNameStrategy.TOPIC_NAME)
 
-    @cluster(num_nodes=3)
-    def test_schema_id_validation_active_config(self):
+        for k in all_config.items():
+            assert k not in desc
+
+    @cluster(num_nodes=1)
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_schema_id_validation_active_config(self, mode):
         '''
         When the feature is active, the configs should be default
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
+        self.redpanda.set_cluster_config({'enable_schema_id_validation': mode})
+
         topic = "default-topic"
         self.rpk.create_topic(topic)
         desc = self.rpk.describe_topic_configs(topic)
 
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION] == (
-            'false', 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.TOPIC_NAME.value, 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION] == (
-            'false', 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.TOPIC_NAME.value, 'DEFAULT_CONFIG')
+        config = self._get_topic_properties(
+            mode, False, TopicSpec.SubjectNameStrategy.TOPIC_NAME)
 
-    @cluster(num_nodes=3)
-    def test_schema_id_validation_active_explicit_default_config(self):
+        for k, v in config.items():
+            assert desc[k] == (v, 'DEFAULT_CONFIG')
+
+    @cluster(num_nodes=1)
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_schema_id_validation_active_explicit_default_config(self, mode):
         '''
         If the configuration is explicitly set to default, pretend it isn't
         dynamic, so that tools with a reconcialiation loop aren't confused
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
+        self.redpanda.set_cluster_config({'enable_schema_id_validation': mode})
+
         topic = "default-topic"
-        self.rpk.create_topic(
-            topic,
-            config={
-                TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION:
-                'false',
-                TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY:
-                TopicSpec.SubjectNameStrategy.TOPIC_NAME.value,
-                TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION:
-                'false',
-                TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY:
-                TopicSpec.SubjectNameStrategy.TOPIC_NAME.value,
-                TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION_COMPAT:
-                'false',
-                TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY_COMPAT:
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_NAME.value,
-                TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION_COMPAT:
-                'false',
-                TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY_COMPAT:
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_NAME.value,
-            })
+
+        config = self._get_topic_properties(
+            mode, False, TopicSpec.SubjectNameStrategy.TOPIC_NAME)
+
+        self.rpk.create_topic(topic, config=config)
         desc = self.rpk.describe_topic_configs(topic)
 
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION] == (
-            'false', 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.TOPIC_NAME.value, 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION] == (
-            'false', 'DEFAULT_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.TOPIC_NAME.value, 'DEFAULT_CONFIG')
-
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION_COMPAT] == (
-                'false', 'DEFAULT_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY_COMPAT] == (
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_NAME.value,
-                'DEFAULT_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION_COMPAT] == (
-                'false', 'DEFAULT_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY_COMPAT] == (
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_NAME.value,
-                'DEFAULT_CONFIG')
+        for k, v in config.items():
+            assert desc[k] == (v, 'DEFAULT_CONFIG')
 
     @cluster(num_nodes=1)
-    def test_schema_id_validation_active_nondefault_config(self):
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_schema_id_validation_active_nondefault_config(self, mode):
         '''
         If the configuration is explicitly set to non-default, it should show
         as dyamic
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
+        self.redpanda.set_cluster_config({'enable_schema_id_validation': mode})
+
         topic = "default-topic"
-        self.rpk.create_topic(
-            topic,
-            config={
-                TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION:
-                'true',
-                TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY:
-                TopicSpec.SubjectNameStrategy.TOPIC_RECORD_NAME.value,
-                TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION:
-                'true',
-                TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY:
-                TopicSpec.SubjectNameStrategy.RECORD_NAME.value,
-            })
+
+        config = self._get_topic_properties(
+            mode, True, TopicSpec.SubjectNameStrategy.RECORD_NAME)
+
+        self.rpk.create_topic(topic, config=config)
+
         desc = self.rpk.describe_topic_configs(topic)
 
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION] == (
-            'true', 'DYNAMIC_TOPIC_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.TOPIC_RECORD_NAME.value,
-            'DYNAMIC_TOPIC_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION] == (
-            'true', 'DYNAMIC_TOPIC_CONFIG')
-        assert desc[TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY] == (
-            TopicSpec.SubjectNameStrategy.RECORD_NAME.value,
-            'DYNAMIC_TOPIC_CONFIG')
-
-    @cluster(num_nodes=1)
-    def test_schema_id_validation_active_nondefault_compat_config(self):
-        '''
-        If the configuration is explicitly set to non-default, it should show
-        as dyamic
-        '''
-
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
-        topic = "default-topic"
-        self.rpk.create_topic(
-            topic,
-            config={
-                TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION_COMPAT:
-                'true',
-                TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY_COMPAT:
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_RECORD_NAME.value,
-                TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION_COMPAT:
-                'true',
-                TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY_COMPAT:
-                TopicSpec.SubjectNameStrategyCompat.RECORD_NAME.value,
-            })
-        desc = self.rpk.describe_topic_configs(topic)
-
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_KEY_SCHEMA_ID_VALIDATION_COMPAT] == (
-                'true', 'DYNAMIC_TOPIC_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_KEY_SUBJECT_NAME_STRATEGY_COMPAT] == (
-                TopicSpec.SubjectNameStrategyCompat.TOPIC_RECORD_NAME.value,
-                'DYNAMIC_TOPIC_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_VALUE_SCHEMA_ID_VALIDATION_COMPAT] == (
-                'true', 'DYNAMIC_TOPIC_CONFIG')
-        assert desc[
-            TopicSpec.PROPERTY_RECORD_VALUE_SUBJECT_NAME_STRATEGY_COMPAT] == (
-                TopicSpec.SubjectNameStrategyCompat.RECORD_NAME.value,
-                'DYNAMIC_TOPIC_CONFIG')
+        for k, v in config.items():
+            assert desc[k] == (v, 'DYNAMIC_TOPIC_CONFIG')
 
     @cluster(num_nodes=1)
     def test_schema_id_validation_create_collision(self):
@@ -2349,10 +2366,6 @@ class SchemaValidationTopicPropertiesTest(RedpandaTest):
         Test creating a topic where Redpanda and compat modes are incompatible
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
         topic = "default-topic"
         try:
             self.rpk.create_topic(
@@ -2373,10 +2386,6 @@ class SchemaValidationTopicPropertiesTest(RedpandaTest):
         Test altering a topic where Redpanda and compat modes are incompatible
         '''
 
-        self.admin.put_feature("schema_id_validation", {"state": "active"})
-        self.redpanda.await_feature("schema_id_validation",
-                                    True,
-                                    timeout_sec=10)
         topic = "default-topic"
         self.rpk.create_topic(
             topic,
@@ -2392,3 +2401,49 @@ class SchemaValidationTopicPropertiesTest(RedpandaTest):
             assert False, "Expected failure"
         except RpkException:
             pass
+
+
+class SchemaRegistryLicenseTest(RedpandaTest):
+    LICENSE_CHECK_INTERVAL_SEC = 1
+
+    def __init__(self, *args, **kwargs):
+        super(SchemaRegistryLicenseTest,
+              self).__init__(*args,
+                             extra_rp_conf={
+                                 'enable_schema_id_validation':
+                                 SchemaIdValidationMode.NONE.value
+                             },
+                             schema_registry_config=SchemaRegistryConfig(),
+                             **kwargs)
+        self.redpanda.set_environment({
+            '__REDPANDA_LICENSE_CHECK_INTERVAL_SEC':
+            f'{self.LICENSE_CHECK_INTERVAL_SEC}'
+        })
+
+    def _has_license_nag(self):
+        return self.redpanda.search_log_any("Enterprise feature(s).*")
+
+    def _license_nag_is_set(self):
+        return self.redpanda.search_log_all(
+            f"Overriding default license log annoy interval to: {self.LICENSE_CHECK_INTERVAL_SEC}s"
+        )
+
+    @cluster(num_nodes=3)
+    @parametrize(mode=SchemaIdValidationMode.REDPANDA)
+    @parametrize(mode=SchemaIdValidationMode.COMPAT)
+    def test_license_nag(self, mode):
+        wait_until(self._license_nag_is_set,
+                   timeout_sec=30,
+                   err_msg="Failed to set license nag internal")
+
+        self.logger.debug("Ensuring no license nag")
+        time.sleep(self.LICENSE_CHECK_INTERVAL_SEC * 2)
+        assert not self._has_license_nag()
+
+        self.logger.debug("Setting cluster config")
+        self.redpanda.set_cluster_config({"enable_schema_id_validation": mode})
+
+        self.logger.debug("Waiting for license nag")
+        wait_until(self._has_license_nag,
+                   timeout_sec=self.LICENSE_CHECK_INTERVAL_SEC * 2,
+                   err_msg="License nag failed to appear")

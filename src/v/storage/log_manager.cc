@@ -17,6 +17,7 @@
 #include "model/metadata.h"
 #include "model/timestamp.h"
 #include "resource_mgmt/io_priority.h"
+#include "resource_mgmt/memory_sampling.h"
 #include "ssx/async-clear.h"
 #include "ssx/future-util.h"
 #include "storage/batch_cache.h"
@@ -133,13 +134,14 @@ log_manager::log_manager(
   log_config config,
   kvstore& kvstore,
   storage_resources& resources,
-  ss::sharded<features::feature_table>& feature_table) noexcept
+  ss::sharded<features::feature_table>& feature_table,
+  ss::sharded<memory_sampling>& memory_sampling) noexcept
   : _config(std::move(config))
   , _kvstore(kvstore)
   , _resources(resources)
   , _feature_table(feature_table)
   , _jitter(_config.compaction_interval())
-  , _batch_cache(config.reclaim_opts) {
+  , _batch_cache(config.reclaim_opts, memory_sampling) {
     _config.compaction_interval.watch([this]() {
         _jitter = simple_time_jitter<ss::lowres_clock>{
           _config.compaction_interval()};
@@ -620,8 +622,13 @@ ss::future<> log_manager::remove_orphan_files(
                 })
                 .handle_exception_type(
                   [](std::filesystem::filesystem_error const& err) {
-                      vlog(
-                        stlog.error,
+                      auto lvl = err.code()
+                                     == std::errc::no_such_file_or_directory
+                                   ? ss::log_level::trace
+                                   : ss::log_level::info;
+                      vlogl(
+                        stlog,
+                        lvl,
                         "Exception while cleaning orphan files {}",
                         err);
                   });

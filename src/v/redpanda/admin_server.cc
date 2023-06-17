@@ -63,6 +63,7 @@
 #include "net/dns.h"
 #include "pandaproxy/rest/api.h"
 #include "pandaproxy/schema_registry/api.h"
+#include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "raft/types.h"
 #include "redpanda/admin/api-doc/broker.json.h"
 #include "redpanda/admin/api-doc/cluster.json.h"
@@ -78,6 +79,7 @@
 #include "redpanda/admin/api-doc/status.json.h"
 #include "redpanda/admin/api-doc/transaction.json.h"
 #include "redpanda/admin/api-doc/usage.json.h"
+#include "resource_mgmt/memory_sampling.h"
 #include "rpc/errc.h"
 #include "security/acl.h"
 #include "security/credential_store.h"
@@ -86,6 +88,7 @@
 #include "security/scram_credential.h"
 #include "ssx/future-util.h"
 #include "ssx/metrics.h"
+#include "ssx/sformat.h"
 #include "utils/fragmented_vector.h"
 #include "utils/string_switch.h"
 #include "utils/utf8.h"
@@ -93,9 +96,11 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/core/map_reduce.hh>
 #include <seastar/core/prometheus.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/with_scheduling_group.hh>
@@ -117,9 +122,11 @@
 #include <boost/lexical_cast/bad_lexical_cast.hpp>
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <system_error>
 #include <type_traits>
@@ -202,7 +209,9 @@ admin_server::admin_server(
   ss::sharded<cloud_storage::topic_recovery_service>& topic_recovery_svc,
   ss::sharded<cluster::topic_recovery_status_frontend>&
     topic_recovery_status_frontend,
-  ss::sharded<cluster::tx_registry_frontend>& tx_registry_frontend)
+  ss::sharded<cluster::tx_registry_frontend>& tx_registry_frontend,
+  ss::sharded<storage::node>& storage_node,
+  ss::sharded<memory_sampling>& memory_sampling_service)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
   , _cfg(std::move(cfg))
@@ -223,6 +232,8 @@ admin_server::admin_server(
   , _topic_recovery_service(topic_recovery_svc)
   , _topic_recovery_status_frontend(topic_recovery_status_frontend)
   , _tx_registry_frontend(tx_registry_frontend)
+  , _storage_node(storage_node)
+  , _memory_sampling_service(memory_sampling_service)
   , _default_blocked_reactor_notify(
       ss::engine().get_blocked_reactor_notify_ms()) {}
 
@@ -1242,6 +1253,7 @@ join_properties(const std::vector<std::reference_wrapper<
  */
 void config_multi_property_validation(
   ss::sstring const& username,
+  pandaproxy::schema_registry::api* schema_registry,
   cluster::config_update_request const& req,
   config::configuration const& updated_config,
   std::map<ss::sstring, ss::sstring>& errors) {
@@ -1334,6 +1346,14 @@ void config_multi_property_validation(
                 }
             }
         }
+    }
+    if (
+      updated_config.enable_schema_id_validation
+        != pandaproxy::schema_registry::schema_id_validation_mode::none
+      && !schema_registry) {
+        auto name = updated_config.enable_schema_id_validation.name();
+        errors[ss::sstring(name)] = ssx::sformat(
+          "{} requires schema_registry to be enabled in redpanda.yaml", name);
     }
 }
 
@@ -1540,7 +1560,7 @@ admin_server::patch_cluster_config_handler(
         // After checking each individual property, check for
         // any multi-property validation errors
         config_multi_property_validation(
-          auth_state.get_username(), update, cfg, errors);
+          auth_state.get_username(), _schema_registry, update, cfg, errors);
 
         if (!errors.empty()) {
             json::StringBuffer buf;
@@ -3265,9 +3285,10 @@ admin_server::get_topic_partitions_handler(
 ss::future<ss::json::json_return_type>
 admin_server::trigger_on_demand_rebalance_handler(
   std::unique_ptr<ss::http::request> req) {
-    auto ec = co_await _controller->get_members_backend().invoke_on(
-      cluster::controller_stm_shard, [](cluster::members_backend& backend) {
-          return backend.request_rebalance();
+    auto ec = co_await _controller->get_partition_balancer().invoke_on(
+      cluster::controller_stm_shard,
+      [](cluster::partition_balancer_backend& pb) {
+          return pb.request_rebalance();
       });
 
     co_await throw_on_error(*req, ec, model::controller_ntp);
@@ -4044,16 +4065,19 @@ void admin_server::register_debug_routes() {
       seastar::httpd::debug_json::get_controller_status,
       [this](std::unique_ptr<ss::http::request>)
         -> ss::future<ss::json::json_return_type> {
-          return _controller->get_last_applied_offset().then(
-            [this](auto offset) {
-                using result_t = ss::httpd::debug_json::controller_status;
-                result_t ans;
-                ans.last_applied_offset = offset;
-                ans.start_offset = _controller->get_start_offset();
-                ans.committed_index = _controller->get_commited_index();
-                return ss::make_ready_future<ss::json::json_return_type>(
-                  ss::json::json_return_type(ans));
-            });
+          return ss::smp::submit_to(cluster::controller_stm_shard, [this] {
+              return _controller->get_last_applied_offset().then(
+                [this](auto offset) {
+                    using result_t = ss::httpd::debug_json::controller_status;
+                    result_t ans;
+                    ans.last_applied_offset = offset;
+                    ans.start_offset = _controller->get_start_offset();
+                    ans.committed_index = _controller->get_commited_index();
+                    ans.dirty_offset = _controller->get_dirty_offset();
+                    return ss::make_ready_future<ss::json::json_return_type>(
+                      ss::json::json_return_type(ans));
+                });
+          });
       });
 
     register_route<user>(
@@ -4123,6 +4147,13 @@ void admin_server::register_debug_routes() {
             });
       });
 
+    register_route<superuser>(
+      ss::httpd::debug_json::sampled_memory_profile,
+      [this](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          return sampled_memory_profile_handler(std::move(req));
+      });
+
     register_route<user>(
       ss::httpd::debug_json::restart_service,
       [this](std::unique_ptr<ss::http::request> req) {
@@ -4169,6 +4200,98 @@ void admin_server::register_debug_routes() {
     register_route<superuser>(
       ss::httpd::debug_json::unsafe_reset_metadata,
       std::move(unsafe_reset_metadata_handler));
+
+    register_route<superuser>(
+      ss::httpd::debug_json::get_disk_stat,
+      [this](std::unique_ptr<ss::http::request> request) {
+          return get_disk_stat_handler(std::move(request));
+      });
+
+    register_route<superuser>(
+      ss::httpd::debug_json::put_disk_stat,
+      [this](std::unique_ptr<ss::http::request> request) {
+          return put_disk_stat_handler(std::move(request));
+      });
+}
+
+namespace {
+storage::node::disk_type resolve_disk_type(std::string_view name) {
+    if (name == "data") {
+        return storage::node::disk_type::data;
+    } else if (name == "cache") {
+        return storage::node::disk_type::cache;
+    } else {
+        throw ss::httpd::bad_param_exception(
+          fmt::format("Unknown disk type: {}", name));
+    }
+}
+} // namespace
+
+ss::future<ss::json::json_return_type>
+admin_server::get_disk_stat_handler(std::unique_ptr<ss::http::request> req) {
+    auto type = resolve_disk_type(req->param["type"]);
+
+    // get effective disk stat
+    auto stat = co_await _storage_node.invoke_on(
+      0, [type](auto& node) { return node.get_statvfs(type); });
+
+    ss::httpd::debug_json::disk_stat disk;
+    disk.total_bytes = stat.stat.f_blocks * stat.stat.f_frsize;
+    disk.free_bytes = stat.stat.f_bfree * stat.stat.f_frsize;
+
+    co_return disk;
+}
+
+namespace {
+json::validator make_disk_stat_overrides_validator() {
+    const std::string schema = R"(
+{
+    "type": "object",
+    "properties": {
+        "total_bytes": {
+            "type": "integer"
+        },
+        "free_bytes": {
+            "type": "integer"
+        },
+        "free_bytes_delta": {
+            "type": "integer"
+        }
+    },
+    "additionalProperties": false
+}
+)";
+    return json::validator(schema);
+}
+} // namespace
+
+ss::future<ss::json::json_return_type>
+admin_server::put_disk_stat_handler(std::unique_ptr<ss::http::request> req) {
+    static thread_local auto disk_stat_validator(
+      make_disk_stat_overrides_validator());
+
+    auto doc = parse_json_body(*req);
+    apply_validator(disk_stat_validator, doc);
+    auto type = resolve_disk_type(req->param["type"]);
+
+    storage::node::statvfs_overrides overrides;
+    if (doc.HasMember("total_bytes")) {
+        overrides.total_bytes = doc["total_bytes"].GetUint64();
+    }
+    if (doc.HasMember("free_bytes")) {
+        overrides.free_bytes = doc["free_bytes"].GetUint64();
+    }
+    if (doc.HasMember("free_bytes_delta")) {
+        overrides.free_bytes_delta = doc["free_bytes_delta"].GetInt64();
+    }
+
+    co_await _storage_node.invoke_on(
+      storage::node::work_shard, [type, overrides](auto& node) {
+          node.set_statvfs_overrides(type, overrides);
+          return ss::now();
+      });
+
+    co_return ss::json::json_void();
 }
 
 ss::future<ss::json::json_return_type>
@@ -4907,4 +5030,47 @@ admin_server::restart_service_handler(std::unique_ptr<ss::http::request> req) {
     vlog(logger.info, "Restart redpanda service: {}", to_string_view(*service));
     co_await restart_redpanda_service(*service);
     co_return ss::json::json_return_type(ss::json::json_void());
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::sampled_memory_profile_handler(
+  std::unique_ptr<ss::http::request> req) {
+    vlog(logger.info, "Request to sampled memory profile");
+
+    std::optional<size_t> shard_id;
+    if (auto e = req->get_query_param("shard"); !e.empty()) {
+        try {
+            shard_id = boost::lexical_cast<size_t>(e);
+        } catch (const boost::bad_lexical_cast&) {
+            throw ss::httpd::bad_param_exception(
+              fmt::format("Invalid parameter 'shard_id' value {{{}}}", e));
+        }
+    }
+
+    if (shard_id.has_value()) {
+        auto max_shard_id = ss::smp::count;
+        if (*shard_id > max_shard_id) {
+            throw ss::httpd::bad_param_exception(fmt::format(
+              "Shard id too high, max shard id is {}", max_shard_id));
+        }
+    }
+
+    auto profiles = co_await _memory_sampling_service.local()
+                      .get_sampled_memory_profiles(shard_id);
+
+    std::vector<ss::httpd::debug_json::memory_profile> resp(profiles.size());
+    for (size_t i = 0; i < resp.size(); ++i) {
+        resp[i].shard = profiles[i].shard_id;
+
+        for (auto& allocation_sites : profiles[i].allocation_sites) {
+            ss::httpd::debug_json::allocation_site allocation_site;
+            allocation_site.size = allocation_sites.size;
+            allocation_site.count = allocation_sites.count;
+            allocation_site.backtrace = std::move(allocation_sites.backtrace);
+            resp[i].allocation_sites.push(allocation_site);
+        }
+    }
+
+    co_return co_await ss::make_ready_future<ss::json::json_return_type>(
+      std::move(resp));
 }

@@ -9,6 +9,7 @@ rp_test(
 set(srcs
     partition_allocator_tests.cc
     partition_balancer_planner_test.cc
+    partition_balancer_simulator_test.cc
     simple_batch_builder_test.cc
     serialization_rt_test.cc
     cluster_utils_tests.cc
@@ -54,7 +55,6 @@ set(srcs
         ephemeral_credential_test.cc
         health_monitor_test.cc
         metadata_dissemination_test.cc
-        backend_reallocation_strategy_test.cc
         replicas_rebalancing_tests.cc)
 
 foreach(cluster_test_src ${srcs})

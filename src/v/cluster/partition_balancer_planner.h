@@ -40,6 +40,9 @@ struct planner_config {
     // Max number of actions that can be scheduled in one planning iteration
     size_t max_concurrent_actions;
     std::chrono::seconds node_availability_timeout_sec;
+    // If the user manually requested a rebalance (not connected to node
+    // addition)
+    bool ondemand_rebalance_requested = false;
     // Fallocation step used to calculate upperbound for partition size
     size_t segment_fallocation_step;
     // Threshold for minimum size of partition that is going to be prioritized
@@ -70,11 +73,13 @@ public:
         partition_balancer_violations violations;
         std::vector<ntp_reassignment> reassignments;
         std::vector<model::ntp> cancellations;
+        bool counts_rebalancing_finished = false;
         size_t failed_actions_count = 0;
         status status = status::empty;
     };
 
-    plan_data plan_actions(const cluster_health_report&);
+    ss::future<plan_data>
+    plan_actions(const cluster_health_report&, ss::abort_source&);
 
 private:
     class request_context;
@@ -84,17 +89,19 @@ private:
     class immutable_partition;
 
     void init_per_node_state(
-      const cluster_health_report&, request_context&, plan_data&) const;
+      const cluster_health_report&, request_context&, plan_data&);
 
-    void init_ntp_sizes_from_health_report(
+    ss::future<> init_ntp_sizes_from_health_report(
       const cluster_health_report& health_report, request_context&);
 
-    static void get_node_drain_actions(
+    static ss::future<> get_node_drain_actions(
       request_context&,
       const absl::flat_hash_set<model::node_id>&,
       std::string_view reason);
-    static void get_rack_constraint_repair_actions(request_context&);
-    static void get_full_node_actions(request_context&);
+    static ss::future<> get_rack_constraint_repair_actions(request_context&);
+    static ss::future<> get_full_node_actions(request_context&);
+    static ss::future<> get_counts_rebalancing_actions(request_context&);
+
     static size_t calculate_full_disk_partition_move_priority(
       model::node_id, const reassignable_partition&, const request_context&);
 

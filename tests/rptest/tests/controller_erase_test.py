@@ -14,6 +14,7 @@ from rptest.services.admin import Admin
 from rptest.clients.types import TopicSpec
 from ducktape.mark import parametrize
 from ducktape.utils.util import wait_until
+from rptest.util import wait_until_result
 
 ERASE_ERROR_MSG = "Inconsistency detected between KVStore last_applied"
 ERASE_LOG_ALLOW_LIST = RESTART_LOG_ALLOW_LIST + [ERASE_ERROR_MSG]
@@ -36,7 +37,7 @@ class ControllerEraseTest(RedpandaTest):
 
         In general Redpanda doesn't handle on-disk corruption (such as selectively
         deleting segments) gracefully, but in the particular case of wiping
-        the whole controller log, or a contiguous sufffix region of the log,
+        the whole controller log, or a contiguous suffix region of the log,
         we can gracefully let raft fill in the gaps.
         """
 
@@ -57,14 +58,21 @@ class ControllerEraseTest(RedpandaTest):
 
         # Stop the node we will intentionally damage
         victim_node = self.redpanda.nodes[1]
-        bystander_node = self.redpanda.nodes[0]
+
+        def controller_elected():
+            ctrl = self.redpanda.controller()
+            return (ctrl is not None, ctrl)
+
+        bystander_node = wait_until_result(controller_elected,
+                                           timeout_sec=15,
+                                           backoff_sec=1)
 
         def wait_all_segments():
             storage = self.redpanda.node_storage(victim_node)
             segments = storage.ns['redpanda'].topics['controller'].partitions[
                 "0_0"].segments.keys()
             # We expect that segments count for controller should be transfers_leadership_count + 1.
-            # Becasue each transfer creats one segment + initial leadership after restart creates first segment
+            # Because each transfer creates one segment + initial leadership after restart creates first segment
             return len(segments) == transfers_leadership_count + 1
 
         wait_until(
@@ -75,20 +83,19 @@ class ControllerEraseTest(RedpandaTest):
             f"Victim node({victim_node}) does not contain expected segments count({transfers_leadership_count + 1}) for controller log"
         )
 
-        bystander_node_last_applied_offset = admin.get_controller_status(
-            bystander_node)["last_applied_offset"]
+        bystander_node_dirty_offset = admin.get_controller_status(
+            bystander_node)["dirty_offset"]
 
         def wait_victim_node_apply_segments():
             return admin.get_controller_status(victim_node)[
-                "last_applied_offset"] >= bystander_node_last_applied_offset
+                "last_applied_offset"] >= bystander_node_dirty_offset
 
         wait_until(
             wait_victim_node_apply_segments,
             timeout_sec=40,
             backoff_sec=1,
             err_msg=
-            f"Victim node did not apply {bystander_node_last_applied_offset} offset"
-        )
+            f"Victim node did not apply {bystander_node_dirty_offset} offset")
 
         self.redpanda.stop_node(victim_node)
 

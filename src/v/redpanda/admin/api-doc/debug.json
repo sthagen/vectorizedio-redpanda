@@ -206,6 +206,32 @@
             ]
         },
         {
+            "path": "/v1/debug/sampled_memory_profile",
+            "operations": [
+                {
+                    "method": "GET",
+                    "summary": "Get the currently sampled live memory set for the specified or all shards",
+                    "nickname": "sampled_memory_profile",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "type": "array",
+                    "items": {
+                        "type": "memory_profile"
+                    },
+                    "parameters": [
+                        {
+                            "name": "shard",
+                            "in": "query",
+                            "required": false,
+                            "allowMultiple": false,
+                            "type": "long"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
             "path": "/v1/debug/refresh_disk_health_info",
             "operations": [
                 {
@@ -395,6 +421,57 @@
               ]
             }
           ]
+        },
+        {
+          "path": "/v1/debug/storage/disk_stat/{type}",
+          "operations": [
+            {
+              "method": "GET",
+              "summary": "Return disk space statistics.",
+              "operationId": "get_disk_stat",
+              "nickname": "get_disk_stat",
+              "type": "disk_stat",
+              "produces": [
+                "application/json"
+              ],
+              "parameters": [
+                {
+                  "name": "type",
+                  "in": "path",
+                  "required": true,
+                  "type": "string"
+                }
+              ],
+              "responseMessages": [
+                {
+                  "code": 200
+                }
+              ]
+            },
+            {
+              "method": "PUT",
+              "summary": "Override disk space statistics.",
+              "operationId": "put_disk_stat",
+              "nickname": "put_disk_stat",
+              "type": "disk_stat_overrides",
+              "produces": [
+                "application/json"
+              ],
+              "parameters": [
+                {
+                  "name": "type",
+                  "in": "path",
+                  "required": true,
+                  "type": "string"
+                }
+              ],
+              "responseMessages": [
+                {
+                  "code": 200
+                }
+              ]
+            }
+          ]
         }
     ],
     "models": {
@@ -446,6 +523,40 @@
                 }
             }
         },
+        "memory_profile": {
+            "id": "memory_profile",
+            "description": "Sampled memory profile of a shard",
+            "properties": {
+                "shard": {
+                    "type": "long",
+                    "description": "Id of the shard the profile is from"
+                },
+                "allocation_sites": {
+                    "type": "array",
+                    "items": {
+                        "type": "allocation_site"
+                    }
+                }
+            }
+        },
+        "allocation_site": {
+            "id": "allocation_site",
+            "description": "A single allocation site with backtrace, size and count",
+            "properties": {
+                "size": {
+                    "type": "long",
+                    "description": "Current bytes allocated at this allocation site (note this is the upscaled size and not the sampled one)"
+                },
+                "count": {
+                    "type": "long",
+                    "description": "Live allocations at this site"
+                },
+                "backtrace": {
+                    "type": "string",
+                    "description": "Backtrace of this allocation site"
+                }
+            }
+        },
         "controller_status": {
             "id": "controller_status",
             "description": "Controller status",
@@ -461,6 +572,10 @@
                 "committed_index": {
                     "type": "long",
                     "description": "Committed index for controller consensus"
+                },
+                "dirty_offset": {
+                    "type": "long",
+                    "description": "Controller log dirty offset"
                 }
             }
         },
@@ -808,6 +923,38 @@
                 "target_min_capacity_wanted": {
                     "type": "long",
                     "description": "Target minimum capacity wanted"
+                }
+            }
+        },
+        "disk_stat": {
+            "id": "disk_stat",
+            "description": "Effective disk stat used by redpanda",
+            "properties": {
+                "total_bytes": {
+                    "type": "long",
+                    "description": "Total size of disk in bytes"
+                },
+                "free_bytes": {
+                    "type": "long",
+                    "description": "Free size of disk in bytes"
+                }
+            }
+        },
+        "disk_stat_overrides": {
+            "id": "disk_stat_overrides",
+            "description": "Disk stat overrides",
+            "properties": {
+                "total_bytes": {
+                    "type": "long",
+                    "description": "Total size of disk in bytes"
+                },
+                "free_bytes": {
+                    "type": "long",
+                    "description": "Free size of disk in bytes"
+                },
+                "free_bytes_delta": {
+                    "type": "long",
+                    "description": "Free size adjustment (signed)"
                 }
             }
         }

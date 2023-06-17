@@ -25,6 +25,7 @@
 #include "model/metadata.h"
 #include "model/timestamp.h"
 #include "net/unresolved_address.h"
+#include "pandaproxy/schema_registry/schema_id_validation.h"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/net/inet_address.hh>
@@ -289,6 +290,8 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_credentials_host;
     bounded_property<std::optional<size_t>>
       cloud_storage_spillover_manifest_size;
+    property<std::optional<size_t>>
+      cloud_storage_spillover_manifest_max_segments;
     bounded_property<size_t> cloud_storage_manifest_cache_size;
     property<std::chrono::milliseconds> cloud_storage_manifest_cache_ttl_ms;
 
@@ -374,6 +377,7 @@ struct configuration final : public config_store {
 
     // memory related settings
     property<bool> memory_abort_on_alloc_failure;
+    property<bool> sampled_memory_profile;
 
     // metrics reporter
     property<bool> enable_metrics_reporter;
@@ -387,6 +391,7 @@ struct configuration final : public config_store {
     property<bool> enable_rack_awareness;
 
     property<std::chrono::milliseconds> node_status_interval;
+    property<std::chrono::milliseconds> node_status_reconnect_max_backoff_ms;
     // controller log limitng
     property<bool> enable_controller_log_rate_limiting;
     property<size_t> rps_limit_topic_operations;
@@ -425,6 +430,8 @@ struct configuration final : public config_store {
     property<std::chrono::seconds> legacy_unsafe_log_warning_interval_sec;
 
     // schema id validation
+    enum_property<pandaproxy::schema_registry::schema_id_validation_mode>
+      enable_schema_id_validation;
     config::property<size_t> kafka_schema_id_validation_cache_capacity;
 
     bounded_property<double, numeric_bounds> kafka_memory_share_for_fetch;

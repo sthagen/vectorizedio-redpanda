@@ -96,6 +96,7 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
       cmd.key,
       std::move(md),
     });
+    _topics_map_revision++;
     notify_waiters();
 
     _probe.handle_topic_creation(std::move(cmd.key));
@@ -129,6 +130,7 @@ topic_table::do_local_delete(model::topic_namespace nt, model::offset offset) {
         }
 
         _topics.erase(tp);
+        _topics_map_revision++;
         notify_waiters();
         _probe.handle_topic_deletion(nt);
 
@@ -222,6 +224,7 @@ topic_table::apply(create_partition_cmd cmd, model::offset offset) {
         tp->second.partitions[p_as.id] = partition_meta{
           .replicas_revisions = replicas_revisions,
           .last_update_finished_revision = rev_id};
+        _topics_map_revision++;
         _pending_deltas.emplace_back(
           std::move(ntp),
           std::move(p_as),
@@ -1169,6 +1172,7 @@ ss::future<> topic_table::apply_snapshot(
             co_await applier.delete_topic(ns_tp, md_item, snap_revision);
             auto to_delete = old_it++;
             _topics.erase(to_delete);
+            _topics_map_revision++;
         }
     }
 
@@ -1176,6 +1180,7 @@ ss::future<> topic_table::apply_snapshot(
     for (const auto& [ns_tp, topic] : snap.topics) {
         if (!_topics.contains(ns_tp)) {
             _topics.emplace(ns_tp, co_await applier.create_topic(ns_tp, topic));
+            _topics_map_revision++;
         }
     }
 
@@ -1337,6 +1342,16 @@ topic_table::get_topic_timestamp_type(model::topic_namespace_view tp) const {
 
 const topic_table::underlying_t& topic_table::all_topics_metadata() const {
     return _topics;
+}
+
+void topic_table::check_topics_map_stable(model::revision_id start_rev) const {
+    if (_topics_map_revision != start_rev) {
+        throw std::runtime_error(fmt::format(
+          "topic table modified, aborting iteration "
+          "(start revision: {}, current revision: {})",
+          start_rev,
+          _topics_map_revision));
+    }
 }
 
 bool topic_table::contains(
