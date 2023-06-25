@@ -355,6 +355,8 @@ cluster::errc map_update_interruption_error_code(std::error_code ec) {
         case rpc::errc::client_request_timeout:
         case rpc::errc::connection_timeout:
             return errc::timeout;
+        case rpc::errc::shutting_down:
+            return errc::shutting_down;
         case rpc::errc::disconnected_endpoint:
         case rpc::errc::exponential_backoff:
         case rpc::errc::missing_node_rpc_client:
@@ -387,7 +389,7 @@ partition_state get_partition_state(ss::lw_shared_ptr<partition> partition) {
     if (unlikely(!partition)) {
         return state;
     }
-    state.start_offset = partition->start_offset();
+    state.start_offset = partition->raft_start_offset();
     state.committed_offset = partition->committed_offset();
     state.last_stable_offset = partition->last_stable_offset();
     state.high_water_mark = partition->high_watermark();

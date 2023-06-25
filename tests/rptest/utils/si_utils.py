@@ -10,19 +10,19 @@ import collections
 import json
 import pprint
 import struct
-from collections import defaultdict, namedtuple
-from typing import Sequence, Optional, NewType, NamedTuple
-from enum import Enum
 import time
+from dataclasses import dataclass
+from collections import defaultdict, namedtuple
+from enum import Enum
+from typing import Sequence, Optional, NewType, NamedTuple
 
 import xxhash
 
 from rptest.archival.s3_client import ObjectMetadata
-from rptest.clients.types import TopicSpec
-from rptest.clients.rpk import RpkTool
-from rptest.services.admin import Admin
-from rptest.services.redpanda import MetricsEndpoint, RESTART_LOG_ALLOW_LIST
 from rptest.clients.rp_storage_tool import RpStorageTool
+from rptest.clients.rpk import RpkTool
+from rptest.clients.types import TopicSpec
+from rptest.services.redpanda import MetricsEndpoint, RESTART_LOG_ALLOW_LIST
 
 EMPTY_SEGMENT_SIZE = 4096
 
@@ -407,6 +407,10 @@ class PathMatcher:
                 or o.key.endswith("/manifest.bin")
                 ) and self._match_partition_manifest(o.key)
 
+    def is_spillover_manifest(self, o: ObjectMetadata) -> bool:
+        return "/manifest.bin." in o.key and self._match_partition_manifest(
+            o.key)
+
     def is_topic_manifest(self, o: ObjectMetadata) -> bool:
         return self._match_topic_manifest(o.key)
 
@@ -476,17 +480,56 @@ def quiesce_uploads(redpanda, topic_names: list[str], timeout_sec):
             redpanda.logger.debug(f"Partition {ntp} ready (reached HWM {hwm})")
 
 
+@dataclass(order=True)
+class SpillMeta:
+    base: int
+    last: int
+    base_kafka: int
+    last_kafka: int
+    base_ts: int
+    last_ts: int
+
+    path: str
+    ntpr: NTPR
+
+    def __init__(self, ntpr: NTPR, path: str):
+        self.path = path.lstrip()
+        self.ntpr = ntpr
+
+        self.base, self.last, self.base_kafka, self.last_kafka, self.base_ts, self.last_ts = self.parse_path(
+        )
+
+    def parse_path(self) -> list[str]:
+        """
+        Extract metadata from spillover manifest path.
+        Expected format is:
+        {base}.{base_rp_offset}.{last_rp_offest}.{base_kafka_offset}.{last_kafka_offset}.{first_ts}.{last_ts}
+        where base = {hash}/meta/{ntpr.ns}/{ntpr.topic}/{ntpr.partition}_{ntpr.revision}/manifest"
+        """
+        base = BucketView.gen_manifest_path(self.ntpr)
+        suffix = self.path.removeprefix(f"{base}.")
+
+        split = suffix.split(".")
+        if len(split) != 6:
+            raise RuntimeError(
+                f"Invalid spillover manifest {self.path=} for {self.ntpr=}")
+
+        return split
+
+
+@dataclass
 class BucketViewState:
     """
     Results of a full listing of the bucket, if listed is True, or
     partial results if listed is False
     """
     def __init__(self):
-        self.listed = False
-        self.segment_objects = 0
-        self.ignored_objects = 0
-        self.partition_manifests = {}
-        self.topic_manifests = {}
+        self.listed: bool = False
+        self.segment_objects: int = 0
+        self.ignored_objects: int = 0
+        self.topic_manifests: dict[NT, dict] = {}
+        self.partition_manifests: dict[NTP, dict] = {}
+        self.spillover_manifests: dict[NTP, dict[SpillMeta, dict]] = {}
 
 
 class ManifestFormat(Enum):
@@ -643,9 +686,10 @@ class BucketView:
         for o in self.client.list_objects(self.bucket):
             if self.path_matcher.is_partition_manifest(o):
                 ntpr = parse_s3_manifest_path(o.key)
-                manifest = self._load_manifest(ntpr, o.key)
-                self.logger.debug(f'registered partition manifest for {ntpr}: '
-                                  f'{pprint.pformat(manifest, indent=2)}')
+                self._load_manifest(ntpr, o.key)
+            elif self.path_matcher.is_spillover_manifest(o):
+                ntpr = parse_s3_manifest_path(o.key)
+                self._load_spillover_manifest(ntpr, o.key)
             elif self.path_matcher.is_segment(o):
                 self._state.segment_objects += 1
             elif self.path_matcher.is_topic_manifest(o):
@@ -653,23 +697,23 @@ class BucketView:
             else:
                 self._state.ignored_objects += 1
 
-    def _load_manifest(self, ntpr: NTPR, path: Optional[str] = None) -> dict:
+    def _get_manifest(self, ntpr: NTPR, path: Optional[str] = None) -> dict:
         """
-        Having composed the path for a manifest, download it cache the result, and return the manifest dict
+        Having composed the path for a manifest, download it and return the manifest dict
 
         Raises KeyError if the object is not found.
         """
 
         if path is None:
             # implicit path, try .bin and fall back to .json
-            path = self.gen_manifest_path(ntpr, "bin")
+            path = BucketView.gen_manifest_path(ntpr, "bin")
             format = ManifestFormat.BINARY
             try:
                 data = self.client.get_object_data(self.bucket, path)
             except Exception as e:
                 self.logger.debug(f"Exception loading {path}: {e}")
                 try:
-                    path = self.gen_manifest_path(ntpr, "json")
+                    path = BucketView.gen_manifest_path(ntpr, "json")
                     format = ManifestFormat.JSON
                     data = self.client.get_object_data(self.bucket, path)
                 except Exception as e:
@@ -700,13 +744,51 @@ class BucketView:
         else:
             manifest = json.loads(data)
 
-        self.logger.debug(
-            f"Loaded manifest {ntpr}: {pprint.pformat(manifest)}")
-
-        self._state.partition_manifests[ntpr.to_ntp()] = manifest
         return manifest
 
-    def gen_manifest_path(self, ntpr: NTPR, extension: str = "bin"):
+    def _load_manifest(self, ntpr: NTPR, path: Optional[str] = None) -> dict:
+        manifest = self._get_manifest(ntpr, path)
+        self._state.partition_manifests[ntpr.to_ntp()] = manifest
+
+        self.logger.debug(
+            f"Loaded manifest for {ntpr}: {pprint.pformat(manifest, indent=2)}"
+        )
+
+        return manifest
+
+    def _load_spillover_manifest(self, ntpr: NTPR,
+                                 path: str) -> tuple[SpillMeta, dict]:
+        manifest = self._get_manifest(ntpr, path)
+        ntp = ntpr.to_ntp()
+
+        if ntp not in self._state.spillover_manifests:
+            self._state.spillover_manifest[ntp] = {}
+
+        meta = SpillMeta(ntpr, path)
+        self._state.spillover_manifest[ntp][meta] = manifest
+
+        self.logger.debug(
+            f"Loaded spillover manifest for {ntpr}: {pprint.pformat(manifest, indent=2)}"
+        )
+
+        return meta, manifest
+
+    def _discover_spillover_manifests(self, ntpr: NTPR) -> list[SpillMeta]:
+        list_res = self.client.list_objects(
+            bucket=self.bucket, prefix=BucketView.gen_manifest_path(ntpr))
+
+        def is_spillover_manifest_path(path: str) -> bool:
+            return not (path.endswith(".json") or path.endswith(".bin"))
+
+        spill_metas = []
+        for manifest_obj in list_res:
+            if is_spillover_manifest_path(manifest_obj.key):
+                spill_metas.append(SpillMeta(ntpr, manifest_obj.key))
+
+        return sorted(spill_metas)
+
+    @staticmethod
+    def gen_manifest_path(ntpr: NTPR, extension: str = "bin"):
         x = xxhash.xxh32()
         path = f"{ntpr.ns}/{ntpr.topic}/{ntpr.partition}_{ntpr.revision}"
         x.update(path.encode('ascii'))
@@ -729,6 +811,48 @@ class BucketView:
             ntpr = self.ntp_to_ntpr(ntp)
 
         return self._load_manifest(ntpr)
+
+    def get_spillover_metadata(self, ntp: NTP | NTPR) -> list[SpillMeta]:
+        """
+        Returns a sorted list of metadata describing each spill over manifest
+        for 'ntp'. Note that the manifests themselves are not fetched.
+        """
+        ntpr = None
+        if isinstance(ntp, NTPR):
+            ntpr = ntp
+            ntp = ntpr.to_ntp()
+
+        if not ntpr:
+            ntpr = self.ntp_to_ntpr(ntp)
+
+        return self._discover_spillover_manifests(ntpr)
+
+    def get_spillover_manifests(
+            self, ntp: NTP | NTPR) -> Optional[dict[SpillMeta, dict]]:
+        """
+        Discovers and downloads the spillover manifests for 'ntp'. If no spillover
+        manifests exist 'None' is returned. Note that the results are cached and will
+        be used in subsequent calls.
+        """
+        ntpr = None
+        if isinstance(ntp, NTPR):
+            ntpr = ntp
+            ntp = ntpr.to_ntp()
+
+        if ntp in self._state.spillover_manifests:
+            return self._state.spillover_manifests[ntp]
+
+        if not ntpr:
+            ntpr = self.ntp_to_ntpr(ntp)
+
+        spills = self._discover_spillover_manifests(ntpr)
+        for spill in spills:
+            self._load_spillover_manifest(spill.ntpr, spill.path)
+
+        if ntp in self._state.spillover_manifests:
+            return self._state.spillover_manifests[ntp]
+        else:
+            return None
 
     def _load_topic_manifest(self, topic: NT, path: str):
         try:
@@ -877,16 +1001,20 @@ class BucketView:
 
         return len(manifest['segments'])
 
-    def cloud_log_size_for_ntp(self,
-                               topic: str,
-                               partition: int,
-                               ns: str = 'kafka') -> int:
+    def cloud_log_size_for_ntp(
+            self,
+            topic: str,
+            partition: int,
+            ns: str = 'kafka',
+            include_size_below_start_offset: bool = True) -> int:
         try:
             manifest = self.manifest_for_ntp(topic, partition, ns)
         except KeyError:
             return 0
         else:
-            return BucketView.cloud_log_size_from_ntp_manifest(manifest)
+            return BucketView.cloud_log_size_from_ntp_manifest(
+                manifest,
+                include_below_start_offset=include_size_below_start_offset)
 
     def assert_at_least_n_uploaded_segments_compacted(self,
                                                       topic: str,

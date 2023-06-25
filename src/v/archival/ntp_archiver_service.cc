@@ -64,6 +64,10 @@
 #include <numeric>
 #include <stdexcept>
 
+namespace {
+constexpr auto housekeeping_jit = 5ms;
+}
+
 namespace archival {
 
 static std::unique_ptr<adjacent_segment_merger>
@@ -112,7 +116,7 @@ ntp_archiver::ntp_archiver(
         .cloud_storage_max_segments_pending_deletion_per_partition.bind())
   , _housekeeping_interval(
       config::shard_local_cfg().cloud_storage_housekeeping_interval_ms.bind())
-  , _housekeeping_jitter(_housekeeping_interval(), 5ms)
+  , _housekeeping_jitter(_housekeeping_interval(), housekeeping_jit)
   , _next_housekeeping(_housekeeping_jitter())
   , _segment_tags(cloud_storage::remote::make_segment_tags(_ntp, _rev))
   , _manifest_tags(
@@ -127,6 +131,12 @@ ntp_archiver::ntp_archiver(
         .cloud_storage_manifest_max_upload_interval_sec.bind())
   , _feature_table(parent.feature_table())
   , _manifest_view(std::move(amv)) {
+    _housekeeping_interval.watch([this] {
+        _housekeeping_jitter = simple_time_jitter<ss::lowres_clock>{
+          _housekeeping_interval(), housekeeping_jit};
+        _next_housekeeping = _housekeeping_jitter();
+    });
+
     _start_term = _parent.term();
     // Override bucket for read-replica
     if (_parent.is_read_replica_mode_enabled()) {
@@ -1901,6 +1911,13 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
 
     const auto clean_offset = manifest().get_archive_clean_offset();
     const auto start_offset = manifest().get_archive_start_offset();
+
+    vlog(
+      _rtclog.info,
+      "Garbage collecting archive segments in offest range [{}, {})",
+      clean_offset,
+      start_offset);
+
     model::offset new_clean_offset;
     // Value includes segments but doesn't include manifests
     size_t bytes_to_remove = 0;
@@ -1933,10 +1950,10 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
                           == cloud_storage::segment_name_format::v3
                         && meta.metadata_size_hint != 0) {
                           segments_to_remove.push_back(
-                            cloud_storage::generate_index_path(path));
+                            cloud_storage::generate_remote_tx_path(path)());
                       }
                       segments_to_remove.push_back(
-                        cloud_storage::generate_remote_tx_path(path)());
+                        cloud_storage::generate_index_path(path));
                   } else {
                       // This indicates that we need to remove only some of the
                       // segments from the manifest. In this case the outer loop
@@ -1959,6 +1976,9 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
               _rtclog.error,
               "Failed to load next spillover manifest: {}",
               res.error());
+            break;
+        } else if (res.value() == false) {
+            // End of stream
             break;
         }
     }
@@ -2053,8 +2073,13 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
 ss::future<bool> ntp_archiver::batch_delete(
   std::vector<cloud_storage_clients::object_key> keys) {
     // Do batch delete, the batch size should be below the limit
+    auto timeout = config::shard_local_cfg()
+                     .cloud_storage_segment_upload_timeout_ms.value();
+    auto backoff
+      = config::shard_local_cfg().cloud_storage_initial_backoff_ms.value();
+    retry_chain_node fib(timeout, backoff, &_rtcnode);
     auto res = co_await _remote.delete_objects(
-      get_bucket_name(), std::move(keys), _rtcnode);
+      get_bucket_name(), std::move(keys), fib);
     if (res != cloud_storage::upload_result::success) {
         vlog(_rtclog.error, "Failed to delete objects", res);
         co_return false;
@@ -2426,7 +2451,7 @@ ntp_archiver::find_reupload_candidate(manifest_scanner_t scanner) {
     if (!may_begin_uploads()) {
         co_return std::make_pair(std::nullopt, std::nullopt);
     }
-    auto run = scanner(_parent.start_offset(), manifest());
+    auto run = scanner(_parent.raft_start_offset(), manifest());
     if (!run.has_value()) {
         vlog(_rtclog.debug, "Scan didn't resulted in upload candidate");
         co_return std::make_pair(std::nullopt, std::nullopt);
@@ -2434,7 +2459,7 @@ ntp_archiver::find_reupload_candidate(manifest_scanner_t scanner) {
         vlog(_rtclog.debug, "Scan result: {}", run);
     }
     auto units = co_await ss::get_units(_mutex, 1, _as);
-    if (run->meta.base_offset >= _parent.start_offset()) {
+    if (run->meta.base_offset >= _parent.raft_start_offset()) {
         auto log_generic = _parent.log();
         auto& log = dynamic_cast<storage::disk_log_impl&>(
           *log_generic.get_impl());

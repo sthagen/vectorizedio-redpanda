@@ -235,6 +235,7 @@ ss::future<consensus_ptr> partition_manager::manage(
       _feature_table,
       _tm_stm_cache_manager,
       _upload_hks,
+      _storage.kvs(),
       _max_concurrent_producer_ids,
       read_replica_bucket);
 
@@ -339,7 +340,7 @@ partition_manager::remove(const model::ntp& ntp, partition_removal_mode mode) {
       .then([this, ntp] { return _storage.log_mgr().remove(ntp); })
       .then([this, partition, mode] {
           if (mode == partition_removal_mode::global) {
-              return partition->remove_remote_persistent_state(_as);
+              return partition->finalize_remote_partition(_as);
           } else {
               return ss::now();
           }
