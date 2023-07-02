@@ -23,6 +23,7 @@
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "model/record_batch_types.h"
+#include "raft/consensus.h"
 #include "resource_mgmt/io_priority.h"
 #include "ssx/future-util.h"
 #include "ssx/sformat.h"
@@ -50,7 +51,62 @@
 
 #include <exception>
 
+namespace {
+class bounded_stream final : public ss::data_source_impl {
+public:
+    bounded_stream(ss::input_stream<char>& stream, size_t upto)
+      : _stream{stream}
+      , _upto{upto} {}
+
+    ss::future<ss::temporary_buffer<char>> get() override {
+        auto buf = co_await _stream.read_up_to(_upto);
+        _upto -= buf.size();
+        co_return buf;
+    }
+
+private:
+    ss::input_stream<char>& _stream;
+    size_t _upto;
+};
+
+} // namespace
+
 namespace cloud_storage {
+
+class split_segment_into_chunk_range_consumer {
+public:
+    split_segment_into_chunk_range_consumer(
+      cloud_storage::remote_segment& remote_segment,
+      cloud_storage::segment_chunk_range range)
+      : _segment{remote_segment}
+      , _range{std::move(range)} {}
+
+    ss::future<uint64_t>
+    operator()(uint64_t size, ss::input_stream<char> stream) {
+        for (const auto [start, end] : _range) {
+            const auto bytes_to_read = end.value_or(_segment._size - 1) - start
+                                       + 1;
+            auto reservation = co_await _segment._cache.reserve_space(
+              bytes_to_read, 1);
+            vlog(
+              cst_log.trace,
+              "making stream from byte offset {} for {} bytes",
+              start,
+              bytes_to_read);
+            auto dsi = std::make_unique<bounded_stream>(stream, bytes_to_read);
+            auto stream_upto = ss::input_stream<char>{
+              ss::data_source{std::move(dsi)}};
+            co_await _segment.put_chunk_in_cache(
+              reservation, std::move(stream_upto), start);
+        }
+        co_await stream.close();
+        co_return size;
+    }
+
+private:
+    cloud_storage::remote_segment& _segment;
+    cloud_storage::segment_chunk_range _range;
+};
 
 std::filesystem::path
 generate_index_path(const cloud_storage::remote_segment_path& p) {
@@ -257,6 +313,7 @@ remote_segment::offset_data_stream(
     ss::gate::holder g(_gate);
     co_await hydrate();
     offset_index::find_result pos;
+    std::optional<uint16_t> prefetch_override = std::nullopt;
     if (first_timestamp) {
         // Time queries are linear search from front of the segment.  The
         // dominant cost of a time query on a remote partition is promoting
@@ -269,6 +326,7 @@ remote_segment::offset_data_stream(
           .kaf_offset = _base_rp_offset - _base_offset_delta,
           .file_pos = 0,
         };
+        prefetch_override = 0;
     } else {
         pos = maybe_get_offsets(start).value_or(offset_index::find_result{
           .rp_offset = _base_rp_offset,
@@ -299,7 +357,8 @@ remote_segment::offset_data_stream(
           pos.kaf_offset,
           end,
           pos.file_pos,
-          std::move(options));
+          std::move(options),
+          prefetch_override);
         data_stream = ss::input_stream<char>{
           ss::data_source{std::move(chunk_ds)}};
     }
@@ -336,7 +395,9 @@ remote_segment::maybe_get_offsets(kafka::offset kafka_offset) {
  * a GET response: pass the dat through into the cache.
  */
 ss::future<uint64_t> remote_segment::put_segment_in_cache_and_create_index(
-  uint64_t size_bytes, ss::input_stream<char> s) {
+  uint64_t size_bytes,
+  space_reservation_guard& reservation,
+  ss::input_stream<char> s) {
     offset_index tmpidx(
       get_base_rp_offset(),
       get_base_kafka_offset(),
@@ -344,15 +405,17 @@ ss::future<uint64_t> remote_segment::put_segment_in_cache_and_create_index(
       remote_segment_sampling_step_bytes);
     auto [sparse, sput] = input_stream_fanout<2>(std::move(s), 1);
     auto parser = make_remote_segment_index_builder(
+      get_ntp(),
       std::move(sparse),
       tmpidx,
       _base_offset_delta,
       remote_segment_sampling_step_bytes);
     auto fparse = parser->consume().finally(
       [parser] { return parser->close(); });
-    auto fput = _cache.put(_path, sput).finally([sref = std::ref(sput)] {
-        return sref.get().close();
-    });
+    auto fput
+      = _cache.put(_path, sput, reservation).finally([sref = std::ref(sput)] {
+            return sref.get().close();
+        });
     auto [rparse, rput] = co_await ss::when_all(
       std::move(fparse), std::move(fput));
     bool index_prepared = true;
@@ -373,17 +436,24 @@ ss::future<uint64_t> remote_segment::put_segment_in_cache_and_create_index(
         std::rethrow_exception(put_exception);
     }
     if (index_prepared) {
+        auto index_reservation = co_await _cache.reserve_space(
+          storage::segment_index::estimate_size(size_bytes), 1);
         auto index_stream = make_iobuf_input_stream(tmpidx.to_iobuf());
-        co_await _cache.put(generate_index_path(_path), index_stream);
+        co_await _cache.put(
+          generate_index_path(_path), index_stream, index_reservation);
         _index = std::move(tmpidx);
     }
     co_return size_bytes;
 }
 
 ss::future<uint64_t> remote_segment::put_segment_in_cache(
-  uint64_t size_bytes, ss::input_stream<char> s) {
+  uint64_t size_bytes,
+  space_reservation_guard& reservation,
+  ss::input_stream<char> s) {
     try {
-        co_await _cache.put(_path, s).finally([&s] { return s.close(); });
+        co_await _cache.put(_path, s, reservation).finally([&s] {
+            return s.close();
+        });
     } catch (...) {
         auto put_exception = std::current_exception();
         vlog(
@@ -396,12 +466,12 @@ ss::future<uint64_t> remote_segment::put_segment_in_cache(
     co_return size_bytes;
 }
 
-ss::future<uint64_t> remote_segment::put_chunk_in_cache(
-  uint64_t size,
+ss::future<> remote_segment::put_chunk_in_cache(
+  space_reservation_guard& reservation,
   ss::input_stream<char> stream,
   chunk_start_offset_t chunk_start) {
     try {
-        co_await _cache.put(get_path_to_chunk(chunk_start), stream)
+        co_await _cache.put(get_path_to_chunk(chunk_start), stream, reservation)
           .finally([&stream] { return stream.close(); });
     } catch (...) {
         auto put_exception = std::current_exception();
@@ -412,8 +482,6 @@ ss::future<uint64_t> remote_segment::put_chunk_in_cache(
           put_exception);
         std::rethrow_exception(put_exception);
     }
-
-    co_return size;
 }
 
 ss::future<> remote_segment::do_hydrate_segment() {
@@ -422,18 +490,17 @@ ss::future<> remote_segment::do_hydrate_segment() {
 
     // RAII reservation object represents the disk space this put will consume
     auto reservation = co_await _cache.reserve_space(
-      _size + storage::segment_index::estimate_size(_size));
+      _size + storage::segment_index::estimate_size(_size), 1);
 
     auto res = co_await _api.download_segment(
       _bucket,
       _path,
-      [this](uint64_t size_bytes, ss::input_stream<char> s) {
-          if (is_legacy_mode_engaged()) {
-              return put_segment_in_cache_and_create_index(
-                size_bytes, std::move(s));
-          } else {
-              return put_segment_in_cache(size_bytes, std::move(s));
-          }
+      [this, &reservation](uint64_t size_bytes, ss::input_stream<char> s) {
+          // Always create the index because we are in legacy mode if we ended
+          // up hydrating the segment. Legacy mode indicates a missing index, so
+          // we create it here on the fly using the downloaded segment.
+          return put_segment_in_cache_and_create_index(
+            size_bytes, reservation, std::move(s));
       },
       local_rtc);
 
@@ -466,12 +533,14 @@ ss::future<> remote_segment::do_hydrate_index() {
     }
 
     _index = std::move(ix);
-    _coarse_index.emplace(_index->build_coarse_index(_chunk_size));
+    _coarse_index.emplace(
+      _index->build_coarse_index(_chunk_size, _index_path.native()));
     co_await _chunks_api->start();
     auto buf = _index->to_iobuf();
 
+    auto reservation = co_await _cache.reserve_space(buf.size_bytes(), 1);
     auto str = make_iobuf_input_stream(std::move(buf));
-    co_await _cache.put(_index_path, str).finally([&str] {
+    co_await _cache.put(_index_path, str, reservation).finally([&str] {
         return str.close();
     });
 }
@@ -503,8 +572,8 @@ ss::future<> remote_segment::do_hydrate_txrange() {
         }
 
         auto [stream, size] = co_await manifest.serialize();
-        auto reservation = _cache.reserve_space(size);
-        co_await _cache.put(manifest.get_manifest_path(), stream)
+        auto reservation = co_await _cache.reserve_space(size, 1);
+        co_await _cache.put(manifest.get_manifest_path(), stream, reservation)
           .finally([&s = stream]() mutable { return s.close(); });
     }
 
@@ -644,7 +713,8 @@ ss::future<bool> remote_segment::maybe_materialize_index() {
             });
             ix.from_iobuf(std::move(state));
             _index = std::move(ix);
-            _coarse_index.emplace(_index->build_coarse_index(_chunk_size));
+            _coarse_index.emplace(
+              _index->build_coarse_index(_chunk_size, _index_path.native()));
             co_await _chunks_api->start();
         } catch (...) {
             // In case of any failure during index materialization just continue
@@ -866,27 +936,37 @@ ss::future<> remote_segment::hydrate() {
       .discard_result();
 }
 
-ss::future<> remote_segment::hydrate_chunk(
-  chunk_start_offset_t start, std::optional<chunk_start_offset_t> end) {
-    retry_chain_node rtc{
-      cache_hydration_timeout, cache_hydration_backoff, &_rtc};
+ss::future<> remote_segment::hydrate_chunk(segment_chunk_range range) {
+    const auto start = range.first_offset();
+    const auto path_to_start = get_path_to_chunk(start);
 
-    auto cache_status = co_await _cache.is_cached(get_path_to_chunk(start));
-    if (cache_status == cache_element_status::available) {
+    // It is possible that the chunk has already been downloaded during a
+    // prefetch operation. In this case we skip hydration and try to materialize
+    // the chunk. This also skips the prefetch of the successive chunks. So
+    // given a series of chunks A, B, C, D, E and a prefetch of 2, when A is
+    // fetched B,C are also fetched. Then hydration of B,C are no-ops and no
+    // prefetch is done during those no-ops. When D is fetched, hydration
+    // makes an HTTP GET call and E is also prefetched. So a total of two calls
+    // are made for the five chunks (ignoring any cache evictions during the
+    // process).
+    if (const auto status = co_await _cache.is_cached(path_to_start);
+        status == cache_element_status::available) {
+        vlog(
+          _ctxlog.debug,
+          "skipping chunk hydration for chunk path {}, it is already in "
+          "cache",
+          path_to_start);
         co_return;
     }
 
-    const auto space_required = end.value_or(_size - 1) - start + 1;
-    const auto reserved = co_await _cache.reserve_space(space_required);
+    retry_chain_node rtc{
+      cache_hydration_timeout, cache_hydration_backoff, &_rtc};
 
+    const auto end = range.last_offset().value_or(_size - 1);
+    auto consumer = split_segment_into_chunk_range_consumer{
+      *this, std::move(range)};
     auto res = co_await _api.download_segment(
-      _bucket,
-      _path,
-      [this, start](auto size, auto stream) {
-          return put_chunk_in_cache(size, std::move(stream), start);
-      },
-      rtc,
-      std::make_pair(start, end.value_or(_size - 1)));
+      _bucket, _path, std::move(consumer), rtc, std::make_pair(start, end));
     if (res != download_result::success) {
         throw download_exception{res, _path};
     }
@@ -1003,7 +1083,8 @@ public:
       , _parent(parent)
       , _term(term)
       , _rtc(&rtc)
-      , _ctxlog(cst_log, _rtc, ntp.path()) {}
+      , _ctxlog(cst_log, _rtc, ntp.path())
+      , _filtered_types(raft::offset_translator_batch_types(ntp)) {}
 
     /// Translate redpanda offset to kafka offset
     ///
@@ -1127,8 +1208,9 @@ public:
           _ctxlog.debug, "skip_batch_start called for {}", header.base_offset);
         advance_config_offsets(header);
         if (
-          header.type == model::record_batch_type::raft_configuration
-          || header.type == model::record_batch_type::archival_metadata) {
+          std::count(
+            _filtered_types.begin(), _filtered_types.end(), header.type)
+          > 0) {
             vassert(
               _parent._cur_ot_state,
               "ntp {}: offset translator state for "
@@ -1193,6 +1275,7 @@ private:
     model::term_id _term;
     retry_chain_node _rtc;
     retry_chain_logger _ctxlog;
+    std::vector<model::record_batch_type> _filtered_types;
 };
 
 remote_segment_batch_reader::remote_segment_batch_reader(

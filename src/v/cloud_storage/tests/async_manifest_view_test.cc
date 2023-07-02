@@ -35,6 +35,7 @@
 #include <numeric>
 
 using namespace cloud_storage;
+using eof = async_manifest_view_cursor::eof;
 
 static ss::logger test_log("async_manifest_view_log");
 static const model::initial_revision_id manifest_rev(111);
@@ -80,17 +81,22 @@ public:
         }
         auto so = model::next_offset(stm_manifest.get_last_offset());
         add_random_segments(stm_manifest, num_segments);
-        auto tmp = stm_manifest.spillover(so);
         spillover_manifest spm(manifest_ntp, manifest_rev);
-        for (const auto& meta : tmp) {
+        for (const auto& meta : stm_manifest) {
+            if (meta.committed_offset >= so) {
+                break;
+            }
             spm.add(meta);
         }
+        stm_manifest.spillover(spm.make_manifest_metadata());
         // update cache
         auto path = spm.get_manifest_path();
         if (hydrate) {
             auto stream = spm.serialize().get();
+            auto reservation = cache.local().reserve_space(123, 1).get();
             cache.local()
-              .put(path, stream.stream, ss::default_priority_class())
+              .put(
+                path, stream.stream, reservation, ss::default_priority_class())
               .get();
             stream.stream.close().get();
         }
@@ -274,7 +280,7 @@ FIXTURE_TEST(test_async_manifest_view_iter, async_manifest_view_fixture) {
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, expected);
     BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
     BOOST_REQUIRE(expected == actual);
@@ -324,7 +330,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, expected);
     BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
     BOOST_REQUIRE(expected == actual);
@@ -346,7 +352,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, removed);
     BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
     BOOST_REQUIRE(removed == actual);
@@ -373,7 +379,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, removed);
     BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
     BOOST_REQUIRE(removed == actual);
@@ -444,7 +450,7 @@ FIXTURE_TEST(
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, expected);
     BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
     BOOST_REQUIRE(expected == actual);
@@ -474,7 +480,7 @@ FIXTURE_TEST(
                 actual.push_back(meta);
             }
         });
-    } while (cursor->next().get().value());
+    } while (cursor->next().get().value() != eof::yes);
     print_diff(actual, removed);
     BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
     BOOST_REQUIRE(removed == actual);
@@ -558,14 +564,16 @@ FIXTURE_TEST(test_async_manifest_view_retention, async_manifest_view_fixture) {
     model::offset prefix_base_offset;
     model::offset_delta prefix_delta;
     for (const auto& meta : expected) {
-        prefix_size += meta.size_bytes;
-        prefix_timestamp = model::timestamp{meta.base_timestamp.value() - 1};
+        prefix_timestamp = meta.base_timestamp;
         prefix_base_offset = meta.base_offset;
         prefix_delta = meta.delta_offset;
-        quota--;
+
         if (quota == 0) {
             break;
         }
+
+        prefix_size += meta.size_bytes;
+        quota--;
     }
 
     vlog(
@@ -594,7 +602,7 @@ FIXTURE_TEST(test_async_manifest_view_retention, async_manifest_view_fixture) {
       prefix_base_offset);
     auto rr5 = view
                  .compute_retention(
-                   total_size, std::chrono::milliseconds(delta.value()))
+                   total_size, std::chrono::milliseconds(delta.value()) + 1s)
                  .get();
     BOOST_REQUIRE(rr5.has_value());
     BOOST_REQUIRE_EQUAL(rr5.value().offset, prefix_base_offset);

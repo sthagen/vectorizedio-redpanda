@@ -228,8 +228,11 @@ def wait_for_local_storage_truncate(redpanda,
     redpanda.logger.debug(
         "Waiting for local storage to be truncated to {target_bytes} bytes")
 
+    sizes: list[int] = []
+
     def is_truncated():
         storage = redpanda.storage(sizes=True)
+        nonlocal sizes
         sizes = []
         for node_partition in storage.partitions("kafka", topic):
             if partition_idx is not None and node_partition.num != partition_idx:
@@ -252,10 +255,15 @@ def wait_for_local_storage_truncate(redpanda,
             # removal would exceed the retention target. so for the comparison
             # to determine if we reached the goal we subtract off the size of
             # the oldest segment
-            first_segment = min(node_partition.segments.values(),
-                                key=lambda s: s.offset)
-            first_segment_size = first_segment.size if first_segment.size else 0
-            sizes.append(total_size - first_segment_size)
+            try:
+                first_segment = min(node_partition.segments.values(),
+                                    key=lambda s: s.offset)
+            except ValueError:
+                # Segment list is empty
+                continue
+            else:
+                first_segment_size = first_segment.size if first_segment.size else 0
+                sizes.append(total_size - first_segment_size)
 
         # The segment which is open for appends will differ in Redpanda's internal
         # sizing (exact) vs. what the filesystem reports for a falloc'd file (to the
@@ -264,11 +272,18 @@ def wait_for_local_storage_truncate(redpanda,
         threshold = target_bytes + 4096
 
         # We expect to have measured size on at least one node, or this isn't meaningful
-        assert len(sizes) > 0
+        if len(sizes) == 0:
+            return False
 
         return all(s <= threshold for s in sizes)
 
-    wait_until(is_truncated, timeout_sec=timeout_sec, backoff_sec=1)
+    wait_until(
+        is_truncated,
+        timeout_sec=timeout_sec,
+        backoff_sec=1,
+        err_msg=lambda:
+        f"truncation couldn't be verified for {topic=} and {target_bytes=}. last run partition_sizes={sizes}"
+    )
 
 
 @contextmanager
@@ -402,7 +417,7 @@ def wait_for_recovery_throttle_rate(redpanda, new_rate: int):
                     f"Error getting throttle rate for {node}", exc_info=True)
                 return False
 
-        brokers = redpanda._admin.get_brokers(node=redpanda.controller())
+        brokers = redpanda._admin.get_brokers()
         active_brokers = set([b['node_id'] for b in brokers])
         assert active_brokers
         filtered = [
@@ -412,4 +427,7 @@ def wait_for_recovery_throttle_rate(redpanda, new_rate: int):
         assert filtered
         return all([check_throttle_rate(n) for n in filtered])
 
-    wait_until(wait_for_throttle_update, timeout_sec=90, backoff_sec=1)
+    wait_until(wait_for_throttle_update,
+               timeout_sec=90,
+               backoff_sec=1,
+               err_msg=f"Timed out waiting recovery rate to reach: {new_rate}")

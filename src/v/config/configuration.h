@@ -54,6 +54,7 @@ struct configuration final : public config_store {
     bounded_property<std::optional<std::chrono::milliseconds>> log_segment_ms;
     property<std::chrono::milliseconds> log_segment_ms_min;
     property<std::chrono::milliseconds> log_segment_ms_max;
+    property<std::optional<uint64_t>> log_storage_target_size;
 
     // Network
     bounded_property<std::optional<int>> rpc_server_listen_backlog;
@@ -126,6 +127,9 @@ struct configuration final : public config_store {
     property<size_t> fetch_max_bytes;
     property<bool> use_fetch_scheduler_group;
     property<std::chrono::milliseconds> metadata_status_wait_timeout_ms;
+    property<std::chrono::seconds> kafka_tcp_keepalive_idle_timeout_seconds;
+    property<std::chrono::seconds> kafka_tcp_keepalive_probe_interval_seconds;
+    property<uint32_t> kafka_tcp_keepalive_probes;
     bounded_property<std::optional<int64_t>> kafka_connection_rate_limit;
     property<std::vector<ss::sstring>> kafka_connection_rate_limit_overrides;
     // same as transactional.id.expiration.ms in kafka
@@ -279,6 +283,8 @@ struct configuration final : public config_store {
       cloud_storage_cluster_metadata_upload_interval_ms;
     property<double> cloud_storage_idle_threshold_rps;
     property<bool> cloud_storage_enable_segment_merging;
+    property<bool> cloud_storage_disable_upload_loop_for_tests;
+    property<bool> cloud_storage_disable_read_replica_loop_for_tests;
     property<size_t> cloud_storage_max_segments_pending_deletion_per_partition;
     property<bool> cloud_storage_enable_compacted_topic_reupload;
     property<size_t> cloud_storage_recovery_temporary_retention_bytes_default;
@@ -317,6 +323,7 @@ struct configuration final : public config_store {
 
     // Archival cache
     property<uint64_t> cloud_storage_cache_size;
+    property<uint32_t> cloud_storage_cache_max_objects;
     property<std::chrono::milliseconds> cloud_storage_cache_check_interval_ms;
     property<std::optional<uint32_t>> cloud_storage_max_readers_per_shard;
     property<std::optional<uint32_t>>
@@ -327,6 +334,7 @@ struct configuration final : public config_store {
     property<bool> cloud_storage_disable_chunk_reads;
     enum_property<model::cloud_storage_chunk_eviction_strategy>
       cloud_storage_chunk_eviction_strategy;
+    property<uint16_t> cloud_storage_chunk_prefetch;
 
     one_or_many_property<ss::sstring> superusers;
 
@@ -438,6 +446,9 @@ struct configuration final : public config_store {
 
     bounded_property<double, numeric_bounds> kafka_memory_share_for_fetch;
     property<size_t> kafka_memory_batch_size_estimate_for_fetch;
+    // debug controls
+    property<bool> cpu_profiler_enabled;
+    bounded_property<std::chrono::milliseconds> cpu_profiler_sample_period_ms;
 
     configuration();
 

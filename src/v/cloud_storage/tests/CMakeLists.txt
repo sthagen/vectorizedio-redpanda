@@ -45,7 +45,9 @@ rp_test(
     remote_partition_test.cc
     topic_recovery_service_test.cc
     cloud_storage_e2e_test.cc
+    delete_records_e2e_test.cc
     async_manifest_view_test.cc
+    read_replica_test.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
   LIBRARIES
     Boost::unit_test_framework
@@ -102,8 +104,8 @@ rp_test(
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   add_executable(segment_meta_cstore_fuzz_rpfixture segment_meta_cstore_fuzz.cc)
-  target_compile_options(segment_meta_cstore_fuzz_rpfixture PRIVATE -Og -fsanitize=address,fuzzer)
-  target_link_libraries(segment_meta_cstore_fuzz_rpfixture v::segment_meta_cstore fmt::fmt -fsanitize=address,undefined,fuzzer)
+  target_compile_options(segment_meta_cstore_fuzz_rpfixture PRIVATE -Og -fsanitize=address,undefined,fuzzer -fprofile-instr-generate -fcoverage-mapping)
+  target_link_libraries(segment_meta_cstore_fuzz_rpfixture v::segment_meta_cstore fmt::fmt -fsanitize=address,undefined,fuzzer -fprofile-instr-generate -fcoverage-mapping)
   add_test (
     NAME segment_meta_cstore_fuzz_rpfixture
     COMMAND $<TARGET_FILE:segment_meta_cstore_fuzz_rpfixture> -max_total_time=30 -rss_limit_mb=8192

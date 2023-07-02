@@ -62,15 +62,19 @@ public:
     command_batch_builder& mark_clean(model::offset);
     /// Add truncate command to the batch
     command_batch_builder& truncate(model::offset start_rp_offset);
-    command_batch_builder& truncate(kafka::offset start_kafka_offset);
+    /// Update the kafka start offset override.
+    command_batch_builder&
+    update_start_kafka_offset(kafka::offset start_kafka_offset);
     /// Add spillover command to the batch
-    command_batch_builder& spillover(model::offset start_rp_offset);
+    command_batch_builder& spillover(const cloud_storage::segment_meta& meta);
     /// Add truncate-archive-init command to the batch
     command_batch_builder& truncate_archive_init(
       model::offset start_rp_offset, model::offset_delta delta);
     /// Add truncate-archive-commit command to the batch
     command_batch_builder&
+    /// Totally replace the manifest
     cleanup_archive(model::offset start_rp_offset, uint64_t removed_size_bytes);
+    command_batch_builder& replace_manifest(iobuf);
     /// Replicate the configuration batch
     ss::future<std::error_code> replicate();
 
@@ -129,7 +133,7 @@ public:
     /// start_rp_offset forward. The entries are supposed to be moved to archive
     /// by the caller.
     ss::future<std::error_code> spillover(
-      model::offset start_rp_offset,
+      const cloud_storage::segment_meta& manifest_meta,
       ss::lowres_clock::time_point deadline,
       ss::abort_source&);
 
@@ -252,6 +256,7 @@ private:
     struct truncate_archive_commit_cmd;
     struct reset_metadata_cmd;
     struct spillover_cmd;
+    struct replace_manifest_cmd;
     struct snapshot;
 
     friend segment segment_from_meta(const cloud_storage::segment_meta& meta);
@@ -275,7 +280,8 @@ private:
     apply_truncate_archive_commit(model::offset co, uint64_t bytes_removed);
     void apply_update_start_kafka_offset(kafka::offset so);
     void apply_reset_metadata();
-    void apply_spillover(const start_offset& so);
+    void apply_spillover(const spillover_cmd& so);
+    void apply_replace_manifest(iobuf);
 
 private:
     prefix_logger _logger;

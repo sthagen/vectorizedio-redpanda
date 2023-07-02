@@ -40,7 +40,7 @@ distinct_from(const absl::flat_hash_set<model::node_id>& nodes) {
           : _nodes(nodes) {}
 
         hard_constraint_evaluator
-        make_evaluator(const replicas_t&) const final {
+        make_evaluator(const model::ntp&, const replicas_t&) const final {
             return [this](const allocation_node& node) {
                 return !_nodes.contains(node.id());
             };
@@ -140,7 +140,7 @@ private:
     bool increment_failure_count();
 
     partition_balancer_planner& _parent;
-    absl::node_hash_map<model::ntp, size_t> _ntp2size;
+    absl::btree_map<model::ntp, size_t> _ntp2size;
     absl::node_hash_map<model::ntp, absl::flat_hash_map<model::node_id, size_t>>
       _moving_ntp2replica_sizes;
     absl::node_hash_map<model::ntp, allocated_partition> _reassignments;
@@ -828,7 +828,7 @@ partition_balancer_planner::reassignable_partition::move_replica(
     if (!_reallocated) {
         _reallocated
           = _ctx._parent._partition_allocator.make_allocated_partition(
-            replicas(), get_allocation_domain(_ntp));
+            _ntp, replicas(), get_allocation_domain(_ntp));
     }
 
     // Verify that we are moving only original replicas. This assumption

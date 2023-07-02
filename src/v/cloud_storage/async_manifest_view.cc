@@ -210,7 +210,8 @@ bool async_manifest_view_cursor::manifest_in_range(
       });
 }
 
-ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
+ss::future<result<async_manifest_view_cursor::eof, error_outcome>>
+async_manifest_view_cursor::next() {
     static constexpr auto EOS = model::offset{};
     auto next_base_offset = ss::visit(
       _current,
@@ -222,18 +223,18 @@ ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
       });
 
     if (next_base_offset == EOS || next_base_offset > _end) {
-        co_return false;
+        co_return eof::yes;
     }
     auto manifest = co_await _view.get_materialized_manifest(next_base_offset);
     if (manifest.has_failure()) {
         co_return manifest.as_failure();
     }
     if (unlikely(!manifest_in_range(manifest.value()))) {
-        co_return false;
+        co_return error_outcome::out_of_range;
     }
     _current = manifest.value();
     _timer.rearm(_idle_timeout + ss::lowres_clock::now());
-    co_return true;
+    co_return eof::no;
 }
 
 ss::future<ss::stop_iteration> async_manifest_view_cursor::next_iter() {
@@ -241,8 +242,8 @@ ss::future<ss::stop_iteration> async_manifest_view_cursor::next_iter() {
     if (res.has_failure()) {
         throw std::system_error(res.error());
     }
-    co_return res.value() == true ? ss::stop_iteration::yes
-                                  : ss::stop_iteration::no;
+    co_return res.value() == eof::yes ? ss::stop_iteration::yes
+                                      : ss::stop_iteration::no;
 }
 
 std::optional<std::reference_wrapper<const partition_manifest>>
@@ -479,7 +480,9 @@ ss::future<> async_manifest_view::run_bg_loop() {
 }
 
 ss::future<result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
-async_manifest_view::get_cursor(async_view_search_query_t query) noexcept {
+async_manifest_view::get_cursor(
+  async_view_search_query_t query,
+  std::optional<model::offset> end_inclusive) noexcept {
     try {
         ss::gate::holder h(_gate);
         if (
@@ -494,11 +497,23 @@ async_manifest_view::get_cursor(async_view_search_query_t query) noexcept {
             co_return error_outcome::out_of_range;
         }
         model::offset begin;
-        model::offset end = _stm_manifest.get_last_offset();
+        model::offset end = end_inclusive.value_or(
+          _stm_manifest.get_last_offset());
         if (_stm_manifest.get_archive_start_offset() == model::offset{}) {
             begin = _stm_manifest.get_start_offset().value_or(begin);
         } else {
             begin = _stm_manifest.get_archive_start_offset();
+        }
+
+        if (end < begin) {
+            vlog(
+              _ctxlog.debug,
+              "invalid end offset: stm_manifest_begin={} stm_manifest_end={} "
+              "end_inclusive_override={}",
+              begin,
+              _stm_manifest.get_last_offset(),
+              end_inclusive);
+            co_return error_outcome::out_of_range;
         }
         auto cursor = std::make_unique<async_manifest_view_cursor>(
           *this, begin, end, _manifest_meta_ttl());
@@ -672,7 +687,8 @@ async_manifest_view::compute_retention(
     }
     if (
       _stm_manifest.get_start_kafka_offset_override() != kafka::offset{}
-      && _stm_manifest.get_start_kafka_offset_override() > result.offset) {
+      && _stm_manifest.get_start_kafka_offset_override()
+           > result.offset - result.delta) {
         // The start kafka offset is placed above the retention boundary. We
         // need to adjust retention boundary to remove all data up to start
         // kafka offset.
@@ -689,6 +705,10 @@ async_manifest_view::compute_retention(
               r.error());
         }
         result = r.value();
+        vlog(
+          _ctxlog.debug,
+          "Found offset {} to advance start offset to",
+          result.offset);
     }
     co_return result;
 }
@@ -703,7 +723,7 @@ async_manifest_view::offset_based_retention() noexcept {
         if (res.has_failure() && res.error() != error_outcome::out_of_range) {
             vlog(
               _ctxlog.error,
-              "Failed to compute time-based retention {}",
+              "Failed to compute offset-based retention {}",
               res.error());
             co_return res.as_failure();
         }
@@ -743,20 +763,28 @@ async_manifest_view::time_based_retention(
         const auto delta
           = std::chrono::duration_cast<model::timestamp_clock::duration>(
             time_limit);
-        const auto earliest_ts_in_spill
-          = _stm_manifest.get_spillover_map().begin()->base_timestamp;
         const auto boundary = model::to_timestamp(now - delta);
         vlog(
           _ctxlog.debug,
-          "Computing time-based retention, boundary: {} retention_limit: {}",
-          boundary,
-          time_limit);
-        // The cursor search for timestamps is inclusive, so if the computed
-        // timestamp is ahead of the earliest timestamp in the archive, use the
-        // later.
-        const auto spill_search_query = std::min(
-          boundary, earliest_ts_in_spill);
-        auto res = co_await get_cursor(spill_search_query);
+          "Computing time-based retention, boundary: {}, now: {}",
+          now - delta,
+          now);
+
+        if (!_stm_manifest.get_start_offset().has_value()) {
+            vlog(
+              _ctxlog.error,
+              "Empty STM manifest with archive in place: "
+              "stm_start_offset={}, archive_start_offset={}, "
+              "archive_clean_offset={}",
+              _stm_manifest.get_start_offset(),
+              _stm_manifest.get_archive_start_offset(),
+              _stm_manifest.get_archive_clean_offset());
+            co_return error_outcome::failure;
+        }
+
+        auto res = co_await get_cursor(
+          _stm_manifest.get_archive_start_offset(),
+          model::prev_offset(_stm_manifest.get_start_offset().value()));
         if (res.has_failure() && res.error() != error_outcome::out_of_range) {
             vlog(
               _ctxlog.error,
@@ -771,53 +799,62 @@ async_manifest_view::time_based_retention(
               _ctxlog.debug,
               "There is no segment old enough to be removed by retention");
         } else {
-            std::optional<archive_start_offset_advance> truncation_point;
-            bool eof = false;
-
             auto cursor = std::move(res.value());
-            while (!truncation_point && !eof) {
-                cursor->with_manifest([this, boundary, &truncation_point](
-                                        const partition_manifest& manifest) {
-                    for (const auto& meta : manifest) {
-                        if (
-                          meta.base_offset > _stm_manifest.get_start_offset()) {
-                            break;
-                        }
+            while (
+              cursor->get_status()
+              == async_manifest_view_cursor_status::materialized_spillover) {
+                auto eof = cursor->with_manifest(
+                  [boundary, &result](const partition_manifest& manifest) {
+                      for (const auto& meta : manifest) {
+                          if (meta.max_timestamp > boundary) {
+                              return true;
+                          }
+                          result.offset = model::next_offset(
+                            meta.committed_offset);
+                          result.delta = meta.delta_offset;
+                      }
+                      return false;
+                  });
+                vlog(
+                  _ctxlog.debug,
+                  "Updated last offset to {}, delta {}",
+                  result.offset,
+                  result.delta);
 
-                        if (meta.base_timestamp > boundary) {
-                            truncation_point = archive_start_offset_advance{
-                              meta.base_offset, meta.delta_offset};
-                            break;
-                        }
+                if (!eof) {
+                    auto r = co_await cursor->next();
+                    if (
+                      r.has_value()
+                      && r.value() == async_manifest_view_cursor::eof::yes) {
+                        vlog(
+                          _ctxlog.info,
+                          "Entire archive is removed by the time-based "
+                          "retention");
+                        break;
+                    } else if (r.has_failure()) {
+                        vlog(
+                          _ctxlog.error,
+                          "Failed to scan manifest while computing retention "
+                          "{}",
+                          r.error());
+                        co_return r.as_failure();
                     }
-                });
-
-                if (truncation_point) {
+                } else {
+                    vlog(
+                      _ctxlog.debug,
+                      "Retention found offset {} with delta {}",
+                      result.offset,
+                      result.delta);
                     break;
                 }
-
-                auto res = co_await cursor->next();
-                if (res.has_value() && res.value() == false) {
-                    eof = true;
-                } else if (res.has_failure()) {
-                    vlog(
-                      _ctxlog.error,
-                      "Failed to scan manifest while computing retention "
-                      "{}",
-                      res.error());
-                    co_return res.as_failure();
-                }
             }
-
-            if (!truncation_point.has_value()) {
+            if (result.offset == model::offset{}) {
                 vlog(
                   _ctxlog.debug,
                   "Failed to find the retention boundary, the manifest {} "
                   "doesn't "
                   "have any matching segment",
                   cursor->manifest()->get().get_manifest_path());
-            } else {
-                result = truncation_point.value();
             }
         }
     } catch (...) {
@@ -846,8 +883,22 @@ async_manifest_view::size_based_retention(size_t size_limit) noexcept {
               cloud_log_size,
               size_limit,
               to_remove);
+
+            if (!_stm_manifest.get_start_offset().has_value()) {
+                vlog(
+                  _ctxlog.error,
+                  "Empty STM manifest with archive in place: "
+                  "stm_start_offset={}, archive_start_offset={}, "
+                  "archive_clean_offset={}",
+                  _stm_manifest.get_start_offset(),
+                  _stm_manifest.get_archive_start_offset(),
+                  _stm_manifest.get_archive_clean_offset());
+                co_return error_outcome::failure;
+            }
+
             auto res = co_await get_cursor(
-              _stm_manifest.get_archive_start_offset());
+              _stm_manifest.get_archive_start_offset(),
+              model::prev_offset(_stm_manifest.get_start_offset().value()));
             if (res.has_failure()) {
                 vlog(
                   _ctxlog.error,
@@ -856,33 +907,28 @@ async_manifest_view::size_based_retention(size_t size_limit) noexcept {
                 co_return res.as_failure();
             }
             auto cursor = std::move(res.value());
-            while (to_remove != 0) {
+            while (to_remove != 0
+                   && cursor->get_status()
+                        == async_manifest_view_cursor_status::
+                          materialized_spillover) {
                 // We are reading from the spillover manifests until
                 // the 'to_remove' value is zero. Every time we read
                 // we're advancing the last_* values. The scan shouldn't
                 // go to the STM manifest and should only include archive.
                 // The end condition is the lambda returned true, otherwise
                 // we should keep scanning.
-                model::offset last_offset;
-                model::offset_delta last_delta;
                 auto eof = cursor->with_manifest(
-                  [this, &to_remove, &last_offset, &last_delta](
-                    const auto& manifest) mutable {
-                      if (
-                        _stm_manifest.get_start_offset()
-                        == manifest.get_start_offset()) {
-                          // We reached the STM manifest
-                          return true;
-                      }
+                  [this, &to_remove, &result](const auto& manifest) mutable {
                       for (const auto& meta : manifest) {
+                          result.offset = meta.base_offset;
+                          result.delta = meta.delta_offset;
+
                           if (meta.size_bytes > to_remove) {
                               vlog(_ctxlog.debug, "Retention stop at {}", meta);
                               to_remove = 0;
                               return true;
                           } else {
                               to_remove -= meta.size_bytes;
-                              last_offset = meta.base_offset;
-                              last_delta = meta.delta_offset;
                               vlog(
                                 _ctxlog.debug,
                                 "Retention consume {}, remaining bytes: {}",
@@ -892,17 +938,40 @@ async_manifest_view::size_based_retention(size_t size_limit) noexcept {
                       }
                       return false;
                   });
-                result.offset = last_offset;
-                result.delta = last_delta;
+                vlog(
+                  _ctxlog.debug,
+                  "Updated last offset to {}, delta {}",
+                  result.offset,
+                  result.delta);
                 if (!eof) {
                     auto r = co_await cursor->next();
                     if (
-                      r.has_failure()
-                      && r.error() == error_outcome::out_of_range) {
+                      r.has_value()
+                      && r.value() == async_manifest_view_cursor::eof::yes) {
+                        // If the retention policy requires us to remove
+                        // segments from the STM manifest, or if the entire
+                        // archive was removed, the archive start offset should
+                        // be advanced to match that of the STM region.
+                        if (!_stm_manifest.empty()) {
+                            // The STM manifest should never be empty here since
+                            // we have an archive in place.
+                            result.offset = _stm_manifest.begin()->base_offset;
+                            result.delta = _stm_manifest.begin()->delta_offset;
+                        } else {
+                            vlog(
+                              _ctxlog.error,
+                              "Empty STM manifest with archive in place: "
+                              "stm_start_offset={}, archive_start_offset={}, "
+                              "archive_clean_offset={}",
+                              _stm_manifest.get_start_offset(),
+                              _stm_manifest.get_archive_start_offset(),
+                              _stm_manifest.get_archive_clean_offset());
+                        }
                         vlog(
                           _ctxlog.info,
                           "Entire archive is removed by the size-based "
                           "retention");
+                        break;
                     } else if (r.has_failure()) {
                         vlog(
                           _ctxlog.error,
@@ -1010,9 +1079,11 @@ async_manifest_view::hydrate_manifest(
             co_return error_outcome::manifest_download_error;
         }
         auto [str, len] = co_await manifest.serialize();
+        auto reservation = co_await _cache.local().reserve_space(len, 1);
         co_await _cache.local().put(
           manifest.get_manifest_path()(),
           str,
+          reservation,
           priority_manager::local().shadow_indexing_priority());
         _probe.on_spillover_manifest_hydration();
         vlog(

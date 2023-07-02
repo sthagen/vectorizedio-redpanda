@@ -14,7 +14,7 @@ import typing
 import time
 import itertools
 from collections import namedtuple
-from typing import Optional
+from typing import Iterator, Optional
 from ducktape.cluster.cluster import ClusterNode
 from rptest.util import wait_until_result
 from rptest.services import tls
@@ -272,10 +272,33 @@ class RpkTool:
         ]
         return self._run(cmd)
 
-    def sasl_create_user(self, new_username, new_password, mechanism):
-        cmd = ["acl", "user", "create", new_username, "-p", new_password]
+    def _sasl_create_user_cmd(self, new_username, new_password, mechanism):
+        cmd = ["acl", "user", "create", new_username]
         cmd += ["--api-urls", self._redpanda.admin_endpoints()]
         cmd += ["--mechanism", mechanism]
+
+        if new_password != "":
+            cmd += ["-p", new_password]
+
+        return cmd
+
+    def sasl_create_user(self,
+                         new_username,
+                         new_password="",
+                         mechanism="SCRAM-SHA-256"):
+        cmd = self._sasl_create_user_cmd(new_username, new_password, mechanism)
+
+        return self._run(cmd)
+
+    def sasl_create_user_basic(self,
+                               new_username,
+                               auth_user="",
+                               auth_password="",
+                               new_password="",
+                               mechanism="SCRAM-SHA-256"):
+        cmd = self._sasl_create_user_cmd(new_username, new_password, mechanism)
+        cmd += ["--user", auth_user, "--password", auth_password]
+
         return self._run(cmd)
 
     def sasl_update_user(self, user, new_password):
@@ -359,7 +382,9 @@ class RpkTool:
         assert m, f"Reported offset not found in: {out}"
         return int(m.group(1))
 
-    def describe_topic(self, topic: str, tolerant: bool = False):
+    def describe_topic(self,
+                       topic: str,
+                       tolerant: bool = False) -> Iterator[RpkPartition]:
         """
         By default this will omit any partitions which do not have full
         metadata in the response: this means that if we are unlucky and a
@@ -406,7 +431,6 @@ class RpkTool:
             self._redpanda.logger.error(f"Missing columns: {missing_columns}")
             raise RpkException(f"Missing columns: {missing_columns}")
 
-        partitions = []
         for row in table.rows:
             obj = dict()
             obj["LAST-STABLE-OFFSET"] = "-"
@@ -440,9 +464,7 @@ class RpkTool:
                                      start_offset=obj["LOG-START-OFFSET"])
 
             if initialized or tolerant:
-                partitions.append(partition)
-
-        return iter(partitions)
+                yield partition
 
     def describe_topic_configs(self, topic):
         cmd = ['describe', topic, '-c']

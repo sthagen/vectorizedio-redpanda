@@ -110,6 +110,15 @@ configuration::configuration()
        .example = "31536000000",
        .visibility = visibility::tunable},
       24h * 365)
+  , log_storage_target_size(
+      *this,
+      "log_storage_target_size",
+      "The target size in bytes that log storage will try meet. When no target "
+      "is specified storage usage is unbounded.",
+      {.needs_restart = needs_restart::no,
+       .example = "2147483648000",
+       .visibility = visibility::tunable},
+      std::nullopt)
   , rpc_server_listen_backlog(
       *this,
       "rpc_server_listen_backlog",
@@ -512,6 +521,33 @@ configuration::configuration()
       "refreshed",
       {.visibility = visibility::tunable},
       2s)
+  , kafka_tcp_keepalive_idle_timeout_seconds(
+      *this,
+      "kafka_tcp_keepalive_timeout",
+      "TCP keepalive idle timeout in seconds for kafka connections. This "
+      "describes the timeout between tcp keepalive probes that the remote site"
+      "successfully acknowledged. Refers to the TCP_KEEPIDLE socket option. "
+      "When changed applies to new connections only.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      120s)
+  , kafka_tcp_keepalive_probe_interval_seconds(
+      *this,
+      "kafka_tcp_keepalive_probe_interval_seconds",
+      "TCP keepalive probe interval in seconds for kafka connections. This "
+      "describes the timeout between unacknowledged tcp keepalives. Refers to "
+      "the TCP_KEEPINTVL socket option. When changed applies to new "
+      "connections only.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      60s)
+  , kafka_tcp_keepalive_probes(
+      *this,
+      "kafka_tcp_keepalive_probes",
+      "TCP keepalive unacknowledge probes until the connection is considered "
+      "dead for kafka connections. Refers to the TCP_KEEPCNT socket option. "
+      "When "
+      "changed applies to new connections only.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      3)
   , kafka_connection_rate_limit(
       *this,
       "kafka_connection_rate_limit",
@@ -1376,6 +1412,21 @@ configuration::configuration()
       "performance",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       true)
+  , cloud_storage_disable_upload_loop_for_tests(
+      *this,
+      "cloud_storage_disable_upload_loop_for_tests",
+      "Begins the upload loop in tiered-storage-enabled topic partitions. The "
+      "property exists to simplify testing and shouldn't be set in production.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
+  , cloud_storage_disable_read_replica_loop_for_tests(
+      *this,
+      "cloud_storage_disable_read_replica_loop_for_tests",
+      "Begins the read replica sync loop in tiered-storage-enabled topic "
+      "partitions. The property exists to simplify testing and shouldn't be "
+      "set in production.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
   , cloud_storage_max_segments_pending_deletion_per_partition(
       *this,
       "cloud_storage_max_segments_pending_deletion_per_partition",
@@ -1572,6 +1623,16 @@ configuration::configuration()
       "Max size of archival cache",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       20_GiB)
+  , cloud_storage_cache_max_objects(
+      *this,
+      "cloud_storage_cache_max_objects",
+      "Maximum number of objects that may be held in the tiered storage "
+      "cache.  This applies simultaneously with `cloud_storage_cache_size`, "
+      "and which ever limit is hit first will drive trimming of the cache.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      // Enough for a >1TiB cache of 16MiB objects.  Decrease this in case
+      // of issues with trim performance.
+      100000)
   , cloud_storage_cache_check_interval_ms(
       *this,
       "cloud_storage_cache_check_interval",
@@ -1636,6 +1697,12 @@ configuration::configuration()
       {model::cloud_storage_chunk_eviction_strategy::eager,
        model::cloud_storage_chunk_eviction_strategy::capped,
        model::cloud_storage_chunk_eviction_strategy::predictive})
+  , cloud_storage_chunk_prefetch(
+      *this,
+      "cloud_storage_chunk_prefetch",
+      "Number of chunks to prefetch ahead of every downloaded chunk",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      0)
   , superusers(
       *this,
       "superusers",
@@ -2172,7 +2239,20 @@ configuration::configuration()
       "per shard, larger sizes prevent running out of memory because of too "
       "many concurrent fetch requests.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      1_MiB) {}
+      1_MiB)
+  , cpu_profiler_enabled(
+      *this,
+      "cpu_profiler_enabled",
+      "Enables cpu profiling for Redpanda",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false)
+  , cpu_profiler_sample_period_ms(
+      *this,
+      "cpu_profiler_sample_period_ms",
+      "The sample period for the CPU profiler",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      100ms,
+      {.min = 1ms}) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {

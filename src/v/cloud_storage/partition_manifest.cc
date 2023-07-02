@@ -342,12 +342,7 @@ partition_manifest::get_spillover_map() const {
 
 std::optional<kafka::offset>
 partition_manifest::full_log_start_kafka_offset() const {
-    if (_start_kafka_offset != kafka::offset{}) {
-        // This offset is set by the DeleteRecords request explicitly
-        // so it overrides whatever we have in the manifest (archive or
-        // not).
-        return _start_kafka_offset;
-    } else if (_archive_start_offset != model::offset{}) {
+    if (_archive_start_offset != model::offset{}) {
         // The archive start offset is guaranteed to be smaller than
         // the manifest start offset.
         vassert(
@@ -364,18 +359,10 @@ partition_manifest::full_log_start_kafka_offset() const {
 
 std::optional<kafka::offset>
 partition_manifest::get_start_kafka_offset() const {
-    std::optional<kafka::offset> local_start_offset;
-    if (_start_offset != model::offset{}) {
-        local_start_offset = compute_start_kafka_offset_local();
+    if (_start_offset == model::offset{}) {
+        return std::nullopt;
     }
-    if (
-      local_start_offset.has_value() && _start_kafka_offset != kafka::offset{}
-      && _start_kafka_offset > local_start_offset.value()) {
-        // Apply override only if it's located inside the manifest's offset
-        // range
-        return _start_kafka_offset;
-    }
-    return local_start_offset;
+    return compute_start_kafka_offset_local();
 }
 
 std::optional<kafka::offset>
@@ -553,6 +540,10 @@ uint64_t partition_manifest::cloud_log_size() const {
     return _cloud_log_size_bytes + _archive_size_bytes;
 }
 
+uint64_t partition_manifest::stm_region_size_bytes() const {
+    return _cloud_log_size_bytes;
+}
+
 uint64_t partition_manifest::archive_size_bytes() const {
     return _archive_size_bytes;
 }
@@ -616,10 +607,8 @@ void partition_manifest::set_archive_start_offset(
         _archive_start_offset_delta = start_delta;
         auto new_so = _archive_start_offset - _archive_start_offset_delta;
         if (new_so > _start_kafka_offset) {
-            // The _archive_start_offset can only be set to segment boundary
-            // but _start_kafka_offset can be inside the segment. Because of
-            // that the _archive_start_offset could be placed below the
-            // _start_kafka_offset set by the user.
+            // The new archive start has moved past the user-requested start
+            // offset, so there's no point in tracking it further.
             _start_kafka_offset = kafka::offset{};
         }
     } else {
@@ -655,7 +644,15 @@ void partition_manifest::set_archive_clean_offset(
         return;
     }
     if (_archive_clean_offset < start_rp_offset) {
-        _archive_clean_offset = start_rp_offset;
+        if (start_rp_offset == _start_offset) {
+            // If we've truncated up to the start offset of the STM manifest,
+            // the archive is completely removed.
+            _archive_clean_offset = model::offset{};
+            _archive_start_offset = model::offset{};
+            _archive_start_offset_delta = model::offset_delta{};
+        } else {
+            _archive_clean_offset = start_rp_offset;
+        }
         if (_archive_size_bytes >= size_bytes) {
             _archive_size_bytes -= size_bytes;
         } else {
@@ -680,57 +677,56 @@ void partition_manifest::set_archive_clean_offset(
           start_rp_offset,
           _archive_clean_offset);
     }
+
+    // Prefix truncate to get rid of the spillover manifests
+    // that have fallen below the clean offset.
+    const auto previous_spillover_manifests_size = _spillover_manifests.size();
+    if (_archive_clean_offset == model::offset{}) {
+        // Handle the case where the entire archive was removed.
+        _spillover_manifests = {};
+    } else {
+        std::optional<model::offset> truncation_point;
+        for (const auto& spill : _spillover_manifests) {
+            if (spill.base_offset >= _archive_clean_offset) {
+                break;
+            }
+            truncation_point = spill.base_offset;
+        }
+
+        if (truncation_point) {
+            vassert(
+              _archive_clean_offset >= *truncation_point,
+              "Attempt to prefix truncate the spillover manifest list above "
+              "the "
+              "archive clean offest: {} > {}",
+              *truncation_point,
+              _archive_clean_offset);
+            _spillover_manifests.prefix_truncate(*truncation_point);
+        }
+    }
+
     vlog(
       cst_log.info,
-      "{} archive clean offset moved to {} archive size set to {}",
+      "{} archive clean offset moved to {} archive size set to {}; count of "
+      "spillover manifests {} -> {}",
       _ntp,
       _archive_clean_offset,
-      _archive_size_bytes);
+      _archive_size_bytes,
+      previous_spillover_manifests_size,
+      _spillover_manifests.size());
 }
 
 bool partition_manifest::advance_start_kafka_offset(
   kafka::offset new_start_offset) {
-    auto prev_kso = get_start_kafka_offset();
-    if (
-      _archive_start_offset != model::offset{} && new_start_offset < prev_kso) {
-        // Special case. If the archive is enabled and contains some data
-        // the offset could be placed anywhere in the archive. The archive
-        // housekeeping should take this into account.
-        if (new_start_offset < get_archive_start_kafka_offset()) {
-            return false;
-        }
-        _start_kafka_offset = std::max(new_start_offset, _start_kafka_offset);
-        return true;
-    }
-    auto it = segment_containing(new_start_offset);
-    if (it == end()) {
-        vlog(
-          cst_log.debug,
-          "{} start kafka offset not moved to {}, no such segment",
-          _ntp,
-          _start_kafka_offset);
+    if (_start_kafka_offset >= new_start_offset) {
         return false;
-    } else if (it == begin()) {
-        _start_kafka_offset = std::max(new_start_offset, _start_kafka_offset);
-        vlog(
-          cst_log.debug,
-          "{} start kafka offset moved to {}, start offset stayed at {}",
-          _ntp,
-          _start_kafka_offset,
-          _start_offset);
-        return true;
     }
-    auto moved = advance_start_offset(it->base_offset);
-    // 'advance_start_offset' resets _start_kafka_offset value
-    // so it's important to set it after this call.
-    _start_kafka_offset = std::max(new_start_offset, _start_kafka_offset);
+    _start_kafka_offset = new_start_offset;
     vlog(
       cst_log.info,
-      "{} start kafka offset moved to {}, start offset {} {}",
+      "{} start kafka offset override set to {}",
       _ntp,
-      _start_kafka_offset,
-      moved ? "moved to" : "stayed at",
-      _start_offset);
+      _start_kafka_offset);
     return true;
 }
 
@@ -791,14 +787,21 @@ bool partition_manifest::advance_start_offset(model::offset new_start_offset) {
         // the case when two `truncate` commands are applied sequentially,
         // without a `cleanup_metadata` command in between to trim the list of
         // segments.
+        kafka::offset highest_removed_offset{};
         for (auto it = std::move(previous_head_segment); it != new_head_segment;
              ++it) {
+            highest_removed_offset = std::max(
+              highest_removed_offset, it->last_kafka_offset());
             subtract_from_cloud_log_size(it->size_bytes);
         }
 
-        // Reset start kafka offset so it will be aligned by segment boundary
-        _start_kafka_offset = kafka::offset{};
-
+        // The new start offset has moved past the user-requested start offset,
+        // so there's no point in tracking it further.
+        if (
+          highest_removed_offset != kafka::offset{}
+          && highest_removed_offset >= _start_kafka_offset) {
+            _start_kafka_offset = kafka::offset{};
+        }
         return true;
     }
     return false;
@@ -928,41 +931,124 @@ partition_manifest partition_manifest::truncate() {
     return removed;
 }
 
-partition_manifest partition_manifest::spillover(model::offset start_offset) {
-    if (!advance_start_offset(start_offset)) {
-        throw std::runtime_error(fmt_with_ctx(
-          fmt::format,
-          "{} can't apply spillover to manifest, offset: {}",
-          _ntp,
-          start_offset));
+void partition_manifest::spillover(const segment_meta& spillover_meta) {
+    auto start_offset = model::next_offset(spillover_meta.committed_offset);
+    auto append_tx = _spillover_manifests.append(spillover_meta);
+    partition_manifest removed;
+    auto num_segments = _segments.size();
+    try {
+        removed = truncate(start_offset);
+    } catch (...) {
+        if (_segments.size() < num_segments) {
+            // If the segments list was actually truncated we
+            // need to commit the changes to the _spillover_manifests
+            // collection. Otherwise it will be inconsistent with the _segments.
+            _spillover_manifests.flush_write_buffer();
+        }
+        throw;
     }
-    auto removed = truncate();
+    // Commit changes to the spillover manifest list so they won't
+    // be rolled back if any code below throws an exception.
+    _spillover_manifests.flush_write_buffer();
+
+    auto expected_meta = removed.make_manifest_metadata();
+
+    if (expected_meta != spillover_meta) {
+        vlog(
+          cst_log.error,
+          "{} Expected spillover metadata {} doesn't match actual spillover "
+          "metadata {}",
+          _ntp,
+          expected_meta,
+          spillover_meta);
+    } else {
+        vlog(
+          cst_log.debug,
+          "{} Applying spillover metadata {}",
+          _ntp,
+          spillover_meta);
+    }
     // Update size of the archived part of the log.
     // It doesn't include segments which are remaining in the
     // manifest.
     _archive_size_bytes += removed.cloud_log_size();
+}
 
-    if (!removed.empty()) {
-        // This segment meta doesn't represent the segment but the
-        // spillover manifest. The fields in segment_meta are repurposed
-        // to store information about the spillover manifest.
-        segment_meta meta{
-          .size_bytes = removed.cloud_log_size(),
-          .base_offset = removed.get_start_offset().value(),
-          .committed_offset = removed.get_last_offset(),
-          .base_timestamp = removed.begin()->base_timestamp,
-          .max_timestamp = removed.last_segment()->max_timestamp,
-          .delta_offset = removed.begin()->delta_offset,
-          .ntp_revision = removed.get_revision_id(),
-          .archiver_term = removed.begin()->segment_term,
-          .segment_term = removed.last_segment()->segment_term,
-          .delta_offset_end = removed.last_segment()->delta_offset_end,
-          .sname_format = segment_name_format::v3,
-          .metadata_size_hint = removed.segments_metadata_bytes(),
-        };
-        _spillover_manifests.insert(meta);
+segment_meta partition_manifest::make_manifest_metadata() const {
+    return segment_meta{
+      .size_bytes = cloud_log_size(),
+      .base_offset = get_start_offset().value(),
+      .committed_offset = get_last_offset(),
+      .base_timestamp = begin()->base_timestamp,
+      .max_timestamp = last_segment()->max_timestamp,
+      .delta_offset = begin()->delta_offset,
+      .ntp_revision = get_revision_id(),
+      .archiver_term = begin()->segment_term,
+      .segment_term = last_segment()->segment_term,
+      .delta_offset_end = last_segment()->delta_offset_end,
+      .sname_format = segment_name_format::v3,
+      .metadata_size_hint = segments_metadata_bytes(),
+    };
+}
+
+bool partition_manifest::safe_spillover_manifest(const segment_meta& meta) {
+    // New spillover manifest should connect with previous spillover manifests
+    // and *this manifest. The manifest is not truncated yet so meta.base_offset
+    // should be equal to start offset and the meta.committed_offset + 1 should
+    // be aligned with one of the segments.
+    auto so = get_start_offset();
+    if (!so.has_value()) {
+        vlog(
+          cst_log.warn,
+          "{} Can't apply spillover manifest because the manifest is empty, {}",
+          _ntp,
+          meta);
+        return false;
     }
-    return removed;
+    // Invariant: 'meta' contains the tail of the log stored in this manifest
+    if (so.value() != meta.base_offset) {
+        vlog(
+          cst_log.warn,
+          "{} Can't apply spillover manifest because the start offsets are not "
+          "aligned: {} vs {}, {}",
+          _ntp,
+          so.value(),
+          meta.base_offset,
+          meta);
+        return false;
+    }
+    auto next_so = model::next_offset(meta.committed_offset);
+    auto it = find(next_so);
+    if (it == end()) {
+        // The end of the spillover manifest is not aligned with the segment
+        // correctly.
+        vlog(
+          cst_log.warn,
+          "{} Can't apply spillover manifest because the end of the manifest "
+          "is not aligned, {}",
+          _ntp,
+          meta);
+        return false;
+    }
+    // Invariant: 'meta' should be aligned perfectly with the previous spillover
+    // manifest.
+    if (_spillover_manifests.empty()) {
+        return true;
+    }
+    if (
+      model::next_offset(_spillover_manifests.last_segment()->committed_offset)
+      == meta.base_offset) {
+        return true;
+    }
+    vlog(
+      cst_log.warn,
+      "{} Can't apply spillover manifest because the end of the previous "
+      "manifest {} "
+      "is not aligned with the new one {}",
+      _ntp,
+      _spillover_manifests.last_segment(),
+      meta);
+    return false;
 }
 
 std::optional<partition_manifest::segment_meta>

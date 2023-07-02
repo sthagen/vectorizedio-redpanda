@@ -640,6 +640,16 @@ ss::future<compaction_result> disk_log_impl::compact_adjacent_segments(
 }
 
 gc_config disk_log_impl::override_retention_config(gc_config cfg) const {
+    // Read replica topics have a different default retention
+    if (config().is_read_replica_mode_enabled()) {
+        cfg.eviction_time = std::max(
+          model::timestamp(
+            model::timestamp::now().value()
+            - ntp_config::read_replica_retention.count()),
+          cfg.eviction_time);
+        return cfg;
+    }
+
     // cloud_retention is disabled, do not override
     if (!is_cloud_retention_active()) {
         return cfg;
@@ -777,6 +787,31 @@ ss::future<std::optional<model::offset>> disk_log_impl::do_gc(gc_config cfg) {
 
     cfg = apply_overrides(cfg);
 
+    /*
+     * _cloud_gc_offset is used to communicate the intent to collect
+     * partition data in excess of normal retention settings (and for infinite
+     * retention / no retention settings). it is expected that an external
+     * process such as disk space management drives this process such that after
+     * a round of gc has run the intent flag can be cleared.
+     */
+    if (_cloud_gc_offset.has_value()) {
+        const auto offset = _cloud_gc_offset.value();
+        _cloud_gc_offset.reset();
+
+        vassert(
+          is_cloud_retention_active(), "Expected remote retention active");
+
+        vlog(
+          gclog.info,
+          "[{}] applying 'deletion' log cleanup with remote retention override "
+          "offset {} and config {}",
+          config().ntp(),
+          _cloud_gc_offset,
+          cfg);
+
+        co_return co_await request_eviction_until_offset(offset);
+    }
+
     if (!config().is_collectable()) {
         co_return std::nullopt;
     }
@@ -907,18 +942,11 @@ offset_stats disk_log_impl::offsets() const {
     // NOTE: we have to do this because ss::circular_buffer<> does not provide
     // with reverse iterators, so we manually find the iterator
     segment_set::type end;
-    segment_set::type term_start;
     for (int i = (int)_segs.size() - 1; i >= 0; --i) {
         auto& seg = _segs[i];
         if (!seg->empty()) {
-            if (!end) {
-                end = seg;
-            }
-            // find term start offset
-            if (seg->offsets().term < end->offsets().term) {
-                break;
-            }
-            term_start = seg;
+            end = seg;
+            break;
         }
     }
     if (!end) {
@@ -933,8 +961,6 @@ offset_stats disk_log_impl::offsets() const {
     // we have valid begin and end
     const auto& bof = _segs.front()->offsets();
     const auto& eof = end->offsets();
-    // term start
-    const auto term_start_offset = term_start->offsets().base_offset;
 
     const auto start_offset = _start_offset() >= 0 ? _start_offset
                                                    : bof.base_offset;
@@ -947,8 +973,35 @@ offset_stats disk_log_impl::offsets() const {
 
       .dirty_offset = eof.dirty_offset,
       .dirty_offset_term = eof.term,
-      .last_term_start_offset = term_start_offset,
     };
+}
+
+model::offset disk_log_impl::find_last_term_start_offset() const {
+    if (_segs.empty()) {
+        return {};
+    }
+
+    segment_set::type end;
+    segment_set::type term_start;
+    for (int i = (int)_segs.size() - 1; i >= 0; --i) {
+        auto& seg = _segs[i];
+        if (!seg->empty()) {
+            if (!end) {
+                end = seg;
+            }
+            // find term start offset
+            if (seg->offsets().term < end->offsets().term) {
+                break;
+            }
+            term_start = seg;
+        }
+    }
+
+    if (!end) {
+        return {};
+    }
+
+    return term_start->offsets().base_offset;
 }
 
 model::timestamp disk_log_impl::start_timestamp() const {
@@ -1320,6 +1373,9 @@ disk_log_impl::index_lower_bound(model::offset o) const {
     if (unlikely(_segs.empty())) {
         return std::nullopt;
     }
+    if (o == model::offset{}) {
+        return std::nullopt;
+    }
     auto it = _segs.lower_bound(o);
     if (it == _segs.end()) {
         return std::nullopt;
@@ -1680,6 +1736,43 @@ disk_log_impl::update_configuration(ntp_config::default_overrides o) {
 
     return ss::now();
 }
+
+/// Calculate the compaction backlog of the segments within a particular term
+///
+/// This is the inner part of compaction_backlog()
+int64_t compaction_backlog_term(
+  std::vector<ss::lw_shared_ptr<segment>> segs, double cf) {
+    int64_t backlog = 0;
+
+    // Only compare each segment to a limited number of other segments, to
+    // avoid the loop below blowing up in runtime when there are many segments
+    // in the same term.
+    static constexpr size_t limit_lookahead = 8;
+
+    auto segment_count = segs.size();
+    if (segment_count <= 1) {
+        return 0;
+    }
+
+    for (size_t n = 1; n <= segment_count; ++n) {
+        auto& s = segs[n - 1];
+        auto sz = s->finished_self_compaction() ? s->size_bytes()
+                                                : s->size_bytes() * cf;
+        for (size_t k = 0; k <= segment_count - n && k < limit_lookahead; ++k) {
+            if (k == segment_count - 1) {
+                continue;
+            }
+            if (k == 0) {
+                backlog += static_cast<int64_t>(sz);
+            } else {
+                backlog += static_cast<int64_t>(std::pow(cf, k) * sz);
+            }
+        }
+    }
+
+    return backlog;
+}
+
 /**
  * We express compaction backlog as the size of a data that have to be read to
  * perform full compaction.
@@ -1745,11 +1838,19 @@ int64_t disk_log_impl::compaction_backlog() const {
         return 0;
     }
 
-    std::vector<std::vector<ss::lw_shared_ptr<segment>>> segments_per_term;
     auto current_term = _segs.front()->offsets().term;
-    segments_per_term.emplace_back();
-    auto idx = 0;
+    auto cf = _compaction_ratio.get();
     int64_t backlog = 0;
+    std::vector<ss::lw_shared_ptr<segment>> segments_this_term;
+
+    // Limit how large we will try to allocate the sgements_this_term vector:
+    // this protects us against corner cases where a term has a really large
+    // number of segments.  Typical compaction use cases will have many fewer
+    // segments per term than this (because segments are continuously compacted
+    // away).  Corner cases include non-compactible data in a compacted topic,
+    // or enabling compaction on a previously non-compacted topic.
+    static constexpr size_t limit_segments_this_term = 1024;
+
     for (auto& s : _segs) {
         if (!s->finished_self_compaction()) {
             backlog += static_cast<int64_t>(s->size_bytes());
@@ -1760,34 +1861,19 @@ int64_t disk_log_impl::compaction_backlog() const {
         }
 
         if (current_term != s->offsets().term) {
-            ++idx;
-            segments_per_term.emplace_back();
+            // New term: consume segments from the previous term.
+            backlog += compaction_backlog_term(
+              std::move(segments_this_term), cf);
+            segments_this_term.clear();
         }
-        segments_per_term[idx].push_back(s);
-    }
-    auto cf = _compaction_ratio.get();
 
-    for (const auto& segs : segments_per_term) {
-        auto segment_count = segs.size();
-        if (segment_count == 1) {
-            continue;
-        }
-        for (size_t n = 1; n <= segment_count; ++n) {
-            auto& s = segs[n - 1];
-            auto sz = s->finished_self_compaction() ? s->size_bytes()
-                                                    : s->size_bytes() * cf;
-            for (size_t k = 0; k <= segment_count - n; ++k) {
-                if (k == segment_count - 1) {
-                    continue;
-                }
-                if (k == 0) {
-                    backlog += static_cast<int64_t>(sz);
-                } else {
-                    backlog += static_cast<int64_t>(std::pow(cf, k) * sz);
-                }
-            }
+        if (segments_this_term.size() < limit_segments_this_term) {
+            segments_this_term.push_back(s);
         }
     }
+
+    // Consume segments from last term in the log after falling out of loop
+    backlog += compaction_backlog_term(std::move(segments_this_term), cf);
 
     return backlog;
 }
@@ -1886,7 +1972,9 @@ disk_log_impl::disk_usage_and_reclaimable_space(gc_config cfg) {
           retention_offset.has_value()
           && seg->offsets().dirty_offset <= retention_offset.value()) {
             retention_segments.push_back(seg);
-        } else if (seg->offsets().dirty_offset <= max_collectible) {
+        } else if (
+          is_cloud_retention_active()
+          && seg->offsets().dirty_offset <= max_collectible) {
             available_segments.push_back(seg);
         } else {
             remaining_segments.push_back(seg);
@@ -2145,6 +2233,46 @@ ss::future<usage_report> disk_log_impl::disk_usage(gc_config cfg) {
       target.min_capacity_wanted, target.min_capacity);
 
     co_return usage_report(usage, reclaim, target);
+}
+
+fragmented_vector<ss::lw_shared_ptr<segment>>
+disk_log_impl::cloud_gc_eligible_segments() {
+    vassert(
+      is_cloud_retention_active(),
+      "Expected {} to have cloud retention enabled",
+      config().ntp());
+
+    // must-have restriction
+    if (_segs.size() <= 2) {
+        return {};
+    }
+
+    /*
+     * for a cloud-backed topic the max collecible offset is the threshold below
+     * which data has been uploaded and can safely be removed from local disk.
+     */
+    const auto max_collectible = stm_manager()->max_collectible_offset();
+
+    // collect eligible segments
+    fragmented_vector<segment_set::type> segments;
+    for (auto remaining = _segs.size() - 2; auto& seg : _segs) {
+        if (seg->offsets().committed_offset <= max_collectible) {
+            segments.push_back(seg);
+        }
+        if (--remaining <= 0) {
+            break;
+        }
+    }
+
+    return segments;
+}
+
+void disk_log_impl::set_cloud_gc_offset(model::offset offset) {
+    vassert(
+      is_cloud_retention_active(),
+      "Expected {} to have cloud retention enabled",
+      config().ntp());
+    _cloud_gc_offset = offset;
 }
 
 } // namespace storage

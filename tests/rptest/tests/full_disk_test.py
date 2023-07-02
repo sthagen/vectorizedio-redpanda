@@ -19,6 +19,9 @@ from kafka import KafkaProducer
 from kafka.errors import BrokerNotAvailableError, NotLeaderForPartitionError
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.default import DefaultClient
+from rptest.clients.rpk import RpkTool
+from rptest.services.redpanda import SISettings
+from ducktape.mark import matrix
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
@@ -30,7 +33,9 @@ from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import search_logs_with_timeout, produce_total_bytes
 from rptest.utils.full_disk import FullDiskHelper
 from rptest.utils.partition_metrics import PartitionMetrics
+from rptest.utils.si_utils import BucketView, quiesce_uploads
 from rptest.utils.expect_rate import ExpectRate, RateTarget
+from rptest.services.kgo_verifier_services import KgoVerifierProducer, KgoVerifierSeqConsumer
 
 # reduce this?
 MAX_MSG: int = 600
@@ -520,3 +525,118 @@ class DiskStatsOverrideTest(RedpandaTest):
         # rounding to block size. use a 4K block threshold to test.
         delta = abs(stat["free_bytes"] - stat["total_bytes"])
         assert delta <= 4096
+
+
+class LogStorageMaxSizeSI(RedpandaTest):
+    def __init__(self, test_context, *args, **kwargs):
+        super().__init__(test_context, *args, **kwargs)
+
+    def setUp(self):
+        # defer redpanda startup to the test
+        pass
+
+    def _kafka_size_on_disk(self, node):
+        total_bytes = 0
+        observed = list(self.redpanda.data_stat(node))
+        for file, size in observed:
+            if len(file.parents) == 1:
+                continue
+            if file.parents[-2].name == "kafka":
+                total_bytes += size
+        return total_bytes
+
+    @cluster(num_nodes=4)
+    @matrix(log_segment_size=[1024 * 1024])
+    def test_stay_below_target_size(self, log_segment_size):
+        """
+        Tests that when a log storage target size is specified that data
+        uploaded into s3 will become eligible for forced GC in order to meet the
+        target size.
+        """
+        # start redpanda with specific config like segment size
+        si_settings = SISettings(test_context=self.test_context,
+                                 log_segment_size=log_segment_size)
+        extra_rp_conf = {}
+        self.redpanda.set_extra_rp_conf(extra_rp_conf)
+        self.redpanda.set_si_settings(si_settings)
+        self.redpanda.start()
+
+        # test parameters
+        topic_name = "target-size-topic"
+        partition_count = 4
+        replica_count = 3
+        msg_size = 65536
+        fuzz_size = 1 * 2**20
+
+        # we will always try to latest 2 segments per partition so this would be
+        # roughly the lowest size we'd be able to get to in best case
+        target_size = partition_count * 2 * log_segment_size
+
+        # we'll write 3x the target size, and do it twice
+        data_size = target_size * 3
+
+        # make the sink topic
+        rpk = RpkTool(self.redpanda)
+        rpk.create_topic(topic_name,
+                         partitions=partition_count,
+                         replicas=replica_count)
+
+        msg_count = data_size // msg_size
+
+        # write `data_size` bytes
+        t1 = time()
+        KgoVerifierProducer.oneshot(self.test_context,
+                                    self.redpanda,
+                                    topic_name,
+                                    msg_size=msg_size,
+                                    msg_count=msg_count,
+                                    batch_max_bytes=msg_size * 8)
+        produce_duration = time() - t1
+        self.logger.info(
+            f"Produced {data_size} bytes in {produce_duration} seconds, {(data_size/produce_duration)/1000000.0:.2f}MB/s"
+        )
+
+        quiesce_uploads(self.redpanda, [t.name for t in self.topics],
+                        timeout_sec=30)
+
+        # verify approx same amount of data on disk. adds on some fuzz factor
+        total = sum(self._kafka_size_on_disk(n) for n in self.redpanda.nodes)
+        total += fuzz_size * len(self.redpanda.nodes)
+        assert total > (data_size * replica_count)
+
+        # set the log storage target size. system will try to meet this target.
+        self.redpanda.set_cluster_config(
+            dict(log_storage_target_size=target_size, ))
+
+        # now go write another `data_size` bytes
+        t1 = time()
+        KgoVerifierProducer.oneshot(self.test_context,
+                                    self.redpanda,
+                                    topic_name,
+                                    msg_size=msg_size,
+                                    msg_count=msg_count,
+                                    batch_max_bytes=msg_size * 8)
+        produce_duration = time() - t1
+        self.logger.info(
+            f"Produced {data_size} bytes in {produce_duration} seconds, {(data_size/produce_duration)/1000000.0:.2f}MB/s"
+        )
+
+        # wait until space management kicks in. after data is uploaded into s3
+        # it will become eligible for forced gc by space management despite
+        # having infinte retention, at which point we should see the storage
+        # usage drop back down. we end up writing 3x * 3x the target size, and
+        # add a few segments per node on for fuzz factor
+        def target_size_reached():
+            total = sum(
+                self._kafka_size_on_disk(n) for n in self.redpanda.nodes)
+            target = ((target_size + 2 * log_segment_size) *
+                      len(self.redpanda.nodes))
+            below = total < target
+            if not below:
+                self.logger.debug(
+                    f"Reported total across all nodes {total} still larger {target}"
+                )
+            return below
+
+        # give it plenty of time. on debug it is hella slow
+        wait_until(target_size_reached, timeout_sec=120, backoff_sec=5)

@@ -14,11 +14,14 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timestamp.h"
+#include "serde/serde.h"
 #include "utils/delta_for.h"
 
 #include <bitset>
+#include <exception>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <tuple>
 
 namespace cloud_storage {
@@ -739,6 +742,16 @@ public:
           member_fields());
     }
 
+    auto unsafe_alias() const -> column_store {
+        auto tmp = column_store{};
+        details::tuple_map(
+          [](auto& lhs, auto const& rhs) { lhs = rhs.unsafe_alias(); },
+          tmp.columns(),
+          columns());
+        tmp._hints = _hints;
+        return tmp;
+    }
+
 private:
     gauge_col_t _is_compacted{};
     gauge_col_t _size_bytes{};
@@ -930,6 +943,32 @@ public:
         return _col.last_segment();
     }
 
+    // Add value to the write buffer without replacing
+    // anything.
+    void append_no_flush(const segment_meta& m) {
+        auto it = _write_buffer.find(m.base_offset);
+        if (it != _write_buffer.end()) {
+            throw std::invalid_argument(fmt_with_ctx(
+              fmt::format,
+              "Element with base offset {} is already added, new value: {}, "
+              "existing value: {}",
+              m.base_offset,
+              m,
+              it->second));
+        }
+        _write_buffer.insert_or_assign(m.base_offset, m);
+    }
+
+    // Remove element from the write buffer. The method can
+    // be used to undo previous call to 'append_no_flush'
+    void remove_from_buffer(const segment_meta& m) {
+        auto it = _write_buffer.find(m.base_offset);
+        if (it == _write_buffer.end() || it->second != m) {
+            return;
+        }
+        _write_buffer.erase(it);
+    }
+
     void insert(const segment_meta& m) {
         auto [m_it, _] = _write_buffer.insert_or_assign(m.base_offset, m);
         // the new segment_meta could be a replacement for subsequent entries in
@@ -1003,6 +1042,17 @@ public:
 
         _write_buffer.clear();
         _col = serde::read_nested<column_store>(in, h._bytes_left_limit);
+    }
+
+    auto to_iobuf() const {
+        flush_write_buffer();
+        auto tmp = impl{};
+        tmp._col = _col.unsafe_alias();
+        return serde::to_iobuf(std::move(tmp));
+    }
+
+    void from_iobuf(iobuf in) {
+        *this = serde::from_iobuf<impl>(std::move(in));
     }
 
     void flush_write_buffer() const {
@@ -1098,16 +1148,33 @@ void segment_meta_cstore::from_iobuf(iobuf in) {
     // NOTE: this process is not optimal memory-wise, but it's simple and
     // correct. It would require some rewrite on serde to accept a type& out
     // parameter.
-    *_impl = serde::from_iobuf<segment_meta_cstore::impl>(std::move(in));
+    _impl->from_iobuf(std::move(in));
 }
 
-iobuf segment_meta_cstore::to_iobuf() const {
-    impl tmp;
-    for (auto s : *this) {
-        tmp.append(s);
-    }
+iobuf segment_meta_cstore::to_iobuf() const { return _impl->to_iobuf(); }
 
-    return serde::to_iobuf(std::move(tmp));
+segment_meta_cstore::append_tx::append_tx(
+  segment_meta_cstore& cs, const segment_meta& meta)
+  : _meta(meta)
+  , _parent(cs) {
+    _parent._impl->append_no_flush(meta);
+}
+
+segment_meta_cstore::append_tx::~append_tx() {
+    if (std::uncaught_exceptions() > 0) {
+        // NOTE: rollback is idempotent so it's safe to invoke
+        // it here if it was called manually prior to d-tor call.
+        rollback();
+    }
+}
+
+void segment_meta_cstore::append_tx::rollback() noexcept {
+    _parent._impl->remove_from_buffer(_meta);
+}
+
+segment_meta_cstore::append_tx
+segment_meta_cstore::append(const segment_meta& meta) {
+    return append_tx(*this, meta);
 }
 
 void segment_meta_cstore::flush_write_buffer() { _impl->flush_write_buffer(); }

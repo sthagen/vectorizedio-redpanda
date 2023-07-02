@@ -14,6 +14,7 @@
 #include "config/property.h"
 #include "seastarx.h"
 #include "ssx/semaphore.h"
+#include "storage/node.h"
 
 #include <seastar/core/sharded.hh>
 
@@ -30,36 +31,20 @@ class partition_manager;
 namespace storage {
 
 class api;
-
-enum class disk_space_alert { ok = 0, low_space = 1, degraded = 2 };
-
-inline disk_space_alert max_severity(disk_space_alert a, disk_space_alert b) {
-    return std::max(a, b);
-}
-
-inline std::ostream& operator<<(std::ostream& o, const disk_space_alert d) {
-    switch (d) {
-    case disk_space_alert::ok:
-        o << "ok";
-        break;
-    case disk_space_alert::low_space:
-        o << "low_space";
-        break;
-    case disk_space_alert::degraded:
-        o << "degraded";
-        break;
-    }
-    return o;
-}
+class node;
 
 /*
  *
  */
 class disk_space_manager {
+    static constexpr ss::shard_id run_loop_core = 0;
+
 public:
     disk_space_manager(
       config::binding<bool> enabled,
+      config::binding<std::optional<uint64_t>> log_storage_target_size,
       ss::sharded<storage::api>* storage,
+      ss::sharded<storage::node>* storage_node,
       ss::sharded<cloud_storage::cache>* cache,
       ss::sharded<cluster::partition_manager>* pm);
 
@@ -75,8 +60,18 @@ public:
 private:
     config::binding<bool> _enabled;
     ss::sharded<storage::api>* _storage;
+    ss::sharded<storage::node>* _storage_node;
     ss::sharded<cloud_storage::cache>* _cache;
     ss::sharded<cluster::partition_manager>* _pm;
+
+    node::notification_id _cache_disk_nid;
+    node::notification_id _data_disk_nid;
+    // details from last disk notification
+    node::disk_space_info _cache_disk_info{};
+    node::disk_space_info _data_disk_info{};
+
+    ss::future<> manage_data_disk(uint64_t target_size);
+    config::binding<std::optional<uint64_t>> _log_storage_target_size;
 
     ss::gate _gate;
     ss::future<> run_loop();

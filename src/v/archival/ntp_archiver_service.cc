@@ -182,6 +182,11 @@ void ntp_archiver::notify_leadership(std::optional<model::node_id> leader_id) {
 }
 
 ss::future<> ntp_archiver::upload_until_abort() {
+    if (unlikely(config::shard_local_cfg()
+                   .cloud_storage_disable_upload_loop_for_tests.value())) {
+        vlog(_rtclog.warn, "Skipping upload loop start");
+        co_return;
+    }
     if (!_probe) {
         _probe.emplace(_conf->ntp_metrics_disabled, _ntp);
     }
@@ -244,6 +249,12 @@ ss::future<> ntp_archiver::upload_until_abort() {
 }
 
 ss::future<> ntp_archiver::sync_manifest_until_abort() {
+    if (unlikely(
+          config::shard_local_cfg()
+            .cloud_storage_disable_read_replica_loop_for_tests.value())) {
+        vlog(_rtclog.warn, "Skipping read replica sync loop start");
+        co_return;
+    }
     if (!_probe) {
         _probe.emplace(_conf->ntp_metrics_disabled, _ntp);
     }
@@ -374,6 +385,36 @@ ss::future<> ntp_archiver::upload_topic_manifest() {
           _parent.ntp(),
           std::current_exception());
     }
+}
+
+ss::future<bool> ntp_archiver::sync_for_tests() {
+    while (!_as.abort_requested()) {
+        if (!_parent.is_leader()) {
+            bool shutdown = false;
+            try {
+                vlog(_rtclog.debug, "test waiting for leadership");
+                co_await _leader_cond.wait();
+            } catch (const ss::broken_condition_variable&) {
+                // stop() was called
+                shutdown = true;
+            }
+
+            if (shutdown || _as.abort_requested()) {
+                vlog(_rtclog.trace, "sync_for_tests shutting down");
+                co_return false;
+            }
+        }
+        _start_term = _parent.term();
+        if (!can_update_archival_metadata()) {
+            co_return false;
+        }
+        auto sync_timeout = config::shard_local_cfg()
+                              .cloud_storage_metadata_sync_timeout_ms.value();
+        if (co_await _parent.archival_meta_stm()->sync(sync_timeout)) {
+            co_return true;
+        }
+    }
+    co_return false;
 }
 
 ss::future<> ntp_archiver::upload_until_term_change() {
@@ -509,6 +550,23 @@ ss::future<> ntp_archiver::upload_until_term_change() {
 
 ss::future<> ntp_archiver::sync_manifest_until_term_change() {
     while (can_update_archival_metadata()) {
+        if (!_feature_table.local().is_active(
+              features::feature::cloud_storage_manifest_format_v2)) {
+            vlog(
+              _rtclog.warn,
+              "Cannot synchronize read replica during upgrade, not all nodes "
+              "are upgraded yet.  Waiting...");
+            co_await _feature_table.local().await_feature(
+              features::feature::cloud_storage_manifest_format_v2, _as);
+            vlog(
+              _rtclog.info,
+              "Upgrade complete, proceeding to sync read replica.");
+
+            // Go around the loop to check we are still eligible to do the
+            // update
+            continue;
+        }
+
         cloud_storage::download_result result = co_await sync_manifest();
 
         if (result != cloud_storage::download_result::success) {
@@ -538,6 +596,17 @@ ss::future<cloud_storage::download_result> ntp_archiver::sync_manifest() {
           "Failed to download partition manifest in read-replica mode");
         co_return res;
     } else {
+        if (m == _parent.archival_meta_stm()->manifest()) {
+            // TODO: This can be made more efficient by using a conditional GET:
+            // https://github.com/redpanda-data/redpanda/issues/11776
+            //
+            // Then, the GET can be adapted to return the raw buffer, so that we
+            // don't go through a deserialize/serialize cycle before writing the
+            // manifest back into a raft batch.
+            vlog(_rtclog.debug, "Manifest has not changed, no sync required");
+            co_return res;
+        }
+
         vlog(
           _rtclog.debug,
           "Updating the archival_meta_stm in read-replica mode, in-sync "
@@ -546,78 +615,14 @@ ss::future<cloud_storage::download_result> ntp_archiver::sync_manifest() {
           m.get_last_offset(),
           m.get_last_uploaded_compacted_offset());
 
-        if (m.get_last_offset() < manifest().get_last_offset()) {
-            // This indicates time travel, possible because the source cluster
-            // had a stale leader node upload a manifest on top of a more
-            // recent manifest uploaded by the current leader.  This is legal
-            // and the reader (us) should ignore the apparent time travel,
-            // in expectation that the current leader eventually wins and
-            // uploads a more recent manifest.
-            vlog(
-              _rtclog.error,
-              "Ignoring remote manifest.json contents: last_offset {} behind "
-              "last"
-              "seen last_offset {} (remote insync_offset {})",
-              m.get_last_offset(),
-              manifest().get_last_offset(),
-              m.get_insync_offset());
-            co_return res;
-        }
-
-        std::vector<cloud_storage::segment_meta> mdiff;
-        // Several things have to be done:
-        // - Add all segments between old last_offset and new last_offset
-        // - Compare all segments below last compacted offset with their
-        //   counterparts in the old manifest and re-add them if they are
-        //   diferent.
-        // - Apply new start_offset if it's different
-        auto offset = model::next_offset(manifest().get_last_offset());
-        for (auto it = m.segment_containing(offset); it != m.end(); ++it) {
-            mdiff.push_back(*it);
-        }
-
-        bool needs_cleanup = false;
-        auto old_start_offset = manifest().get_start_offset();
-        auto new_start_offset = m.get_start_offset();
-        for (const auto& s : m) {
-            if (
-              s.committed_offset <= m.get_last_uploaded_compacted_offset()
-              && s.base_offset >= new_start_offset) {
-                // Re-uploaded segments has to be aligned with one of
-                // the existing segments in the manifest. This is guaranteed
-                // by the archiver. Because of that we can simply lookup
-                // the base offset of the segment in the manifest and
-                // compare them.
-                auto iter = manifest().get(s.base_offset);
-                if (iter && *iter != s) {
-                    mdiff.push_back(s);
-                    needs_cleanup = true;
-                }
-            } else {
-                break;
-            }
-        }
-
         auto sync_timeout = config::shard_local_cfg()
                               .cloud_storage_metadata_sync_timeout_ms.value();
         auto deadline = ss::lowres_clock::now() + sync_timeout;
-        // The commands to update the manifest need to be batched together,
-        // otherwise the read-replica will be able to see partial update. Also,
-        // the batching is more efficient.
+
+        auto serialized = m.to_iobuf();
         auto builder = _parent.archival_meta_stm()->batch_start(deadline, _as);
-        builder.add_segments(std::move(mdiff));
-        if (
-          new_start_offset.has_value() && old_start_offset.has_value()
-          && old_start_offset.value() != new_start_offset.value()) {
-            builder.truncate(new_start_offset.value());
-            needs_cleanup = true;
-        }
-        if (needs_cleanup) {
-            // We only need to replicate this command if the
-            // manifest will be truncated or compacted segments
-            // will be added by previous commands.
-            builder.cleanup_metadata();
-        }
+        builder.replace_manifest(m.to_iobuf());
+
         auto errc = co_await builder.replicate();
         if (errc) {
             if (errc == raft::errc::shutting_down) {
@@ -1175,6 +1180,7 @@ ntp_archiver::make_segment_index(
 
     vlog(ctxlog.debug, "creating remote segment index: {}", index_path);
     auto builder = cloud_storage::make_remote_segment_index_builder(
+      _ntp,
       std::move(stream),
       ix,
       base_rp_offset - base_kafka_offset,
@@ -1865,8 +1871,9 @@ ss::future<> ntp_archiver::apply_archive_retention() {
     }
 
     if (
-      res.value().offset
-      == _manifest_view->stm_manifest().get_archive_start_offset()) {
+      res.value().offset == model::offset{}
+      || res.value().offset
+           == _manifest_view->stm_manifest().get_archive_start_offset()) {
         co_return;
     }
 
@@ -1924,6 +1931,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
 
     auto cursor = std::move(backlog.value());
 
+    using eof = cloud_storage::async_manifest_view_cursor::eof;
     while (cursor->get_status()
            == cloud_storage::async_manifest_view_cursor_status::
              materialized_spillover) {
@@ -1977,7 +1985,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
               "Failed to load next spillover manifest: {}",
               res.error());
             break;
-        } else if (res.value() == false) {
+        } else if (res.value() == eof::yes) {
             // End of stream
             break;
         }
@@ -2166,13 +2174,15 @@ ss::future<> ntp_archiver::apply_spillover() {
 
         const auto first = *tail.begin();
         const auto last = tail.last_segment();
+        const auto spillover_meta = tail.make_manifest_metadata();
         vassert(last.has_value(), "Spillover manifest can't be empty");
         vlog(
           _rtclog.info,
           "First batch of the spillover manifest: {}, Last batch of the "
-          "spillover manifest: {}",
+          "spillover manifest: {}, spillover metadata: {}",
           first,
-          last);
+          last,
+          spillover_meta);
 
         retry_chain_node upload_rtc(
           manifest_upload_timeout, manifest_upload_backoff, &_rtcnode);
@@ -2184,8 +2194,12 @@ ss::future<> ntp_archiver::apply_spillover() {
         }
         auto [str, len] = co_await tail.serialize();
         // Put manifest into cache to avoid roundtrip to the cloud storage
+        auto reservation = co_await _cache.reserve_space(len, 1);
         co_await _cache.put(
-          tail.get_manifest_path()(), str, _conf->upload_io_priority);
+          tail.get_manifest_path()(),
+          str,
+          reservation,
+          _conf->upload_io_priority);
 
         // Spillover manifests were uploaded to S3
         // Replicate metadata
@@ -2194,8 +2208,14 @@ ss::future<> ntp_archiver::apply_spillover() {
         auto deadline = ss::lowres_clock::now() + sync_timeout;
 
         auto batch = _parent.archival_meta_stm()->batch_start(deadline, _as);
-        batch.spillover(model::next_offset(last->committed_offset));
+        batch.spillover(spillover_meta);
         if (manifest().get_archive_start_offset() == model::offset{}) {
+            vlog(
+              _rtclog.debug,
+              "Archive is empty, have to set start archive/clean offset: {}, "
+              "and delta: {}",
+              first.base_offset,
+              first.delta_offset);
             // Enable archive if this is the first spillover manifest. In this
             // case we need to set initial values for
             // archive_start_offset/archive_clean_offset which will be advanced
@@ -2245,6 +2265,15 @@ ss::future<> ntp_archiver::apply_retention() {
           "skipping STM retention",
           arch_so,
           stm_so);
+        co_return;
+    }
+
+    if (manifest().archive_size_bytes() != 0) {
+        vlog(
+          _rtclog.error,
+          "Size of the archive is not 0, but archival and STM start offsets "
+          "are equal ({}). Skipping retention within STM region.",
+          arch_so);
         co_return;
     }
 

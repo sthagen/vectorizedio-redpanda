@@ -16,7 +16,6 @@
 #include "model/record.h"
 #include "model/timeout_clock.h"
 #include "model/timestamp.h"
-#include "resource_mgmt/storage.h"
 #include "storage/file_sanitizer_types.h"
 #include "storage/fwd.h"
 #include "tristate.h"
@@ -34,6 +33,27 @@ namespace storage {
 using log_clock = ss::lowres_clock;
 using jitter_percents = named_type<int, struct jitter_percents_tag>;
 
+enum class disk_space_alert { ok = 0, low_space = 1, degraded = 2 };
+
+inline disk_space_alert max_severity(disk_space_alert a, disk_space_alert b) {
+    return std::max(a, b);
+}
+
+inline std::ostream& operator<<(std::ostream& o, const disk_space_alert d) {
+    switch (d) {
+    case disk_space_alert::ok:
+        o << "ok";
+        break;
+    case disk_space_alert::low_space:
+        o << "low_space";
+        break;
+    case disk_space_alert::degraded:
+        o << "degraded";
+        break;
+    }
+    return o;
+}
+
 struct disk
   : serde::envelope<disk, serde::version<1>, serde::compat_version<0>> {
     static constexpr int8_t current_version = 0;
@@ -44,6 +64,11 @@ struct disk
     disk_space_alert alert{disk_space_alert::ok};
 
     auto serde_fields() { return std::tie(path, free, total, alert); }
+
+    // this value is _not_ serialized, but having it in this structure is useful
+    // for passing the filesystem id around as the structure is used internally
+    // to represent a disk not only for marshalling data to disk/network.
+    unsigned long int fsid;
 
     friend std::ostream& operator<<(std::ostream&, const disk&);
     friend bool operator==(const disk&, const disk&) = default;
@@ -167,12 +192,6 @@ struct offset_stats {
 
     model::offset dirty_offset;
     model::term_id dirty_offset_term;
-    // Base offset of the first batch in the most recent term stored in log
-    //
-    // The last_term_base offset will be used by the followers to inform the
-    // raft group leader about the next possible index where truncation should
-    // happen while recovering node log.
-    model::offset last_term_start_offset;
 
     friend std::ostream& operator<<(std::ostream&, const offset_stats&);
 };

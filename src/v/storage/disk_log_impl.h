@@ -86,6 +86,7 @@ public:
     timequery(timequery_config cfg) final;
     size_t segment_count() const final { return _segs.size(); }
     offset_stats offsets() const final;
+    model::offset find_last_term_start_offset() const final;
     model::timestamp start_timestamp() const final;
     std::optional<model::term_id> get_term(model::offset) const final;
     std::optional<model::offset>
@@ -113,6 +114,24 @@ public:
     int64_t compaction_backlog() const final;
 
     ss::future<usage_report> disk_usage(gc_config);
+
+    /*
+     * Interface for disk space management (see resource_mgmt/storage.cc).
+     *
+     * Manager will use `cloud_gc_eligible_segments` to determine the point at
+     * which the partition should be prefix truncated, subject to data being
+     * uploaded into the cloud.
+     *
+     * Finally, the target offset is set via `set_cloud_gc_offset` which will be
+     * used to configure garbage collection during the next GC pass at which
+     * point the request will be cleared.
+     *
+     * Caller will generally configure many partitions and then trigger GC
+     * across all partitions.
+     */
+    auto& gate() { return _compaction_housekeeping_gate; }
+    fragmented_vector<ss::lw_shared_ptr<segment>> cloud_gc_eligible_segments();
+    void set_cloud_gc_offset(model::offset);
 
 private:
     friend class disk_log_appender; // for multi-term appends
@@ -244,6 +263,8 @@ private:
     // Mutually exclude operations that will cause segment rolling
     // do_housekeeping and maybe_roll
     mutex _segments_rolling_lock;
+
+    std::optional<model::offset> _cloud_gc_offset;
 };
 
 } // namespace storage

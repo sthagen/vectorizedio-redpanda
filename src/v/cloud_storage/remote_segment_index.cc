@@ -12,6 +12,7 @@
 
 #include "cloud_storage/logger.h"
 #include "model/record_batch_types.h"
+#include "raft/consensus.h"
 #include "serde/envelope.h"
 #include "serde/serde.h"
 
@@ -173,11 +174,17 @@ offset_index::find_kaf_offset(kafka::offset upper_bound) {
     return res;
 }
 
-offset_index::coarse_index_t
-offset_index::build_coarse_index(uint64_t step_size) const {
+offset_index::coarse_index_t offset_index::build_coarse_index(
+  uint64_t step_size, std::string_view index_path) const {
+    vlog(
+      cst_log.trace,
+      "{}: building coarse index from file offset index with {} rows",
+      index_path,
+      _file_index.get_row_count());
     vassert(
       step_size > static_cast<uint64_t>(_min_file_pos_step),
-      "step size {} cannot be less than or equal to index step size {}",
+      "{}: step size {} cannot be less than or equal to index step size {}",
+      index_path,
       step_size,
       _min_file_pos_step);
 
@@ -195,28 +202,40 @@ offset_index::build_coarse_index(uint64_t step_size) const {
     std::array<int64_t, buffer_depth> kafka_row{};
 
     coarse_index_t index;
-    size_t curr_mod_step_sz{0};
-    while (file_dec.read(file_row) && kaf_dec.read(kafka_row)) {
-        for (auto it = file_row.cbegin(), kit = kafka_row.cbegin();
-             it != file_row.cend() && kit != kafka_row.cend();
+    auto populate_index = [step_size, &index, index_path](
+                            const auto& file_offsets,
+                            const auto& kafka_offsets,
+                            auto& span_start,
+                            auto& span_end) {
+        for (auto it = file_offsets.cbegin(), kit = kafka_offsets.cbegin();
+             it != file_offsets.cend() && kit != kafka_offsets.cend();
              ++it, ++kit) {
-            auto curr_fpos = *it;
-            auto crossed_step_sz = curr_fpos % step_size;
-            if (crossed_step_sz < curr_mod_step_sz) {
+            span_end = *it;
+            auto delta = span_end - span_start + 1;
+            if (span_end > span_start && delta >= step_size) {
                 vlog(
                   cst_log.trace,
-                  "adding entry to coarse index, current file pos: {}, step "
-                  "size: {}, curr mod step size: {}",
-                  curr_fpos,
+                  "{}: adding entry to coarse index, current file pos: {}, "
+                  "step size: {}, span size: {}",
+                  index_path,
+                  span_end,
                   step_size,
-                  curr_mod_step_sz);
-                index[kafka::offset{*kit}] = curr_fpos;
+                  delta);
+                index[kafka::offset{*kit}] = span_end;
+                span_start = span_end + 1;
             }
-            curr_mod_step_sz = crossed_step_sz;
         }
+    };
+
+    size_t start{0};
+    size_t end{0};
+    while (file_dec.read(file_row) && kaf_dec.read(kafka_row)) {
+        populate_index(file_row, kafka_row, start, end);
         file_row = {};
         kafka_row = {};
     }
+
+    populate_index(_file_offsets, _kaf_offsets, start, end);
     return index;
 }
 
@@ -312,10 +331,14 @@ offset_index::_find_under(deltafor_decoder<int64_t> decoder, int64_t offset) {
 }
 
 remote_segment_index_builder::remote_segment_index_builder(
-  offset_index& ix, model::offset_delta initial_delta, size_t sampling_step)
+  const model::ntp& ntp,
+  offset_index& ix,
+  model::offset_delta initial_delta,
+  size_t sampling_step)
   : _ix(ix)
   , _running_delta(initial_delta)
-  , _sampling_step(sampling_step) {}
+  , _sampling_step(sampling_step)
+  , _filter(raft::offset_translator_batch_types(ntp)) {}
 
 remote_segment_index_builder::consume_result
 remote_segment_index_builder::accept_batch_start(
@@ -327,9 +350,8 @@ void remote_segment_index_builder::consume_batch_start(
   model::record_batch_header hdr,
   size_t physical_base_offset,
   size_t size_on_disk) {
-    if (
-      hdr.type == model::record_batch_type::raft_configuration
-      || hdr.type == model::record_batch_type::archival_metadata) {
+    auto it = std::find(_filter.begin(), _filter.end(), hdr.type);
+    if (it != _filter.end()) {
         _running_delta += hdr.last_offset_delta + 1;
     } else {
         if (_window >= _sampling_step) {

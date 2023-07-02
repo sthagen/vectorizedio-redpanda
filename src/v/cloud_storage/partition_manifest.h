@@ -305,9 +305,13 @@ public:
     void flush_write_buffer();
 
     // Returns the cached size in bytes of all segments available to clients.
-    // (i.e. all segments after and including the segment that starts at
-    // the current _start_offset).
+    // This includes both the STM region and the archive.
     uint64_t cloud_log_size() const;
+
+    // Returns the cached size in bytes of all segments within the STM region
+    // that are above the start offset. (i.e. all segments after and including
+    // the segment that starts at the current _start_offset).
+    uint64_t stm_region_size_bytes() const;
 
     /// Returns cached size of the archive in bytes.
     ///
@@ -337,9 +341,19 @@ public:
     ///
     /// \note this works the same way as 'truncate' but the 'archive' size
     ///       gets correctly updated.
-    /// \param starting_rp_offset is a new starting offset of the manifest
-    /// \return manifest that contains only removed segments
-    partition_manifest spillover(model::offset starting_rp_offset);
+    /// \param spillover_manifest_meta is a new spillover manifest to add
+    void spillover(const segment_meta& spillover_manifest_meta);
+
+    /// Pack manifest metadata into the 'segment_meta' struct
+    ///
+    /// This mechanism is used by the 'spillover' mechanism. The 'segment_meta'
+    /// instances that describe spillover manifests are stored using this
+    /// format.
+    segment_meta make_manifest_metadata() const;
+
+    /// Return 'true' if the spillover manifest can be added to
+    /// the manifest without creating a gap
+    bool safe_spillover_manifest(const segment_meta& meta);
 
     /// \brief Set start offset without removing any data from the
     /// manifest.
@@ -354,11 +368,11 @@ public:
     /// \brief Set start kafka offset without removing any data from the
     /// manifest.
     ///
-    /// Allows to move start_kafka_offset forward
-    /// freely. The corresponding start_offset value is moved
-    /// to the closest aligned offset.
-    /// \returns true if start_offset was moved
-    bool advance_start_kafka_offset(kafka::offset start_offset);
+    /// Allows start_kafka_offset to move forward freely, without changing
+    /// start_offset.
+    ///
+    /// \returns true if start_kafka_offset was moved
+    bool advance_start_kafka_offset(kafka::offset new_start_offset);
 
     /// \brief Resets the state of the manifest to the default constructed
     /// state.
@@ -563,6 +577,7 @@ private:
     model::offset _start_offset;
     model::offset _last_uploaded_compacted_offset;
     model::offset _insync_offset;
+    // Size of the segments within the STM region
     size_t _cloud_log_size_bytes{0};
     // First accessible offset of the 'archive' region. Default value means
     // that there is no archive.
@@ -574,7 +589,8 @@ private:
     model::offset _archive_clean_offset;
     // Start kafka offset set by the DeleteRecords request
     kafka::offset _start_kafka_offset;
-    // Total size of the archive (excluding this manifest)
+    // Size of the segments within the archive region (i.e. excluding this
+    // manifest)
     uint64_t _archive_size_bytes{0};
     /// Map of spillover manifests that were uploaded to S3
     spillover_manifest_map _spillover_manifests;

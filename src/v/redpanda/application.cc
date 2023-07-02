@@ -424,6 +424,16 @@ void application::initialize(
 
     _abort_on_oom->watch(oom_config_watch);
 
+    construct_service(
+      _cpu_profiler,
+      ss::sharded_parameter(
+        [] { return config::shard_local_cfg().cpu_profiler_enabled.bind(); }),
+      ss::sharded_parameter([] {
+          return config::shard_local_cfg().cpu_profiler_sample_period_ms.bind();
+      }))
+      .get();
+    _cpu_profiler.invoke_on_all(&resources::cpu_profiler::start).get();
+
     /*
      * allocate per-core zstd decompression workspace and per-core
      * async_stream_zstd workspaces. it can be several megabytes in size, so do
@@ -854,7 +864,9 @@ void application::configure_admin_server() {
       std::ref(topic_recovery_status_frontend),
       std::ref(tx_registry_frontend),
       std::ref(storage_node),
-      std::ref(_memory_sampling))
+      std::ref(_memory_sampling),
+      std::ref(shadow_index_cache),
+      std::ref(_cpu_profiler))
       .get();
 }
 
@@ -1300,6 +1312,10 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           config::node().cloud_storage_cache_path(),
           ss::sharded_parameter([] {
               return config::shard_local_cfg().cloud_storage_cache_size.bind();
+          }),
+          ss::sharded_parameter([] {
+              return config::shard_local_cfg()
+                .cloud_storage_cache_max_objects.bind();
           }))
           .get();
 
@@ -1308,12 +1324,9 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
         auto cloud_storage_cache_disk_notification
           = storage_node.local().register_disk_notification(
             storage::node::disk_type::cache,
-            [this](
-              uint64_t total_space,
-              uint64_t free_space,
-              storage::disk_space_alert alert) {
+            [this](storage::node::disk_space_info info) {
                 return shadow_index_cache.local().notify_disk_status(
-                  total_space, free_space, alert);
+                  info.total, info.free, info.alert);
             });
         _deferred.emplace_back([this, cloud_storage_cache_disk_notification] {
             storage_node.local().unregister_disk_notification(
@@ -1359,7 +1372,9 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
     construct_single_service(
       space_manager,
       config::shard_local_cfg().enable_storage_space_manager.bind(),
+      config::shard_local_cfg().log_storage_target_size.bind(),
       &storage,
+      &storage_node,
       &shadow_index_cache,
       &partition_manager);
 
@@ -1576,6 +1591,17 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
               };
 
               c.connection_rate_bindings.emplace(std::move(bindings));
+
+              c.tcp_keepalive_bindings.emplace(net::tcp_keepalive_bindings{
+                .keepalive_idle_time
+                = config::shard_local_cfg()
+                    .kafka_tcp_keepalive_idle_timeout_seconds.bind(),
+                .keepalive_interval
+                = config::shard_local_cfg()
+                    .kafka_tcp_keepalive_probe_interval_seconds.bind(),
+                .keepalive_probes
+                = config::shard_local_cfg().kafka_tcp_keepalive_probes.bind(),
+              });
           });
       })
       .get();
@@ -1690,14 +1716,10 @@ void application::wire_up_bootstrap_services() {
     auto storage_disk_notification
       = storage_node.local().register_disk_notification(
         storage::node::disk_type::data,
-        [this](
-          uint64_t total_space,
-          uint64_t free_space,
-          storage::disk_space_alert alert) {
-            return storage.invoke_on_all(
-              [total_space, free_space, alert](storage::api& api) {
-                  api.handle_disk_notification(total_space, free_space, alert);
-              });
+        [this](storage::node::disk_space_info info) {
+            return storage.invoke_on_all([info](storage::api& api) {
+                api.handle_disk_notification(info.total, info.free, info.alert);
+            });
         });
     _deferred.emplace_back([this, storage_disk_notification] {
         storage_node.local().unregister_disk_notification(

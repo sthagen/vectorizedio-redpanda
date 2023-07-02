@@ -289,6 +289,20 @@ public:
 
     auto serde_fields() { return std::tie(_head, _tail, _size, _last_row); }
 
+    /// Returns a frame that shares the underlying iobuf
+    /// The method itself is not unsafe, but the returned object can modify the
+    /// original object, so users need to think about the use case
+    auto unsafe_alias() const -> self_t {
+        auto tmp = self_t{};
+        tmp._head = _head;
+        if (_tail.has_value()) {
+            tmp._tail = _tail->unsafe_alias();
+        }
+        tmp._size = _size;
+        tmp._last_row = _last_row;
+        return tmp;
+    }
+
 private:
     template<class PredT>
     const_iterator pred_search(value_t value) const {
@@ -720,6 +734,17 @@ public:
         }
     }
 
+    /// Returns a column that shares the underlying iobuf
+    /// The method itself is not unsafe, but the returned object can modify the
+    /// original object, so users need to think about the use case
+    auto unsafe_alias() const -> Derived {
+        auto tmp = Derived{};
+        for (auto& e : _frames) {
+            tmp._frames.push_back(e.unsafe_alias());
+        }
+        return tmp;
+    }
+
 protected:
     template<class PredT>
     const_iterator pred_search_impl(value_t value) const {
@@ -917,6 +942,27 @@ public:
     const_iterator prev(const_iterator const& it) const;
 
     void insert(const segment_meta&);
+
+    class [[nodiscard]] append_tx {
+    public:
+        explicit append_tx(segment_meta_cstore&, const segment_meta&);
+        ~append_tx();
+        append_tx(const append_tx&) = delete;
+        append_tx(append_tx&&) = delete;
+        append_tx& operator=(const append_tx&) = delete;
+        append_tx& operator=(append_tx&&) = delete;
+
+        void rollback() noexcept;
+
+    private:
+        segment_meta _meta;
+        segment_meta_cstore& _parent;
+    };
+
+    /// Add element to the c-store without flushing the
+    /// write buffer. The new element can't replace any
+    /// existing element in the write buffer.
+    append_tx append(const segment_meta&);
 
     std::pair<size_t, size_t> inflated_actual_size() const;
 

@@ -16,6 +16,7 @@
 #include "cluster/errc.h"
 #include "cluster/logger.h"
 #include "cluster/persisted_stm.h"
+#include "cluster/prefix_truncate_record.h"
 #include "config/configuration.h"
 #include "features/feature_table.h"
 #include "model/fundamental.h"
@@ -131,10 +132,18 @@ struct archival_metadata_stm::reset_metadata_cmd {
     using value = iobuf;
 };
 
-struct archival_metadata_stm::spillover_cmd {
+struct archival_metadata_stm::spillover_cmd
+  : public serde::
+      envelope<spillover_cmd, serde::version<0>, serde::compat_version<0>> {
     static constexpr cmd_key key{9};
 
-    using value = start_offset;
+    cloud_storage::segment_meta manifest_meta;
+};
+
+struct archival_metadata_stm::replace_manifest_cmd {
+    static constexpr cmd_key key{10};
+
+    using value = iobuf;
 };
 
 struct archival_metadata_stm::snapshot
@@ -232,6 +241,14 @@ command_batch_builder& command_batch_builder::cleanup_metadata() {
 }
 
 command_batch_builder&
+command_batch_builder::replace_manifest(iobuf replacement) {
+    iobuf key_buf = serde::to_iobuf(
+      archival_metadata_stm::replace_manifest_cmd::key);
+    _builder.add_raw_kv(std::move(key_buf), std::move(replacement));
+    return *this;
+}
+
+command_batch_builder&
 command_batch_builder::mark_clean(model::offset clean_at) {
     iobuf key_buf = serde::to_iobuf(archival_metadata_stm::mark_clean_cmd::key);
     iobuf val_buf = serde::to_iobuf(clean_at);
@@ -250,8 +267,8 @@ command_batch_builder::truncate(model::offset start_rp_offset) {
     return *this;
 }
 
-command_batch_builder&
-command_batch_builder::truncate(kafka::offset start_kafka_offset) {
+command_batch_builder& command_batch_builder::update_start_kafka_offset(
+  kafka::offset start_kafka_offset) {
     iobuf key_buf = serde::to_iobuf(
       archival_metadata_stm::update_start_kafka_offset_cmd::key);
     auto record_val
@@ -263,10 +280,11 @@ command_batch_builder::truncate(kafka::offset start_kafka_offset) {
 }
 
 command_batch_builder&
-command_batch_builder::spillover(model::offset start_rp_offset) {
+command_batch_builder::spillover(const cloud_storage::segment_meta& meta) {
     iobuf key_buf = serde::to_iobuf(archival_metadata_stm::spillover_cmd::key);
-    auto record_val = archival_metadata_stm::spillover_cmd::value{
-      .start_offset = start_rp_offset};
+    auto record_val = archival_metadata_stm::spillover_cmd{
+      .manifest_meta = meta,
+    };
     iobuf val_buf = serde::to_iobuf(record_val);
     _builder.add_raw_kv(std::move(key_buf), std::move(val_buf));
     return *this;
@@ -510,19 +528,20 @@ ss::future<std::error_code> archival_metadata_stm::truncate(
   ss::lowres_clock::time_point deadline,
   ss::abort_source& as) {
     auto builder = batch_start(deadline, as);
-    builder.truncate(start_kafka_offset);
+    builder.update_start_kafka_offset(start_kafka_offset);
     co_return co_await builder.replicate();
 }
 
 ss::future<std::error_code> archival_metadata_stm::spillover(
-  model::offset start_rp_offset,
+  const cloud_storage::segment_meta& manifest_meta,
   ss::lowres_clock::time_point deadline,
   ss::abort_source& as) {
+    auto start_rp_offset = model::next_offset(manifest_meta.committed_offset);
     if (start_rp_offset < get_start_offset()) {
         co_return errc::success;
     }
     auto builder = batch_start(deadline, as);
-    builder.spillover(start_rp_offset);
+    builder.spillover(manifest_meta);
     co_return co_await builder.replicate();
 }
 
@@ -690,6 +709,27 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
 }
 
 ss::future<> archival_metadata_stm::apply(model::record_batch b) {
+    if (b.header().type == model::record_batch_type::prefix_truncate) {
+        // Special case handling for prefix_truncate batches: these originate
+        // in log_eviction_stm, but affect the entire partition, local and
+        // cloud storage alike. Despite the record originating elsewhere, note
+        // that the STM is still deterministic, as records are applied in
+        // order and are not allowed to fail.
+        b.for_each_record(
+          [this, base_offset = b.base_offset()](model::record&& r) {
+              _last_dirty_at = base_offset + model::offset{r.offset_delta()};
+              auto key = serde::from_iobuf<uint8_t>(r.release_key());
+              auto val = serde::from_iobuf<prefix_truncate_record>(
+                r.release_value());
+              if (key == prefix_truncate_key) {
+                  // The archival layer can't translate arbitrary redpanda
+                  // offsets, so just pass through the Kafka offset as is.
+                  apply_update_start_kafka_offset(val.kafka_start_offset);
+              }
+          });
+        _insync_offset = b.last_offset();
+        co_return;
+    }
     if (b.header().type != model::record_batch_type::archival_metadata) {
         _insync_offset = b.last_offset();
         co_return;
@@ -748,7 +788,10 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
             break;
         case spillover_cmd::key:
             apply_spillover(
-              serde::from_iobuf<spillover_cmd::value>(r.release_value()));
+              serde::from_iobuf<spillover_cmd>(r.release_value()));
+            break;
+        case replace_manifest_cmd::key:
+            apply_replace_manifest(r.release_value());
             break;
         };
     });
@@ -895,6 +938,7 @@ ss::future<stm_snapshot> archival_metadata_stm::take_snapshot() {
       .archive_start_offset = _manifest->get_archive_start_offset(),
       .archive_start_offset_delta = _manifest->get_archive_start_offset_delta(),
       .archive_clean_offset = _manifest->get_archive_clean_offset(),
+      .archive_size_bytes = _manifest->archive_size_bytes(),
       .start_kafka_offset = _manifest->get_start_kafka_offset_override(),
       .spillover_manifests = std::move(spillover)});
 
@@ -1033,19 +1077,9 @@ void archival_metadata_stm::apply_update_start_kafka_offset(kafka::offset so) {
     if (!_manifest->advance_start_kafka_offset(so)) {
         vlog(
           _logger.error,
-          "Can't truncate manifest up to kafka offset {}, offset out of range, "
-          "current start kafka offset: {}, start offset: {}, archive start "
-          "offset: {}",
+          "Can't apply override to kafka start offset {}, currently {}",
           so,
-          get_start_kafka_offset(),
-          get_start_offset(),
-          get_archive_start_offset());
-    } else {
-        vlog(
-          _logger.debug,
-          "Start kafka offset updated to {}, start offset updated to {}",
-          get_start_kafka_offset(),
-          get_start_offset());
+          manifest().get_start_kafka_offset_override());
     }
 }
 
@@ -1074,11 +1108,26 @@ void archival_metadata_stm::apply_truncate_archive_commit(
     _manifest->set_archive_clean_offset(co, bytes_removed);
 }
 
-void archival_metadata_stm::apply_spillover(const start_offset& so) {
-    auto removed = _manifest->spillover(so.start_offset);
+void archival_metadata_stm::apply_spillover(const spillover_cmd& so) {
+    if (_manifest->safe_spillover_manifest(so.manifest_meta)) {
+        _manifest->spillover(so.manifest_meta);
+        vlog(
+          _logger.debug,
+          "Spillover command applied, new start offset: {}, new last offset: "
+          "{}",
+          get_start_offset(),
+          get_last_offset());
+    } else {
+        vlog(_logger.warn, "Can't apply spillover_cmd: {}", so.manifest_meta);
+    }
+}
+
+void archival_metadata_stm::apply_replace_manifest(iobuf val) {
+    _manifest->from_iobuf(std::move(val));
+
     vlog(
       _logger.debug,
-      "Spillover command applied, new start offset: {}, new last offset: {}",
+      "Replace command applied, new start offset: {}, new last offset: {}",
       get_start_offset(),
       get_last_offset());
 }

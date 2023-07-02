@@ -37,6 +37,10 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+ss::logger logger{"archival_metadata_stm_test"};
+} // namespace
+
 static ss::abort_source never_abort;
 
 struct archival_metadata_stm_base_fixture
@@ -119,7 +123,6 @@ struct archival_metadata_stm_base_fixture
     ss::sharded<cloud_storage::configuration> cloud_cfg;
     ss::sharded<cloud_storage_clients::client_pool> cloud_conn_pool;
     ss::sharded<cloud_storage::remote> cloud_api;
-    ss::logger logger{"archival_metadata_stm_test"};
 };
 
 struct archival_metadata_stm_fixture : archival_metadata_stm_base_fixture {
@@ -708,20 +711,27 @@ FIXTURE_TEST(test_archival_stm_spillover, archival_metadata_stm_fixture) {
         model::offset{0}, 0, ss::lowres_clock::now() + 10s, never_abort)
       .get();
     BOOST_REQUIRE_EQUAL(
-      archival_stm->manifest().get_archive_start_offset(), model::offset(0));
+      archival_stm->manifest().get_archive_start_offset(), model::offset{});
     BOOST_REQUIRE_EQUAL(
-      archival_stm->manifest().get_archive_clean_offset(), model::offset(0));
+      archival_stm->manifest().get_archive_clean_offset(), model::offset{});
 
     // unaligned spillover command shouldn't remove segment
     archival_stm
-      ->spillover(model::offset{1}, ss::lowres_clock::now() + 10s, never_abort)
+      ->spillover(
+        cloud_storage::segment_meta{
+          .base_offset = model::offset{0},
+          .committed_offset = model::offset{1}},
+        ss::lowres_clock::now() + 10s,
+        never_abort)
       .get();
+    // the start offset remains unchanged
     BOOST_REQUIRE_EQUAL(archival_stm->get_start_offset(), model::offset(0));
 
     // aligned spillover command should remove segment
     auto batcher2 = archival_stm->batch_start(
       ss::lowres_clock::now() + 10s, never_abort);
-    batcher2.spillover(model::offset(1000));
+    batcher2.spillover(cloud_storage::segment_meta{
+      .base_offset = model::offset(0), .committed_offset = model::offset(999)});
     batcher2.truncate_archive_init(model::offset(200), model::offset_delta(0));
     batcher2.cleanup_archive(model::offset(100), 0);
     batcher2.replicate().get();
@@ -788,7 +798,10 @@ FIXTURE_TEST(
     archival_stm
       ->truncate(kafka::offset(200), ss::lowres_clock::now() + 10s, never_abort)
       .get();
-    // Start kafka offset is below SO.
+    // The start kafka offset doesn't change, only the override changes.
+    BOOST_REQUIRE_EQUAL(
+      archival_stm->manifest().get_start_kafka_offset_override(),
+      model::offset(200));
     BOOST_REQUIRE_EQUAL(
       archival_stm->get_start_kafka_offset(), kafka::offset(1000));
     BOOST_REQUIRE_EQUAL(archival_stm->get_start_offset(), model::offset(1000));
@@ -798,8 +811,21 @@ FIXTURE_TEST(
         kafka::offset(1200), ss::lowres_clock::now() + 10s, never_abort)
       .get();
     BOOST_REQUIRE_EQUAL(
-      archival_stm->get_start_kafka_offset(), kafka::offset(1200));
+      archival_stm->get_start_kafka_offset(), kafka::offset(1000));
+    BOOST_REQUIRE_EQUAL(
+      archival_stm->manifest().get_start_kafka_offset_override(),
+      model::offset(1200));
     BOOST_REQUIRE_EQUAL(archival_stm->get_start_offset(), model::offset(1000));
+
+    // Advancing the start offset past the override resets the override.
+    archival_stm
+      ->truncate(
+        model::offset(2000), ss::lowres_clock::now() + 10s, never_abort)
+      .get();
+    BOOST_REQUIRE_EQUAL(
+      archival_stm->manifest().get_start_kafka_offset_override(),
+      kafka::offset{});
+    BOOST_REQUIRE_EQUAL(archival_stm->get_start_offset(), model::offset(2000));
 }
 
 FIXTURE_TEST(test_reset_metadata, archival_metadata_stm_fixture) {
