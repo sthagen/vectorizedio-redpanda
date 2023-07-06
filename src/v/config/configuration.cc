@@ -119,6 +119,14 @@ configuration::configuration()
        .example = "2147483648000",
        .visibility = visibility::tunable},
       std::nullopt)
+  , log_storage_max_usage_interval(
+      *this,
+      "log_storage_max_usage_interval",
+      "The maximum amount of time before log storage usage will be calculated",
+      {.needs_restart = needs_restart::no,
+       .example = "31536000000",
+       .visibility = visibility::tunable},
+      30s)
   , rpc_server_listen_backlog(
       *this,
       "rpc_server_listen_backlog",
@@ -444,12 +452,7 @@ configuration::configuration()
       "Time to wait for a response from tx_registry",
       {.visibility = visibility::user},
       2000ms)
-  , seq_table_min_size(
-      *this,
-      "seq_table_min_size",
-      "Minimum size of the seq table non affected by compaction",
-      {.visibility = visibility::user},
-      1000)
+  , seq_table_min_size(*this, "seq_table_min_size")
   , tx_timeout_delay_ms(
       *this,
       "tx_timeout_delay_ms",

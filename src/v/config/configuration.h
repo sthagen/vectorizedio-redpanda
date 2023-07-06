@@ -55,6 +55,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> log_segment_ms_min;
     property<std::chrono::milliseconds> log_segment_ms_max;
     property<std::optional<uint64_t>> log_storage_target_size;
+    property<std::chrono::milliseconds> log_storage_max_usage_interval;
 
     // Network
     bounded_property<std::optional<int>> rpc_server_listen_backlog;
@@ -116,7 +117,7 @@ struct configuration final : public config_store {
     deprecated_property tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
     property<std::chrono::milliseconds> find_coordinator_timeout_ms;
-    property<uint32_t> seq_table_min_size;
+    deprecated_property seq_table_min_size;
     property<std::chrono::milliseconds> tx_timeout_delay_ms;
     deprecated_property rm_violation_recovery_policy;
     property<std::chrono::milliseconds> fetch_reads_debounce_timeout;

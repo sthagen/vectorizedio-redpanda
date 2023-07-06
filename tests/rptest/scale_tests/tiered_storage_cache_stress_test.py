@@ -131,8 +131,9 @@ class TieredStorageCacheStressTest(RedpandaTest):
 
         # Cache trim interval is 5 seconds.  Cache trim low watermark is 80%.
         # Effective streaming bandwidth is 20% of cache size every trim period
-        size_limit = max(int((expect_bandwidth * 5) / 0.2),
-                         partition_count * chunk_size)
+        size_limit = max(
+            SISettings.cache_size_for_throughput(expect_bandwidth),
+            partition_count * chunk_size)
         size_limit = max(size_limit, at_least_bytes)
         # One index per segment, one tx file per segment, one object per chunk bytes
         max_objects = (size_limit //
@@ -152,10 +153,8 @@ class TieredStorageCacheStressTest(RedpandaTest):
             self.manifest_upload_interval,
         }
 
-        si_settings = SISettings(
-            test_context=self.test_context,
-            log_segment_size=log_segment_size,
-        )
+        si_settings = SISettings(test_context=self.test_context,
+                                 log_segment_size=log_segment_size)
 
         if limit_mode == LimitMode.bytes:
             si_settings.cloud_storage_cache_size = int(size_limit)
@@ -231,7 +230,9 @@ class TieredStorageCacheStressTest(RedpandaTest):
         )
 
         # Wait for uploads to complete
-        quiesce_uploads(self.redpanda, [topic_name], 30)
+        quiesce_uploads(
+            self.redpanda, [topic_name],
+            self.segment_upload_interval + self.manifest_upload_interval + 30)
 
         # Read all the data, validate that we read complete and achieve
         # the streaming bandwidth that we expect

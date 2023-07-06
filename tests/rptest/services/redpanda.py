@@ -574,6 +574,17 @@ class SISettings:
     def is_damage_expected(self, damage_types: set[str]):
         return (damage_types & self._expected_damage_types) == damage_types
 
+    @classmethod
+    def cache_size_for_throughput(cls, throughput_bytes: int) -> int:
+        """
+        Calculate the cache size required to accomodate a particular
+        streaming throughput for consumers.
+        """
+        # - Cache trim interval is 5 seconds.
+        # - Cache trim low watermark is 80%.
+        # Effective streaming bandwidth is 20% of cache size every trim period
+        return int((throughput_bytes * 5) / 0.2)
+
 
 class TLSProvider:
     """
@@ -3174,12 +3185,17 @@ class RedpandaService(RedpandaServiceBase):
 
         return None
 
-    def node_storage(self, node, sizes: bool = False) -> NodeStorage:
+    def node_storage(self,
+                     node,
+                     sizes: bool = False,
+                     scan_cache: bool = True) -> NodeStorage:
         """
         Retrieve a summary of storage on a node.
 
         :param sizes: if true, stat each segment file and record its size in the
                       `size` attribute of Segment.
+        :param scan_cache: if false, skip scanning the tiered storage cache; use
+                           this if you are only interested in raft storage.
         """
 
         self.logger.debug(
@@ -3193,7 +3209,9 @@ class RedpandaService(RedpandaServiceBase):
         ]
         if sizes:
             cmd.append("--sizes")
-        output = node.account.ssh_output(shlex.join(cmd), timeout_sec=10)
+        output = node.account.ssh_output(shlex.join(cmd),
+                                         combine_stderr=False,
+                                         timeout_sec=10)
         namespaces = json.loads(output)
         for ns, topics in namespaces.items():
             ns_path = os.path.join(store.data_dir, ns)
@@ -3210,18 +3228,20 @@ class RedpandaService(RedpandaServiceBase):
                     for segment, data in segments.items():
                         partition.set_segment_size(segment, data["size"])
 
-        if self.si_settings is not None and node.account.exists(
+        if scan_cache and self.si_settings is not None and node.account.exists(
                 store.cache_dir):
             bytes = int(
                 node.account.ssh_output(
-                    f"du -s \"{store.cache_dir}\"").strip().split()[0])
+                    f"du -s \"{store.cache_dir}\"",
+                    combine_stderr=False).strip().split()[0])
             objects = int(
                 node.account.ssh_output(
-                    f"find \"{store.cache_dir}\" -type f | wc -l").strip())
+                    f"find \"{store.cache_dir}\" -type f | wc -l",
+                    combine_stderr=False).strip())
             indices = int(
                 node.account.ssh_output(
-                    f"find \"{store.cache_dir}\" -type f -name \"*.index\" | wc -l"
-                ).strip())
+                    f"find \"{store.cache_dir}\" -type f -name \"*.index\" | wc -l",
+                    combine_stderr=False).strip())
             store.set_cache_stats(NodeCacheStorage(bytes, objects, indices))
 
         self.logger.debug(
@@ -3229,10 +3249,17 @@ class RedpandaService(RedpandaServiceBase):
 
         return store
 
-    def storage(self, all_nodes: bool = False, sizes: bool = False):
+    def storage(self,
+                all_nodes: bool = False,
+                sizes: bool = False,
+                scan_cache: bool = True):
         """
         :param all_nodes: if true, report on all nodes, otherwise only report
                           on started nodes.
+        :param sizes: if true, stat each segment file and record its size in the
+                      `size` attribute of Segment.
+        :param scan_cache: if false, skip scanning the tiered storage cache; use
+                           this if you are only interested in raft storage.
 
         :returns: instances of ClusterStorage
         """
@@ -3242,7 +3269,7 @@ class RedpandaService(RedpandaServiceBase):
         nodes = self.nodes if all_nodes else self._started
 
         def compute_node_storage(node):
-            s = self.node_storage(node, sizes=sizes)
+            s = self.node_storage(node, sizes=sizes, scan_cache=scan_cache)
             store.add_node(s)
 
         self.for_nodes(nodes, compute_node_storage)
@@ -3311,6 +3338,17 @@ class RedpandaService(RedpandaServiceBase):
         # return results with relative paths
         data_path = pathlib.Path(RedpandaService.DATA_DIR)
         return ((p.relative_to(data_path), s) for p, s in parts)
+
+    def data_dir_usage(self, subdir: str, node: ClusterNode):
+        """
+        Return a rolled up disk usage report for the given data sub-directory.
+        """
+        dir = os.path.join(RedpandaService.DATA_DIR, subdir)
+        if not node.account.exists(dir):
+            return 0
+        script_path = inject_remote_script(node, "disk_usage.py")
+        cmd = ["python3", script_path, dir]
+        return int(node.account.ssh_output(shlex.join(cmd), timeout_sec=10))
 
     def broker_address(self, node, listener: str = "dnslistener"):
         assert node in self.nodes, f"where node is {node.name}"
