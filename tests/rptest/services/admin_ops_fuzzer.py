@@ -17,10 +17,12 @@ import threading
 import time
 from requests.exceptions import HTTPError
 from ducktape.utils.util import wait_until
+from rptest.clients.kcl import KCL
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.types import TopicSpec
 from time import sleep
 from confluent_kafka import Producer
+from typing import Dict
 
 from rptest.clients.rpk import RpkTool
 from rptest.services.admin import Admin
@@ -37,6 +39,9 @@ class OperationCtx:
 
     def admin(self):
         return Admin(self.redpanda, retry_codes=[503, 504])
+
+    def kcl(self):
+        return KCL(self.redpanda)
 
 
 # Base class for operation
@@ -65,6 +70,7 @@ class RedpandaAdminOperation(Enum):
     CREATE_ACLS = auto()
     UPDATE_CONFIG = auto()
     PRODUCE_TO_TOPIC = auto()
+    DELETE_RECORDS = auto()
 
 
 def _random_choice(prefix, collection):
@@ -495,6 +501,92 @@ class ProduceToTopic(Operation):
         }
 
 
+class DeleteRecords(Operation):
+    def __init__(self, prefix):
+        self.prefix = prefix
+        self.truncate_point = ()
+
+    def _random_truncate_point(self, ctx):
+        """
+        Returns a mapping of topic to partition offset:
+        ( "foo", { 0 , 150 ) ) , will truncate foo partition 0 at offset 150
+        """
+        def deletable_topic_partition(ctx):
+            def is_partition_empty(p):
+                return int(p.high_watermark) == 0 or (int(p.start_offset)
+                                                      == int(p.high_watermark))
+
+            def is_deletable(ctx, t):
+                cfgs = ctx.rpk().describe_topic_configs(topic=t)
+                (values, _) = cfgs['cleanup.policy']
+                values = values.split(',')
+                return 'delete' in values
+
+            deletable_topics = [
+                t for t in ctx.rpk().list_topics() if is_deletable(ctx, t)
+            ]
+            if len(deletable_topics) == 0:
+                return None
+
+            deletable_topic = _random_choice(self.prefix, deletable_topics)
+            deletable_partitions = [
+                p for p in ctx.rpk().describe_topic(deletable_topic)
+                if not is_partition_empty(p)
+            ]
+
+            return None if len(deletable_partitions) == 0 else (
+                deletable_topic, random.choice(deletable_partitions))
+
+        topic_partition = deletable_topic_partition(ctx)
+        if topic_partition is None:
+            return ()
+
+        def random_truncate_offset(p):
+            return random.randint(
+                int(p.start_offset) + 1, int(p.high_watermark))
+
+        (topic, partition) = topic_partition
+        return (topic, (int(partition.id), random_truncate_offset(partition)))
+
+    def execute(self, ctx):
+        self.truncate_point = self._random_truncate_point(ctx)
+        if len(self.truncate_point) == 0:
+            return False
+
+        ctx.redpanda.logger.info(
+            f"Issuing DeleteRecords command: {self.truncate_point}")
+        (topic, partition_offset) = self.truncate_point
+        (partition, offset) = partition_offset
+        ctx.rpk().trim_prefix(topic, offset, partitions=[partition])
+        return True
+
+    def validate(self, ctx):
+        if len(self.truncate_point) == 0:
+            return False
+
+        ctx.redpanda.logger.info(
+            f"Validing topic low watermarks, expecting: {self.truncate_point}")
+
+        (topic, partition_offset) = self.truncate_point
+        (partition_id, lwm) = partition_offset
+
+        partitions_info = ctx.rpk().describe_topic(topic)
+        partition_info = [
+            p for p in partitions_info if int(p.id) == partition_id
+        ]
+        assert len(partition_info
+                   ) == 1, f"Expected {topic} with partition {partition_id}"
+        return int(partition_info[0].start_offset) == lwm
+
+    def describe(self):
+        return {
+            "type": "delete_records",
+            "properties": {
+                "truncate_point": self.truncate_point
+            }
+        }
+
+
 class AdminOperationsFuzzer():
     def __init__(self,
                  redpanda,
@@ -674,6 +766,8 @@ class AdminOperationsFuzzer():
             lambda: UpdateConfigOperation(),
             RedpandaAdminOperation.PRODUCE_TO_TOPIC:
             lambda: ProduceToTopic(self.prefix),
+            RedpandaAdminOperation.DELETE_RECORDS:
+            lambda: DeleteRecords(self.prefix),
         }
         return (op, actions[op]())
 

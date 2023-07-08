@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/api/admin"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/adminapi"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/redpanda"
@@ -40,8 +40,9 @@ cluster is unreachable), use the hidden --force flag.
 
 			p, err := p.LoadVirtualProfile(fs)
 			out.MaybeDie(err, "unable to load config: %v", err)
+			out.CheckExitCloudAdmin(p)
 
-			cl, err := admin.NewClient(fs, p)
+			cl, err := adminapi.NewClient(fs, p)
 			out.MaybeDie(err, "unable to initialize admin client: %v", err)
 
 			if !force {
@@ -49,7 +50,7 @@ cluster is unreachable), use the hidden --force flag.
 				out.MaybeDie(err, "unable to get broker list: %v; to bypass the node version check re-run this with --force; see this command's help text for more details", err)
 
 				var (
-					b             admin.Broker
+					b             adminapi.Broker
 					found, anyOld bool
 				)
 				for _, br := range brokers {
@@ -89,7 +90,7 @@ help text for more details on why.`, broker)
 			err = cl.DecommissionBroker(cmd.Context(), broker)
 			out.MaybeDie(err, "unable to decommission broker: %v", err)
 
-			fmt.Printf("Success, broker %d decommission started.  Use `rpk redpanda admin brokers decommission-status %d` to monitor data movement.`", broker, broker)
+			fmt.Printf("Success, broker %d decommission started.  Use `rpk redpanda admin brokers decommission-status %d` to monitor data movement.\n`", broker, broker)
 		},
 	}
 

@@ -357,7 +357,7 @@ class SISettings:
                  cloud_storage_region: str = 'panda-region',
                  cloud_storage_api_endpoint: str = 'minio-s3',
                  cloud_storage_api_endpoint_port: int = 9000,
-                 cloud_storage_cache_size: int = 160 * 1000000,
+                 cloud_storage_cache_size: Optional[int] = None,
                  cloud_storage_cache_max_objects: Optional[int] = None,
                  cloud_storage_enable_remote_read: bool = True,
                  cloud_storage_enable_remote_write: bool = True,
@@ -515,7 +515,15 @@ class SISettings:
 
         conf["log_segment_size"] = self.log_segment_size
         conf["cloud_storage_enabled"] = True
-        conf["cloud_storage_cache_size"] = self.cloud_storage_cache_size
+        if self.cloud_storage_cache_size is None:
+            # Default cache size for testing: large enough to enable streaming throughput up to 100MB/s, but no
+            # larger, so that a test doing any significant amount of throughput will exercise trimming.
+            conf[
+                "cloud_storage_cache_size"] = SISettings.cache_size_for_throughput(
+                    1024 * 1024 * 100),
+        else:
+            conf["cloud_storage_cache_size"] = self.cloud_storage_cache_size
+
         if self.cloud_storage_cache_max_objects is not None:
             conf[
                 "cloud_storage_cache_max_objects"] = self.cloud_storage_cache_max_objects
@@ -880,13 +888,13 @@ class RedpandaServiceBase(Service):
     def add_extra_rp_conf(self, conf):
         self._extra_rp_conf = {**self._extra_rp_conf, **conf}
 
-    def get_node_memory_mb(self):
+    def get_node_memory_mb(self) -> int:
         pass
 
-    def get_node_cpu_count(self):
+    def get_node_cpu_count(self) -> int:
         pass
 
-    def get_node_disk_free(self):
+    def get_node_disk_free(self) -> int:
         pass
 
     def lsof_node(self, node: ClusterNode, filter: Optional[str] = None):
@@ -1188,7 +1196,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                      oauth_client_secret,
                      oauth_audience,
                      api_url,
-                     cluster_id=None,
+                     cluster_id='',
                      delete_namespace=False):
             """
             Initializes the object, but does not create clusters. Use
@@ -1201,7 +1209,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             :param oauth_client_secret: client secret from redpanda cloud ui page for clients
             :param oauth_audience: oauth audience
             :param api_url: url of hostname for swagger api without trailing slash char
-            :param cluster_id: if not None, will skip creating a new cluster
+            :param cluster_id: if not empty string, will skip creating a new cluster
             :param delete_namespace: if False, will skip namespace deletion step after tests are run
             """
 
@@ -1332,7 +1340,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             if product_id is None:
                 product_id = self.DEFAULT_PRODUCT_ID
 
-            if self.cluster_id is not None:
+            if self.cluster_id != '':
                 self._logger.warn(
                     f'will not create cluster; already have cluster_id {self.cluster_id}'
                 )
@@ -1397,9 +1405,9 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             Deletes a cloud cluster and the namespace it belongs to.
             """
 
-            if self._cluster_id is None:
+            if self._cluster_id == '':
                 self._logger.warn(
-                    f'cluster_id is None, unable to delete cluster')
+                    f'cluster_id is empty, unable to delete cluster')
                 return
 
             resp = self._http_get(f'/api/v1/clusters/{self.cluster_id}')
@@ -1407,7 +1415,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
 
             resp = self._http_delete(f'/api/v1/clusters/{self.cluster_id}')
             self._logger.debug(f'resp: {json.dumps(resp)}')
-            self._cluster_id = None
+            self._cluster_id = ''
 
             # skip namespace deletion to avoid error because cluster delete not complete yet
             if self._delete_namespace:
@@ -1442,7 +1450,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         self._cloud_api_url = context.globals.get(self.GLOBAL_CLOUD_API_URL,
                                                   None)
         self._cloud_cluster_id = context.globals.get(
-            self.GLOBAL_CLOUD_CLUSTER_ID, None)
+            self.GLOBAL_CLOUD_CLUSTER_ID, '')
         self._cloud_delete_cluster = context.globals.get(
             self.GLOBAL_CLOUD_DELETE_CLUSTER, True)
         self.logger.debug(f'initial cluster_id: {self._cloud_cluster_id}')
@@ -2289,6 +2297,19 @@ class RedpandaService(RedpandaServiceBase):
         return self.cloud_storage_client.list_objects(
             self._si_settings.cloud_storage_bucket)
 
+    def set_cluster_config_to_null(self,
+                                   name: str,
+                                   expect_restart: bool = False,
+                                   admin_client: Optional[Admin] = None,
+                                   timeout: int = 10):
+        if admin_client is None:
+            admin_client = self._admin
+
+        patch_result = admin_client.patch_cluster_config(upsert={name: None})
+        new_version = patch_result['config_version']
+
+        self._wait_for_config_version(new_version, expect_restart, timeout)
+
     def set_cluster_config(self,
                            values: dict,
                            expect_restart: bool = False,
@@ -2311,10 +2332,23 @@ class RedpandaService(RedpandaServiceBase):
             remove=[k for k, v in values.items() if v is None])
         new_version = patch_result['config_version']
 
+        self._wait_for_config_version(new_version,
+                                      expect_restart,
+                                      timeout,
+                                      admin_client=admin_client)
+
+    def _wait_for_config_version(self,
+                                 config_version,
+                                 expect_restart: bool,
+                                 timeout: int,
+                                 admin_client: Optional[Admin] = None):
+        admin_client = admin_client or self._admin
+
         def is_ready():
             status = admin_client.get_cluster_config_status(
                 node=self.controller())
-            ready = all([n['config_version'] >= new_version for n in status])
+            ready = all(
+                [n['config_version'] >= config_version for n in status])
 
             return ready, status
 
@@ -2325,8 +2359,8 @@ class RedpandaService(RedpandaServiceBase):
             is_ready,
             timeout_sec=timeout,
             backoff_sec=0.5,
-            err_msg=f"Config status versions did not converge on {new_version}"
-        )
+            err_msg=
+            f"Config status versions did not converge on {config_version}")
 
         any_restarts = any(n['restart'] for n in config_status)
         if any_restarts and expect_restart:
@@ -2334,9 +2368,9 @@ class RedpandaService(RedpandaServiceBase):
             # Having disrupted the cluster with a restart, wait for the controller
             # to be available again before returning to the caller, so that they do
             # not have to worry about subsequent configuration actions failing.
-            self._admin.await_stable_leader(namespace="redpanda",
-                                            topic="controller",
-                                            partition=0)
+            admin_client.await_stable_leader(namespace="redpanda",
+                                             topic="controller",
+                                             partition=0)
         elif any_restarts:
             raise AssertionError(
                 "Nodes report restart required but expect_restart is False")
@@ -3185,6 +3219,10 @@ class RedpandaService(RedpandaServiceBase):
 
         return None
 
+    @property
+    def cache_dir(self):
+        return os.path.join(RedpandaService.DATA_DIR, "cloud_storage_cache")
+
     def node_storage(self,
                      node,
                      sizes: bool = False,
@@ -3200,9 +3238,8 @@ class RedpandaService(RedpandaServiceBase):
 
         self.logger.debug(
             f"Starting storage checks for {node.name} sizes={sizes}")
-        store = NodeStorage(
-            node.name, RedpandaService.DATA_DIR,
-            os.path.join(RedpandaService.DATA_DIR, "cloud_storage_cache"))
+        store = NodeStorage(node.name, RedpandaService.DATA_DIR,
+                            self.cache_dir)
         script_path = inject_remote_script(node, "compute_storage.py")
         cmd = [
             "python3", script_path, f"--data-dir={RedpandaService.DATA_DIR}"
