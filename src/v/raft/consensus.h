@@ -52,6 +52,7 @@ class replicate_entries_stm;
 class vote_stm;
 class prevote_stm;
 class recovery_stm;
+class heartbeat_manager;
 
 std::vector<model::record_batch_type>
 offset_translator_batch_types(const model::ntp& ntp);
@@ -409,7 +410,7 @@ public:
 
     void update_heartbeat_status(vnode, bool);
 
-    bool should_reconnect_follower(vnode);
+    bool should_reconnect_follower(const follower_index_metadata&);
 
     std::vector<follower_metrics> get_follower_metrics() const;
     result<follower_metrics> get_follower_metrics(model::node_id) const;
@@ -457,12 +458,13 @@ private:
     friend replicate_batcher;
     friend event_manager;
     friend append_entries_buffer;
+    friend heartbeat_manager;
     using update_last_quorum_index
       = ss::bool_class<struct update_last_quorum_index>;
     // all these private functions assume that we are under exclusive operations
     // via the _op_sem
     void do_step_down(std::string_view);
-    ss::future<vote_reply> do_vote(vote_request&&);
+    ss::future<vote_reply> do_vote(vote_request);
     ss::future<append_entries_reply>
     do_append_entries(append_entries_request&&);
     ss::future<install_snapshot_reply>

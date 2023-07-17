@@ -13,6 +13,7 @@
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
 #include "model/fundamental.h"
+#include "model/record_batch_types.h"
 #include "seastarx.h"
 #include "storage/parser.h"
 #include "units.h"
@@ -52,11 +53,15 @@ public:
       model::offset initial_rp,
       kafka::offset initial_kaf,
       int64_t initial_file_pos,
-      int64_t file_pos_step);
+      int64_t file_pos_step,
+      model::timestamp initial_time);
 
     /// Add new tuple to the index.
-    void
-    add(model::offset rp_offset, kafka::offset kaf_offset, int64_t file_offset);
+    void add(
+      model::offset rp_offset,
+      kafka::offset kaf_offset,
+      int64_t file_offset,
+      model::timestamp);
 
     struct find_result {
         model::offset rp_offset;
@@ -141,10 +146,12 @@ private:
     std::array<int64_t, buffer_depth> _rp_offsets;
     std::array<int64_t, buffer_depth> _kaf_offsets;
     std::array<int64_t, buffer_depth> _file_offsets;
+    std::array<int64_t, buffer_depth> _time_offsets;
     uint64_t _pos;
     model::offset _initial_rp;
     kafka::offset _initial_kaf;
     int64_t _initial_file_pos;
+    model::timestamp _initial_time;
 
     using encoder_t = deltafor_encoder<int64_t>;
     using decoder_t = deltafor_decoder<int64_t>;
@@ -155,9 +162,30 @@ private:
     encoder_t _rp_index;
     encoder_t _kaf_index;
     foffset_encoder_t _file_index;
+    encoder_t _time_index;
     int64_t _min_file_pos_step;
 
     friend class offset_index_accessor;
+};
+
+struct segment_record_stats {
+    // Offset of the first record in the segment
+    model::offset base_rp_offset;
+    // Offset of the last record in the segment
+    model::offset last_rp_offset;
+    // Number of records in all data batches in the segment (this includes tx
+    // batches and all non-data batch types which doesn't participate in offset
+    // translation)
+    size_t total_data_records{0};
+    // Number of records in all config batches in the segment (this includes
+    // raft-configuration, archival and few other batches)
+    size_t total_conf_records{0};
+    // Total size of the segment
+    size_t size_bytes{0};
+    // Base timestamp
+    model::timestamp base_timestamp;
+    // Last timestamp
+    model::timestamp last_timestamp;
 };
 
 class remote_segment_index_builder : public storage::batch_consumer {
@@ -169,7 +197,8 @@ public:
       const model::ntp& ntp,
       offset_index& ix,
       model::offset_delta initial_delta,
-      size_t sampling_step);
+      size_t sampling_step,
+      std::optional<std::reference_wrapper<segment_record_stats>> maybe_stats);
 
     virtual consume_result
     accept_batch_start(const model::record_batch_header&) const;
@@ -194,6 +223,8 @@ private:
     size_t _window{0};
     size_t _sampling_step;
     std::vector<model::record_batch_type> _filter;
+    /// Collected stats
+    std::optional<std::reference_wrapper<segment_record_stats>> _stats;
 };
 
 inline ss::lw_shared_ptr<storage::continuous_batch_parser>
@@ -202,10 +233,12 @@ make_remote_segment_index_builder(
   ss::input_stream<char> stream,
   offset_index& ix,
   model::offset_delta initial_delta,
-  size_t sampling_step) {
+  size_t sampling_step,
+  std::optional<std::reference_wrapper<segment_record_stats>> maybe_stats
+  = std::nullopt) {
     auto parser = ss::make_lw_shared<storage::continuous_batch_parser>(
       std::make_unique<remote_segment_index_builder>(
-        ntp, ix, initial_delta, sampling_step),
+        ntp, ix, initial_delta, sampling_step, maybe_stats),
       storage::segment_reader_handle(std::move(stream)));
     return parser;
 }

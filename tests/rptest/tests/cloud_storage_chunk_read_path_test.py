@@ -5,16 +5,19 @@ from time import sleep
 from ducktape.mark import parametrize
 from ducktape.utils.util import wait_until
 
+from rptest.services.admin import Admin
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
 from rptest.services.kgo_verifier_services import KgoVerifierProducer, KgoVerifierSeqConsumer
 from rptest.services.kgo_verifier_services import KgoVerifierRandomConsumer
+from rptest.services.metrics_check import MetricCheck
 from rptest.services.redpanda import RedpandaService
 from rptest.services.redpanda import SISettings
 from rptest.tests.prealloc_nodes import PreallocNodesTest
-from rptest.util import Scale, wait_for_local_storage_truncate
+from rptest.util import Scale
+from rptest.util import wait_for_removal_of_n_segments
 from rptest.utils.si_utils import nodes_report_cloud_segments
 
 
@@ -29,12 +32,15 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         )
         self.si_settings.load_context(self.logger, test_context=test_context)
 
-        super().__init__(
-            test_context=test_context,
-            node_prealloc_count=1,
-            num_brokers=3,
-            si_settings=self.si_settings,
-            extra_rp_conf={'cloud_storage_cache_chunk_size': 1024 * 256})
+        self.default_chunk_size = 1024 * 256
+        super().__init__(test_context=test_context,
+                         node_prealloc_count=1,
+                         num_brokers=3,
+                         si_settings=self.si_settings,
+                         extra_rp_conf={
+                             'cloud_storage_cache_chunk_size':
+                             self.default_chunk_size
+                         })
 
         self.scale = Scale(test_context)
         self.kafka_tools = KafkaCliTools(self.redpanda)
@@ -43,10 +49,12 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
                                  replication_factor=3,
                                  segment_bytes=self.log_segment_size), )
 
-        self.extra_rp_conf = {'cloud_storage_cache_chunk_size': 1024 * 256}
+        self.extra_rp_conf = {
+            'cloud_storage_cache_chunk_size': self.default_chunk_size
+        }
         if not self.redpanda.dedicated_nodes:
             self.extra_rp_conf.update(
-                {'cloud_storage_max_readers_per_shard': 10})
+                {'cloud_storage_max_segment_readers_per_shard': 10})
         self.redpanda.set_extra_rp_conf(self.extra_rp_conf)
 
     def setup(self):
@@ -64,10 +72,34 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         self.redpanda.start()
         self._create_initial_topics()
 
+    def _trim_and_verify(self):
+        """
+        Use admin API trim hook to validate that the trimming logic can successfully
+        hit a target size of zero irrespective of what kind of content we promoted.
+        """
+        admin = Admin(self.redpanda)
+        self.redpanda.for_nodes(
+            self.redpanda.nodes, lambda n: admin.cloud_storage_trim(
+                byte_limit=0, object_limit=0, node=n))
+
+        for node_storage in self.redpanda.storage().nodes:
+            assert node_storage.cache is not None, f"Node {node_storage.name} has no cache stats"
+
+            # The only file to elude the trim should be accesstime tracker
+            assert node_storage.cache.objects <= 1, f"Node {node_storage.name} has too many objects: {node_storage.cache.objects}"
+
+            # Byte size will include accesstime file, so we must be tolerant
+            assert node_storage.cache.bytes <= 1E6, f"Node {node_storage.name} size is too great: {node_storage.cache.bytes}"
+
+            # No index files should survive a trim to zero
+            assert node_storage.cache.indices <= 0, f"Node {node_storage.name} still has {node_storage.cache.indices} index files"
+
     def _produce_baseline(self,
                           n_segments=20,
                           msg_size=None,
-                          msg_count=200000):
+                          msg_count=200000,
+                          n_remove=None):
+        n_remove = n_remove or n_segments // 2
         producer = KgoVerifierProducer(self.test_context,
                                        self.redpanda,
                                        self.topic,
@@ -82,6 +114,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         producer.stop()
         producer.wait()
 
+        snapshot = self.redpanda.storage(all_nodes=True).segments_by_node(
+            "kafka", self.topic, 0)
         for t in self.topics:
             self.client().alter_topic_config(
                 t.name, TopicSpec.PROPERTY_RETENTION_LOCAL_TARGET_BYTES,
@@ -89,11 +123,11 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
 
         # Wait for half of the segments to be removed, to exercise the read path
         # when using the sequential consumer later on.
-        wait_for_local_storage_truncate(self.redpanda,
-                                        self.topic,
-                                        partition_idx=0,
-                                        target_bytes=(n_segments // 2) *
-                                        self.log_segment_size)
+        wait_for_removal_of_n_segments(self.redpanda,
+                                       self.topic,
+                                       partition_idx=0,
+                                       n=n_remove,
+                                       original_snapshot=snapshot)
 
         return producer
 
@@ -139,8 +173,9 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
 
     @cluster(num_nodes=4)
     def test_read_chunks(self):
+        self.default_chunk_size = 1048576
         self._set_params_and_start_redpanda(
-            cloud_storage_cache_chunk_size=1048576 * 8)
+            cloud_storage_cache_chunk_size=self.default_chunk_size)
 
         self._produce_baseline()
 
@@ -151,8 +186,20 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
                                               50,
                                               10,
                                               nodes=self.preallocated_nodes)
+
+        metric = 'vectorized_cloud_storage_partition_chunk_size'
+        m = MetricCheck(self.logger,
+                        self.redpanda,
+                        self.redpanda.partitions(self.topic)[0].leader,
+                        [metric],
+                        labels={
+                            'namespace': 'kafka',
+                            'topic': self.topic,
+                            'partition': '0',
+                        })
         rand_cons.start()
         rand_cons.wait(timeout_sec=300)
+        m.expect([(metric, lambda a, b: a < b <= 2 * self.default_chunk_size)])
 
         # There should be no log files in cache
         self._assert_not_in_cache(fr'.*kafka/{self.topic}/.*\.log\.[0-9]+$')
@@ -168,6 +215,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         consumer.wait(timeout_sec=120)
         self._assert_not_in_cache(fr'.*kafka/{self.topic}/.*\.log\.[0-9]+$')
 
+        self._trim_and_verify()
+
     @cluster(num_nodes=4)
     @parametrize(prefetch=0)
     @parametrize(prefetch=3)
@@ -182,11 +231,29 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         # to produce the required number of segments
         self._produce_baseline(msg_size=100,
                                n_segments=5,
-                               msg_count=200000 * 100)
+                               msg_count=200000 * 100,
+                               n_remove=1)
 
-        rpk = RpkTool(self.redpanda)
+        metric = 'vectorized_cloud_storage_partition_chunk_size'
+        m = MetricCheck(self.logger,
+                        self.redpanda,
+                        self.redpanda.partitions(self.topic)[0].leader,
+                        [metric],
+                        labels={
+                            'namespace': 'kafka',
+                            'topic': self.topic,
+                            'partition': '0',
+                        })
+
         # Cap max bytes to only get the first chunk.
-        rpk.consume(self.topic, partition=0, fetch_max_bytes=100, n=1)
+        rpk = RpkTool(self.redpanda)
+        rpk.consume(self.topic,
+                    partition=0,
+                    fetch_max_bytes=100,
+                    n=1,
+                    offset='start')
+        m.expect([(metric, lambda a, b: a <= b <= 2 * self.default_chunk_size)
+                  ])
 
         self._assert_not_in_cache(fr'.*kafka/{self.topic}/.*\.log\.[0-9]+$')
         chunk_files = set()
@@ -206,6 +273,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
                 chunk_files
             ) == prefetch + 1, f'prefetch={prefetch} but {len(chunk_files)} chunks: ' \
                                f'{pprint.pformat(chunk_files)} found in cache, expected {prefetch + 1}'
+
+        self._trim_and_verify()
 
     @cluster(num_nodes=4)
     def test_fallback_mode(self):
@@ -231,6 +300,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         # Index files should have been generated during full segment download.
         self._assert_in_cache(f'.*kafka/{self.topic}/.*index$')
 
+        self._trim_and_verify()
+
     def _consume_baseline(self, timeout=60, max_msgs=None):
         consumer = KgoVerifierSeqConsumer(self.test_context,
                                           self.redpanda,
@@ -251,6 +322,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         self._assert_not_in_cache(f'kafka/{self.topic}/.*_chunks/[0-9]+$')
         self._assert_in_cache(fr'.*kafka/{self.topic}/.*\.log\.[0-9]+$')
         self._assert_in_cache(f'.*kafka/{self.topic}/.*index$')
+
+        self._trim_and_verify()
 
     @cluster(num_nodes=4, log_allow_list=["Exceeded cache size limit"])
     def test_read_when_cache_smaller_than_segment_size(self):
@@ -300,6 +373,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         assert max_chunks_at_a_time_in_cache <= 9, f'found {max_chunks_at_a_time_in_cache} in cache, ' \
                                                    f'which can hold only 8 chunks at a time'
 
+        self._trim_and_verify()
+
     @cluster(num_nodes=4)
     def test_read_when_segment_size_smaller_than_chunk_size(self):
         self._set_params_and_start_redpanda(cloud_storage_cache_chunk_size=16 *
@@ -320,6 +395,8 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
 
         self._assert_not_in_cache(fr'.*kafka/{self.topic}/.*\.log\.[0-9]+$')
         self._assert_in_cache(f'.*kafka/{self.topic}/.*_chunks/[0-9]+')
+
+        self._trim_and_verify()
 
 
 class ObserveCacheDir(Thread):

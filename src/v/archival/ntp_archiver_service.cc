@@ -70,6 +70,58 @@ constexpr auto housekeeping_jit = 5ms;
 
 namespace archival {
 
+ntp_archiver_upload_result::ntp_archiver_upload_result(
+  cloud_storage::upload_result r)
+  : _result(r) {}
+
+// Success result
+ntp_archiver_upload_result::ntp_archiver_upload_result(
+  const cloud_storage::segment_record_stats& m)
+  : _stats(m)
+  , _result(cloud_storage::upload_result::success) {}
+
+ntp_archiver_upload_result ntp_archiver_upload_result::merge(
+  const std::vector<ntp_archiver_upload_result>& results) {
+    vassert(
+      !results.empty(),
+      "list of ntp_archiver_upload_result values can't be empty");
+    auto res = cloud_storage::upload_result::success;
+    std::optional<cloud_storage::segment_record_stats> stats;
+    for (auto& r : results) {
+        if (r.has_record_stats()) {
+            stats = r.record_stats();
+        }
+        if (r.result() != cloud_storage::upload_result::success) {
+            res = r.result();
+        }
+    }
+    if (stats && res == cloud_storage::upload_result::success) {
+        return ntp_archiver_upload_result(stats.value());
+    }
+    vassert(
+      res != cloud_storage::upload_result::success,
+      "success result should have record stats set");
+    return res;
+}
+
+bool ntp_archiver_upload_result::has_record_stats() const {
+    return _stats.has_value();
+}
+
+const cloud_storage::segment_record_stats&
+ntp_archiver_upload_result::record_stats() const {
+    return _stats.value();
+}
+
+cloud_storage::upload_result ntp_archiver_upload_result::result() const {
+    return _result;
+}
+
+cloud_storage::upload_result
+ntp_archiver_upload_result::operator()(cloud_storage::upload_result) const {
+    return _result;
+}
+
 static std::unique_ptr<adjacent_segment_merger>
 maybe_make_adjacent_segment_merger(
   ntp_archiver& self,
@@ -420,6 +472,25 @@ ss::future<bool> ntp_archiver::sync_for_tests() {
 ss::future<> ntp_archiver::upload_until_term_change() {
     ss::lowres_clock::duration backoff = _conf->upload_loop_initial_backoff;
 
+    if (!_feature_table.local().is_active(
+          features::feature::cloud_storage_manifest_format_v2)) {
+        vlog(
+          _rtclog.warn,
+          "Cannot operate upload loop during upgrade, not all nodes "
+          "are upgraded yet.  Waiting...");
+        co_await _feature_table.local().await_feature(
+          features::feature::cloud_storage_manifest_format_v2, _as);
+        vlog(
+          _rtclog.info, "Upgrade complete, proceeding with the upload loop.");
+
+        // The cluster likely needed a bunch of restarts in order to
+        // reach this point, which means that leadership may have been
+        // transferred away (hence the explicit check).
+        if (!may_begin_uploads()) {
+            co_return;
+        }
+    }
+
     // Before starting, upload the manifest if needed.  This makes our
     // behavior more deterministic on first start (uploading the empty
     // manifest) and after unclean leadership changes (flush dirty manifest
@@ -485,7 +556,7 @@ ss::future<> ntp_archiver::upload_until_term_change() {
         } else if (non_compacted_upload_result.num_succeeded != 0) {
             vlog(
               _rtclog.debug,
-              "Successfuly uploaded {} segments",
+              "Successfully uploaded {} segments",
               non_compacted_upload_result.num_succeeded);
         }
 
@@ -1021,7 +1092,7 @@ static ss::sstring make_index_path(const remote_segment_path& segment_path) {
 }
 
 // from offset to offset (by record batch boundary)
-ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
+ss::future<ntp_archiver_upload_result> ntp_archiver::upload_segment(
   model::term_id archiver_term,
   upload_candidate candidate,
   std::vector<ss::rwlock::holder> segment_read_locks,
@@ -1040,7 +1111,11 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
 
     auto index_path = make_index_path(path);
     auto make_idx_fut = make_segment_index(
-      candidate.starting_offset, _rtclog, index_path, std::move(stream_index));
+      candidate.starting_offset,
+      candidate.base_timestamp,
+      _rtclog,
+      index_path,
+      std::move(stream_index));
 
     auto [upload_res, idx_res] = co_await ss::when_all_succeed(
       std::move(upload_fut), std::move(make_idx_fut));
@@ -1057,10 +1132,12 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
         co_await _remote.upload_object(
           _conf->bucket_name,
           cloud_storage_clients::object_key{index_path},
-          idx_res->to_iobuf(),
+          idx_res->index.to_iobuf(),
           fib,
           _segment_index_tags,
           "segment-index");
+
+        co_return ntp_archiver_upload_result(idx_res->stats);
     } else {
         if (upload_res != cloud_storage::upload_result::success) {
             vlog(
@@ -1079,8 +1156,8 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
               index_path);
         }
     }
-
     co_return upload_res;
+
     // Note on segment locks:
     //
     // We've successfully uploaded the segment. Before we replicate an update
@@ -1134,7 +1211,7 @@ ntp_archiver::get_aborted_transactions(upload_candidate candidate) {
       candidate.starting_offset, candidate.final_offset);
 }
 
-ss::future<cloud_storage::upload_result> ntp_archiver::upload_tx(
+ss::future<ntp_archiver_upload_result> ntp_archiver::upload_tx(
   model::term_id archiver_term,
   upload_candidate candidate,
   fragmented_vector<model::tx_range> tx_range,
@@ -1165,9 +1242,10 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_tx(
       get_bucket_name(), manifest, fib, _tx_tags);
 }
 
-ss::future<std::optional<cloud_storage::offset_index>>
+ss::future<std::optional<ntp_archiver::make_segment_index_result>>
 ntp_archiver::make_segment_index(
   model::offset base_rp_offset,
+  model::timestamp base_timestamp,
   retry_chain_logger& ctxlog,
   std::string_view index_path,
   ss::input_stream<char> stream) {
@@ -1178,15 +1256,19 @@ ntp_archiver::make_segment_index(
       base_rp_offset,
       base_kafka_offset,
       0,
-      cloud_storage::remote_segment_sampling_step_bytes};
+      cloud_storage::remote_segment_sampling_step_bytes,
+      base_timestamp};
 
     vlog(ctxlog.debug, "creating remote segment index: {}", index_path);
+    cloud_storage::segment_record_stats stats{};
+
     auto builder = cloud_storage::make_remote_segment_index_builder(
       _ntp,
       std::move(stream),
       ix,
       base_rp_offset - base_kafka_offset,
-      cloud_storage::remote_segment_sampling_step_bytes);
+      cloud_storage::remote_segment_sampling_step_bytes,
+      std::ref(stats));
 
     auto res = co_await builder->consume().finally(
       [&builder] { return builder->close(); });
@@ -1200,29 +1282,26 @@ ntp_archiver::make_segment_index(
         co_return std::nullopt;
     }
 
-    co_return ix;
+    co_return make_segment_index_result{.index = std::move(ix), .stats = stats};
 }
 
 // The function turns an array of futures that return an error code into a
 // single future that returns error result of the last failed future or success
 // otherwise.
-static ss::future<cloud_storage::upload_result> aggregate_upload_results(
-  std::vector<ss::future<cloud_storage::upload_result>> upl_vec) {
+static ss::future<ntp_archiver_upload_result> aggregate_upload_results(
+  std::vector<ss::future<ntp_archiver_upload_result>> upl_vec) {
     return ss::when_all(upl_vec.begin(), upl_vec.end()).then([](auto vec) {
-        auto res = cloud_storage::upload_result::success;
+        std::vector<ntp_archiver_upload_result> results;
         for (auto& v : vec) {
             try {
-                auto r = v.get();
-                if (r != cloud_storage::upload_result::success) {
-                    res = r;
-                }
+                results.push_back(v.get());
             } catch (const ss::gate_closed_exception&) {
-                res = cloud_storage::upload_result::cancelled;
+                results.emplace_back(cloud_storage::upload_result::cancelled);
             } catch (...) {
-                res = cloud_storage::upload_result::failed;
+                results.emplace_back(cloud_storage::upload_result::failed);
             }
         }
-        return res;
+        return ntp_archiver_upload_result::merge(results);
     });
 }
 
@@ -1282,7 +1361,7 @@ ntp_archiver::schedule_single_upload(const upload_context& upload_ctx) {
 
     // The upload is successful only if the segment, and tx_range are
     // uploaded.
-    std::vector<ss::future<cloud_storage::upload_result>> all_uploads;
+    std::vector<ss::future<ntp_archiver_upload_result>> all_uploads;
 
     all_uploads.emplace_back(
       upload_segment(upload_ctx.archiver_term, upload, std::move(locks)));
@@ -1485,7 +1564,7 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
   segment_upload_kind segment_kind,
   bool inline_manifest) {
     ntp_archiver::upload_group_result total{};
-    std::vector<ss::future<cloud_storage::upload_result>> flist;
+    std::vector<ss::future<ntp_archiver_upload_result>> flist;
     std::vector<size_t> ixupload;
     for (size_t ix = 0; ix < scheduled.size(); ix++) {
         if (scheduled[ix].result) {
@@ -1522,7 +1601,8 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
         // _projected_manifest_clean_at if something was uploaded.
         flist.push_back(
           maybe_upload_manifest(concurrent_with_segs_ctx_label).then([](bool) {
-              return cloud_storage::upload_result::success;
+              return ntp_archiver_upload_result{
+                cloud_storage::upload_result::success};
           }));
     }
 
@@ -1544,7 +1624,7 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
 
     absl::flat_hash_map<cloud_storage::upload_result, size_t> upload_results;
     for (auto result : segment_results) {
-        ++upload_results[result];
+        ++upload_results[result.result()];
     }
 
     total.num_succeeded = upload_results[cloud_storage::upload_result::success];
@@ -1554,11 +1634,95 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
                        - (total.num_succeeded + total.num_cancelled);
 
     std::vector<cloud_storage::segment_meta> mdiff;
+    std::optional<model::offset_delta> delta_offset_end;
+    std::optional<model::offset> last_offset;
+    auto last_segment = manifest().last_segment();
+    if (
+      last_segment.has_value()
+      && last_segment->delta_offset_end != model::offset_delta{}) {
+        delta_offset_end = last_segment->delta_offset_end;
+        last_offset = last_segment->committed_offset;
+    }
+    const bool checks_disabled
+      = config::shard_local_cfg()
+          .cloud_storage_disable_upload_consistency_checks.value();
     for (size_t i = 0; i < segment_results.size(); i++) {
-        if (segment_results[i] != cloud_storage::upload_result::success) {
+        if (
+          segment_results[i].result()
+          != cloud_storage::upload_result::success) {
             break;
         }
         const auto& upload = scheduled[ixupload[i]];
+        if (!checks_disabled && segment_results[i].has_record_stats()) {
+            // Validate metadata by comparing it to the segment stats
+            // generated during index building process. The stats contains
+            // "ground truth" about the uploaded segment because the code that
+            // generates it was "looking" at every record batch before it was
+            // sent out.
+            //
+            // By doing this incrementally we can build consistent log metadata
+            // because every such check is based on previous state that was
+            // also validated using the same procedure.
+            auto stats = segment_results[i].record_stats();
+            if (
+              upload.upload_kind == segment_upload_kind::non_compacted
+              && upload.meta.has_value()) {
+                if (
+                  upload.meta->size_bytes != stats.size_bytes
+                  || upload.meta->base_offset != stats.base_rp_offset
+                  || upload.meta->committed_offset != stats.last_rp_offset) {
+                    vlog(
+                      _rtclog.error,
+                      "Metadata of the uploaded segment [size: {}, base: {}, "
+                      "last: {}] doesn't match the segment [size: {}, base: "
+                      "{}, last: {}]",
+                      upload.meta->size_bytes,
+                      upload.meta->base_offset,
+                      upload.meta->committed_offset,
+                      stats.size_bytes,
+                      stats.base_rp_offset,
+                      stats.last_rp_offset);
+                    break;
+                }
+            }
+        }
+        if (
+          !checks_disabled && segment_kind == segment_upload_kind::non_compacted
+          && upload.meta.has_value() && last_offset.has_value()
+          && upload.meta->base_offset > last_offset.value()) {
+            // This code block is executed only for non-compacted uploads
+            // which are adding new segments and not replacing existing
+            // ones.
+            if (
+              delta_offset_end.has_value() && upload.meta.has_value()
+              && upload.meta->delta_offset != delta_offset_end) {
+                vlog(
+                  _rtclog.error,
+                  "Delta offset of the uploaded segment {} doesn't match "
+                  "with expected value of {}",
+                  upload.meta->delta_offset,
+                  delta_offset_end);
+                _probe->gap_detected(last_offset.value());
+                break;
+            } else {
+                delta_offset_end = upload.meta->delta_offset_end;
+            }
+            if (
+              last_offset.has_value() && upload.meta.has_value()
+              && upload.meta->base_offset
+                   != model::next_offset(last_offset.value())) {
+                vlog(
+                  _rtclog.error,
+                  "Base offset of the uploaded segment {} doesn't align "
+                  "with previous segment with committed offset {}",
+                  upload.meta->base_offset,
+                  model::next_offset(last_offset.value()));
+                _probe->gap_detected(last_offset.value());
+                break;
+            } else {
+                last_offset = upload.meta->committed_offset;
+            }
+        }
 
         if (segment_kind == segment_upload_kind::non_compacted) {
             _probe->uploaded(*upload.delta);
@@ -1570,10 +1734,6 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
             } else {
                 expected_base_offset = manifest().get_last_offset()
                                        + model::offset{1};
-            }
-            if (upload.meta->base_offset > expected_base_offset) {
-                _probe->gap_detected(
-                  upload.meta->base_offset - expected_base_offset);
             }
         }
 
@@ -1921,7 +2081,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
         throw std::system_error(backlog.error());
     }
 
-    std::deque<std::filesystem::path> segments_to_remove;
+    std::deque<std::filesystem::path> objects_to_remove;
     std::deque<std::filesystem::path> manifests_to_remove;
 
     const auto clean_offset = manifest().get_archive_clean_offset();
@@ -1936,6 +2096,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
     model::offset new_clean_offset;
     // Value includes segments but doesn't include manifests
     size_t bytes_to_remove = 0;
+    size_t segments_to_remove_count = 0;
 
     auto cursor = std::move(backlog.value());
 
@@ -1956,19 +2117,20 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
                   }
                   if (meta.committed_offset < start_offset) {
                       auto path = manifest.generate_segment_path(meta);
-                      segments_to_remove.push_back(path());
+                      objects_to_remove.push_back(path());
                       new_clean_offset = model::next_offset(
                         meta.committed_offset);
                       bytes_to_remove += meta.size_bytes;
+                      ++segments_to_remove_count;
                       // Add index and tx-manifest
                       if (
                         meta.sname_format
                           == cloud_storage::segment_name_format::v3
                         && meta.metadata_size_hint != 0) {
-                          segments_to_remove.push_back(
+                          objects_to_remove.push_back(
                             cloud_storage::generate_remote_tx_path(path)());
                       }
-                      segments_to_remove.push_back(
+                      objects_to_remove.push_back(
                         cloud_storage::generate_index_path(path));
                   } else {
                       // This indicates that we need to remove only some of the
@@ -2001,7 +2163,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
 
     // Drop out if we have no work to do, avoid doing things like the following
     // manifest flushing unnecessarily.
-    if (segments_to_remove.empty() && manifests_to_remove.empty()) {
+    if (objects_to_remove.empty() && manifests_to_remove.empty()) {
         vlog(_rtclog.debug, "Nothing to remove in archive GC");
         co_return;
     }
@@ -2016,10 +2178,16 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
     }
 
     size_t successful_deletes{0};
+    size_t successful_segment_deletes{0};
+    size_t segments_in_batch{0};
     const size_t batch_size = 1000;
     std::vector<cloud_storage_clients::object_key> rem_batch;
-    for (const auto& path : segments_to_remove) {
-        vlog(_rtclog.info, "Deleting segment from cloud storage: {}", path);
+    for (const auto& path : objects_to_remove) {
+        std::string_view path_view{path.c_str()};
+        if (!path_view.ends_with("index") && !path_view.ends_with("tx")) {
+            vlog(_rtclog.info, "Deleting segment from cloud storage: {}", path);
+            ++segments_in_batch;
+        }
         rem_batch.emplace_back(path);
         if (rem_batch.size() >= batch_size) {
             auto sz = rem_batch.size();
@@ -2027,18 +2195,22 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
             std::swap(tmp, rem_batch);
             if (co_await batch_delete(std::move(tmp))) {
                 successful_deletes += sz;
+                successful_segment_deletes += segments_in_batch;
             }
+
+            segments_in_batch = 0;
         }
     }
     if (co_await batch_delete(rem_batch)) {
         successful_deletes += rem_batch.size();
+        successful_segment_deletes += segments_in_batch;
     }
     rem_batch.clear();
 
-    const auto backlog_size_exceeded = segments_to_remove.size()
+    const auto backlog_size_exceeded = segments_to_remove_count
                                        > _max_segments_pending_deletion();
     const auto all_deletes_succeeded = successful_deletes
-                                       == segments_to_remove.size();
+                                       == objects_to_remove.size();
 
     if (!all_deletes_succeeded && backlog_size_exceeded) {
         vlog(
@@ -2048,7 +2220,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
           "segments failed. Metadata for all remaining segments pending "
           "deletion will be removed and these segments will have to be removed "
           "manually.",
-          segments_to_remove.size(),
+          objects_to_remove.size(),
           _max_segments_pending_deletion());
     }
     if (!all_deletes_succeeded && !backlog_size_exceeded) {
@@ -2086,7 +2258,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
             co_await batch_delete(rem_batch);
         }
     }
-    _probe->segments_deleted(static_cast<int64_t>(successful_deletes));
+    _probe->segments_deleted(static_cast<int64_t>(successful_segment_deletes));
     vlog(
       _rtclog.info,
       "Deleted {} spillover segments from the cloud",
@@ -2606,7 +2778,7 @@ ss::future<bool> ntp_archiver::do_upload_local(
     auto archiver_term = _start_term;
 
     // Upload segments and tx-manifest in parallel
-    std::vector<ss::future<cloud_storage::upload_result>> futures;
+    std::vector<ss::future<ntp_archiver_upload_result>> futures;
     futures.emplace_back(
       upload_segment(archiver_term, upload, std::move(locks), source_rtc));
 
@@ -2624,13 +2796,13 @@ ss::future<bool> ntp_archiver::do_upload_local(
     }
     auto upl_res = co_await aggregate_upload_results(std::move(futures));
 
-    if (tx_ep || upl_res != cloud_storage::upload_result::success) {
-        if (upl_res != cloud_storage::upload_result::success) {
+    if (tx_ep || upl_res.result() != cloud_storage::upload_result::success) {
+        if (upl_res.result() != cloud_storage::upload_result::success) {
             vlog(
               _rtclog.warn,
               "Failed to upload segment: {}, error: {}",
               upload.exposed_name,
-              upl_res);
+              upl_res.result());
         }
         if (tx_ep) {
             vlog(

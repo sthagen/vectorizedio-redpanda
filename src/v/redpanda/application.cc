@@ -610,7 +610,15 @@ ss::app_template::config application::setup_app_config() {
 }
 
 void application::hydrate_config(const po::variables_map& cfg) {
-    std::filesystem::path cfg_path(cfg["redpanda-cfg"].as<std::string>());
+    auto raw_cfg_path = cfg["redpanda-cfg"].as<std::string>();
+    // Expand ~/redpanda.yaml to the full path
+    if (raw_cfg_path.starts_with("~")) {
+        const char* home = std::getenv("HOME");
+        if (home) {
+            raw_cfg_path = fmt::format("{}{}", home, raw_cfg_path.substr(1));
+        }
+    }
+    std::filesystem::path cfg_path(raw_cfg_path);
 
     // Retain the original bytes loaded so that we can hexdump them later
     // if YAML Parse fails.
@@ -1372,7 +1380,7 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
     construct_single_service(
       space_manager,
       config::shard_local_cfg().enable_storage_space_manager.bind(),
-      config::shard_local_cfg().log_storage_target_size.bind(),
+      config::shard_local_cfg().retention_local_target_capacity_bytes.bind(),
       &storage,
       &storage_node,
       &shadow_index_cache,

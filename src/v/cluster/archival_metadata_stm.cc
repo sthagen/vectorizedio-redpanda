@@ -793,6 +793,11 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
         case replace_manifest_cmd::key:
             apply_replace_manifest(r.release_value());
             break;
+        default:
+            throw std::runtime_error(fmt_with_ctx(
+              fmt::format,
+              "Unknown archival metadata STM command {}",
+              static_cast<int>(key)));
         };
     });
 
@@ -800,7 +805,7 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
     _manifest->advance_insync_offset(b.last_offset());
 }
 
-ss::future<> archival_metadata_stm::handle_eviction() {
+ss::future<> archival_metadata_stm::handle_raft_snapshot() {
     cloud_storage::partition_manifest new_manifest{
       _manifest->get_ntp(), _manifest->get_revision_id()};
 
@@ -991,6 +996,18 @@ model::offset archival_metadata_stm::max_collectible_offset() {
 
 void archival_metadata_stm::apply_add_segment(const segment& segment) {
     auto meta = segment.meta;
+    bool disable_safe_add
+      = config::shard_local_cfg()
+          .cloud_storage_disable_upload_consistency_checks.value();
+    if (!disable_safe_add && !_manifest->safe_segment_meta_to_add(meta)) {
+        auto last = _manifest->last_segment();
+        vlog(
+          _logger.warn,
+          "Can't add segment: {}, previous segment: {}",
+          meta,
+          last);
+        return;
+    }
     if (meta.ntp_revision == model::initial_revision_id{}) {
         // metadata serialized by old versions of redpanda doesn't have the
         // ntp_revision field.

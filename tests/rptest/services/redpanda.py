@@ -15,6 +15,7 @@ import socket
 import signal
 import tempfile
 import shutil
+from paramiko import SSHClient
 import requests
 import json
 import random
@@ -57,7 +58,7 @@ from rptest.services.redpanda_installer import RedpandaInstaller, VERSION_RE as 
 from rptest.services.rolling_restarter import RollingRestarter
 from rptest.services.storage import ClusterStorage, NodeStorage, NodeCacheStorage
 from rptest.services.utils import BadLogLines, NodeCrash
-from rptest.util import inject_remote_script, wait_until_result
+from rptest.util import inject_remote_script, ssh_output_stderr, wait_until_result
 
 Partition = collections.namedtuple('Partition',
                                    ['topic', 'index', 'leader', 'replicas'])
@@ -153,6 +154,9 @@ PREV_VERSION_LOG_ALLOW_LIST = [
     # e.g. recovery_stm.cc:432 - recovery append entries error: rpc::errc::client_request_timeout"
     "raft - .*recovery append entries error.*client_request_timeout"
 ]
+
+# Path to the LSAN suppressions file
+LSAN_SUPPRESSIONS_FILE = "/opt/lsan_suppressions.txt"
 
 
 class MetricSamples:
@@ -1072,6 +1076,10 @@ class RedpandaServiceBase(Service):
     def raise_on_storage_usage_inconsistency(self):
         pass
 
+    def raise_on_cloud_storage_inconsistencies(self,
+                                               inconsistencies: list[str]):
+        pass
+
     def validate_controller_log(self):
         pass
 
@@ -1082,10 +1090,13 @@ class RedpandaServiceK8s(RedpandaServiceBase):
                                                  num_brokers,
                                                  cluster_spec=cluster_spec)
         self._trim_logs = False
-        self._helm = HelmTool(self)
-        self._kubectl = KubectlTool(self)
+        self._helm = None
+        self._kubectl = None
 
     def start_node(self, node, **kwargs):
+        pass
+
+    def start(self, **kwargs):
         """
         Install the helm chart which will launch the entire cluster. If
         the cluster is already running, then noop. This function will not
@@ -1093,6 +1104,8 @@ class RedpandaServiceK8s(RedpandaServiceBase):
         redpanda does not start within a timeout period the service will
         fail to start.
         """
+        self._helm = HelmTool(self)
+        self._kubectl = KubectlTool(self)
         self._helm.install()
 
     def stop_node(self, node, **kwargs):
@@ -1176,6 +1189,8 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
     GLOBAL_CLOUD_API_URL = 'cloud_api_url'
     GLOBAL_CLOUD_CLUSTER_ID = 'cloud_cluster_id'
     GLOBAL_CLOUD_DELETE_CLUSTER = 'cloud_delete_cluster'
+    GLOBAL_TELEPORT_AUTH_SERVER = 'cloud_teleport_auth_server'
+    GLOBAL_TELEPORT_BOT_TOKEN = 'cloud_teleport_bot_token'
 
     class CloudCluster():
         """
@@ -1187,7 +1202,6 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
 
         CHECK_TIMEOUT_SEC = 3600
         CHECK_BACKOFF_SEC = 60.0
-        DEFAULT_PRODUCT_ID = 'cgrdrd9jiflmsknn2nl0'
 
         def __init__(self,
                      logger,
@@ -1330,15 +1344,74 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                     return c['id']
             return None
 
-        def create(self, product_id=None):
-            """
-            Create a cloud cluster and a new namespace; block until cluster is finished creating.
+        def _get_install_pack_ver(self):
+            """Get the latest certified install pack version.
 
-            Returns the clusterId.
+            :return: version, e.g. '23.2.20230707135118'
             """
 
-            if product_id is None:
-                product_id = self.DEFAULT_PRODUCT_ID
+            versions = self._http_get(
+                '/api/v1/clusters-resources/install-pack-versions')
+            latest_version = ''
+            for v in versions:
+                if v['certified'] and v['version'] > latest_version:
+                    latest_version = v['version']
+            if latest_version == '':
+                return None
+            return latest_version
+
+        def _get_region_id(self, cluster_type, provider, region):
+            """Get the region id for a region.
+
+            :param cluster_type: cluster type, e.g. 'FMC'
+            :param provider: cloud provider, e.g. 'AWS'
+            :param region: region name, e.g. 'us-west-2'
+            :return: id, e.g. 'cckac9vvbr5ofm048jjg'
+            """
+
+            params = {'cluster_type': cluster_type}
+            regions = self._http_get('/api/v1/clusters-resources/regions',
+                                     params=params)
+            for r in regions[provider]:
+                if r['name'] == region:
+                    return r['id']
+            return None
+
+        def _get_product_id(self,
+                            config_profile_name,
+                            provider,
+                            cluster_type=None,
+                            region=None,
+                            install_pack_ver=None):
+            """Get the product id for the first matching config profile name using filter parameters.
+
+            :param config_profile_name: config profile name, e.g. 'tier-1-aws'
+            :param provider: cloud provider filter, e.g. 'AWS'
+            :param cluster_type: cluster type filter, e.g. 'FMC'
+            :param region: region name filter, e.g. 'us-west-2'
+            :param install_pack_ver: install pack version filter, e.g. '23.2.20230707135118'
+            :return: productId, e.g. 'chqrd4q37efgkmohsbdg'
+            """
+
+            params = {
+                'cloud_provider': provider,
+                'cluster_type': cluster_type,
+                'region': region,
+                'install_pack_version': install_pack_ver
+            }
+            products = self._http_get('/api/v1/clusters-resources/products',
+                                      params=params)
+            for p in products:
+                if p['redpandaConfigProfileName'] == config_profile_name:
+                    return p['id']
+            return None
+
+        def create(self, config_profile_name='tier-1-aws'):
+            """Create a cloud cluster and a new namespace; block until cluster is finished creating.
+
+            :param config_profile_name: config profile name, default 'tier-1-aws'
+            :return: clusterId, e.g. 'cimuhgmdcaa1uc1jtabc'
+            """
 
             if self.cluster_id != '':
                 self._logger.warn(
@@ -1347,39 +1420,47 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                 return self.cluster_id
 
             namespace_uuid = self._create_namespace()
-
             name = f'rp-ducktape-cluster-{self._unique_id}'  # e.g. rp-ducktape-cluster-3b36f516
-            self._logger.debug(f'creating cluster name {name}')
+            install_pack_ver = self._get_install_pack_ver()
+            cluster_type = 'FMC'
+            provider = 'AWS'
+            region = 'us-west-2'
+            region_id = self._get_region_id(cluster_type, provider, region)
+            zones = ['usw2-az1']
+            product_id = self._get_product_id(config_profile_name, provider,
+                                              cluster_type, region,
+                                              install_pack_ver)
+
+            self._logger.info(f'creating cluster name {name}')
             body = {
-                "namespaceUuid": namespace_uuid,
-                "connectionType": "public",
-                "network": {
-                    "displayName": f"public-network-{name}",
-                    "spec": {
-                        "deploymentType": "FMC",
-                        "provider": "AWS",
-                        "regionId": "ccpfuvec6lhdao925q10",
-                        "zones": ["usw2-az1"],
-                        "installPackVersion": "23.1.20230502184729",
-                        "cidr": "10.0.0.0/16"
-                    }
-                },
                 "cluster": {
                     "name": name,
                     "productId": product_id,
                     "spec": {
-                        "clusterType": "FMC",
-                        "provider": "AWS",
-                        "region": "us-west-2",
-                        "isMultiAz": False,
-                        "zones": ["usw2-az1"],
-                        "installPackVersion": "23.1.20230502184729",
+                        "clusterType": cluster_type,
                         "connectors": {
                             "enabled": True
                         },
-                        "networkId": ""
+                        "installPackVersion": install_pack_ver,
+                        "isMultiAz": False,
+                        "networkId": "",
+                        "provider": provider,
+                        "region": region,
+                        "zones": zones,
                     }
-                }
+                },
+                "connectionType": "public",
+                "namespaceUuid": namespace_uuid,
+                "network": {
+                    "displayName": f"public-network-{name}",
+                    "spec": {
+                        "cidr": "10.1.0.0/16",
+                        "deploymentType": cluster_type,
+                        "installPackVersion": install_pack_ver,
+                        "provider": provider,
+                        "regionId": region_id,
+                    }
+                },
             }
 
             self._logger.debug(f'body: {json.dumps(body)}')
@@ -1447,6 +1528,10 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             self.GLOBAL_CLOUD_OAUTH_CLIENT_SECRET, None)
         self._cloud_oauth_audience = context.globals.get(
             self.GLOBAL_CLOUD_OAUTH_AUDIENCE, None)
+        self._cloud_teleport_proxy = context.globals.get(
+            self.GLOBAL_TELEPORT_AUTH_SERVER, None)
+        self._cloud_teleport_bot_token = context.globals.get(
+            self.GLOBAL_TELEPORT_BOT_TOKEN, None)
         self._cloud_api_url = context.globals.get(self.GLOBAL_CLOUD_API_URL,
                                                   None)
         self._cloud_cluster_id = context.globals.get(
@@ -1469,7 +1554,9 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         remote_uri = f'redpanda@{cluster_id}-agent'
         self._kubectl = KubectlTool(self,
                                     remote_uri=remote_uri,
-                                    cluster_id=self._cloud_cluster.cluster_id)
+                                    cluster_id=self._cloud_cluster.cluster_id,
+                                    tp_proxy=self._cloud_teleport_proxy,
+                                    tp_token=self._cloud_teleport_bot_token)
 
     def stop_node(self, node, **kwargs):
         pass
@@ -1561,6 +1648,15 @@ class RedpandaService(RedpandaServiceBase):
         self._environment = dict(
             ASAN_OPTIONS=
             "abort_on_error=1:disable_coredump=0:unmap_shadow_on_exit=1")
+
+        # If lsan_suppressions.txt exists, then include it
+        if os.path.exists(LSAN_SUPPRESSIONS_FILE):
+            self.logger.debug(f'{LSAN_SUPPRESSIONS_FILE} exists')
+            self._environment[
+                'LSAN_OPTIONS'] = f'suppressions={LSAN_SUPPRESSIONS_FILE}'
+        else:
+            self.logger.debug(f'{LSAN_SUPPRESSIONS_FILE} does not exist')
+
         if environment is not None:
             self._environment.update(environment)
 
@@ -1577,7 +1673,7 @@ class RedpandaService(RedpandaServiceBase):
         # stash a copy here so that we can quickly look up e.g. addresses later.
         self._node_configs = {}
 
-        self._seed_servers = [self.nodes[0]] if len(self.nodes) > 0 else []
+        self._seed_servers = self.nodes
 
         self._expect_max_controller_records = 1000
 
@@ -1865,6 +1961,8 @@ class RedpandaService(RedpandaServiceBase):
         self.logger.info("Verifying storage is in expected state")
         storage = self.storage()
         for node in storage.nodes:
+            if node not in to_start:
+                continue
             unexpected_ns = set(node.ns) - {"redpanda"}
             if unexpected_ns:
                 for ns in unexpected_ns:
@@ -3634,7 +3732,107 @@ class RedpandaService(RedpandaServiceBase):
 
         return wait_until_result(check, timeout_sec=30, backoff_sec=1)
 
-    def stop_and_scrub_object_storage(self):
+    def _get_object_storage_report(self,
+                                   tolerate_empty_object_storage=False,
+                                   timeout=60) -> dict[str, str | list[str]]:
+        """
+        Uses rp-storage-tool to get the object storage report.
+        If the cluster is running the tool could see some inconsistencies and report anomalies,
+        so the result needs to be interpreted.
+        Example of a report:
+        {"malformed_manifests":[],
+         "malformed_topic_manifests":[]
+         "missing_segments":[
+           "db0df8df/kafka/test/58_57/0-6-895-1-v1.log.2",
+           "5c34266a/kafka/test/52_57/0-6-895-1-v1.log.2"
+         ],
+         "ntpr_no_manifest":[],
+         "ntr_no_topic_manifest":[],
+         "segments_outside_manifest":[],
+         "unknown_keys":[]}
+        """
+        vars = {"RUST_LOG": "warn"}
+        backend = ""
+        if self.si_settings.cloud_storage_type == CloudStorageType.S3:
+            backend = "aws"
+            vars["AWS_REGION"] = self.si_settings.cloud_storage_region
+            if self.si_settings.endpoint_url:
+                vars["AWS_ENDPOINT"] = self.si_settings.endpoint_url
+                if self.si_settings.endpoint_url.startswith("http://"):
+                    vars["AWS_ALLOW_HTTP"] = "true"
+
+            if self.si_settings.cloud_storage_access_key is not None:
+                vars[
+                    "AWS_ACCESS_KEY_ID"] = self.si_settings.cloud_storage_access_key
+                vars[
+                    "AWS_SECRET_ACCESS_KEY"] = self.si_settings.cloud_storage_secret_key
+        elif self.si_settings.cloud_storage_type == CloudStorageType.ABS:
+            backend = "azure"
+            if self.si_settings.cloud_storage_azure_storage_account == SISettings.ABS_AZURITE_ACCOUNT:
+                vars["AZURE_STORAGE_USE_EMULATOR"] = "true"
+                # We do not use the SISettings.endpoint_url, because that includes the account
+                # name in the URL, and the `object_store` crate used in the scanning tool
+                # assumes that when the emulator is used, the account name should always
+                # appear in the path.
+                vars[
+                    "AZURITE_BLOB_STORAGE_URL"] = f"http://{AZURITE_HOSTNAME}:{AZURITE_PORT}"
+            else:
+                vars[
+                    "AZURE_STORAGE_CONNECTION_STRING"] = self.cloud_storage_client.conn_str
+                vars[
+                    "AZURE_STORAGE_ACCOUNT_KEY"] = self.si_settings.cloud_storage_azure_shared_key
+                vars[
+                    "AZURE_STORAGE_ACCOUNT_NAME"] = self.si_settings.cloud_storage_azure_storage_account
+
+        # Pick an arbitrary node to run the scrub from
+        node = self.nodes[0]
+
+        bucket = self.si_settings.cloud_storage_bucket
+        environment = ' '.join(f'{k}=\"{v}\"' for k, v in vars.items())
+        output, stderr = ssh_output_stderr(
+            self,
+            node,
+            f"{environment} rp-storage-tool --backend {backend} scan-metadata --source {bucket}",
+            allow_fail=True,
+            timeout_sec=timeout)
+
+        # if stderr contains a WARN logline, log it as DEBUG, since this is mostly related to debugging rp-storage-tool itself
+        if re.search(b'\[\S+ WARN', stderr) is not None:
+            self.logger.debug(f"rp-storage-tool stderr output: {stderr}")
+
+        report = {}
+        try:
+            report = json.loads(output)
+        except:
+            self.logger.error(
+                f"Error running bucket scrub: {output=} {stderr=}")
+            if not tolerate_empty_object_storage:
+                raise
+        else:
+            self.logger.info(json.dumps(report, indent=2))
+
+        return report
+
+    def raise_on_cloud_storage_inconsistencies(self,
+                                               inconsistencies: list[str],
+                                               run_timeout=60):
+        """
+        like stop_and_scrub_object_storage, use rp-storage-tool to explicitly check for inconsistencies,
+        but without stopping the cluster.
+        """
+        report = self._get_object_storage_report(
+            tolerate_empty_object_storage=True, timeout=run_timeout)
+        fatal_anomalies = set(k for k, v in report.items()
+                              if len(v) > 0 and k in inconsistencies)
+        if fatal_anomalies:
+            self.logger.error(
+                f"Found fatal inconsistencies in object storage: {json.dumps(report, indent=2)}"
+            )
+            raise RuntimeError(
+                f"Object storage reports fatal anomalies of type {fatal_anomalies}"
+            )
+
+    def stop_and_scrub_object_storage(self, run_timeout=60):
         # Before stopping, ensure that all tiered storage partitions
         # have uploaded at least a manifest: we do not require that they
         # have uploaded until the head of their log, just that they have
@@ -3644,6 +3842,8 @@ class RedpandaService(RedpandaServiceBase):
         # This should not need to wait long: even without waiting for
         # manifest upload interval, partitions should upload their initial
         # manifest as soon as they can, and that's all we require.
+        # :param run_timeout timeout for the execution of rp-storage-tool.
+        # can be set to None for no timeout
 
         def all_partitions_uploaded_manifest():
             for p in self.partitions():
@@ -3684,69 +3884,7 @@ class RedpandaService(RedpandaServiceBase):
         # flushing data to remote storage.
         self.stop()
 
-        vars = {}
-        backend = ""
-        if self.si_settings.cloud_storage_type == CloudStorageType.S3:
-            backend = "aws"
-            vars["AWS_REGION"] = self.si_settings.cloud_storage_region
-            if self.si_settings.endpoint_url:
-                vars["AWS_ENDPOINT"] = self.si_settings.endpoint_url
-                if self.si_settings.endpoint_url.startswith("http://"):
-                    vars["AWS_ALLOW_HTTP"] = "true"
-
-            if self.si_settings.cloud_storage_access_key is not None:
-                vars[
-                    "AWS_ACCESS_KEY_ID"] = self.si_settings.cloud_storage_access_key
-                vars[
-                    "AWS_SECRET_ACCESS_KEY"] = self.si_settings.cloud_storage_secret_key
-        elif self.si_settings.cloud_storage_type == CloudStorageType.ABS:
-            backend = "azure"
-            if self.si_settings.cloud_storage_azure_storage_account == SISettings.ABS_AZURITE_ACCOUNT:
-                vars["AZURE_STORAGE_USE_EMULATOR"] = "true"
-                # We do not use the SISettings.endpoint_url, because that includes the account
-                # name in the URL, and the `object_store` crate used in the scanning tool
-                # assumes that when the emulator is used, the account name should always
-                # appear in the path.
-                vars[
-                    "AZURITE_BLOB_STORAGE_URL"] = f"http://{AZURITE_HOSTNAME}:{AZURITE_PORT}"
-            else:
-                vars[
-                    "AZURE_STORAGE_CONNECTION_STRING"] = self.cloud_storage_client.conn_str
-                vars[
-                    "AZURE_STORAGE_ACCOUNT_KEY"] = self.si_settings.cloud_storage_azure_shared_key
-                vars[
-                    "AZURE_STORAGE_ACCOUNT_NAME"] = self.si_settings.cloud_storage_azure_storage_account
-
-        # Pick an arbitrary node to run the scrub from
-        node = self.nodes[0]
-
-        bucket = self.si_settings.cloud_storage_bucket
-        environment = ' '.join(f'{k}=\"{v}\"' for k, v in vars.items())
-        output = node.account.ssh_output(
-            f"{environment} rp-storage-tool --backend {backend} scan-metadata --source {bucket}",
-            combine_stderr=False,
-            allow_fail=True,
-            timeout_sec=30)
-
-        try:
-            report = json.loads(output)
-        except:
-            self.logger.error(f"Error running bucket scrub: {output}")
-            raise
-        else:
-            self.logger.info(json.dumps(report, indent=2))
-
-        # Example of a report:
-        # {"malformed_manifests":[],
-        #  "malformed_topic_manifests":[]
-        #  "missing_segments":[
-        #    "db0df8df/kafka/test/58_57/0-6-895-1-v1.log.2",
-        #    "5c34266a/kafka/test/52_57/0-6-895-1-v1.log.2"
-        #  ],
-        #  "ntpr_no_manifest":[],
-        #  "ntr_no_topic_manifest":[],
-        #  "segments_outside_manifest":[],
-        #  "unknown_keys":[]}
+        report = self._get_object_storage_report(timeout=run_timeout)
 
         # It is legal for tiered storage to leak objects under
         # certain circumstances: this will remain the case until

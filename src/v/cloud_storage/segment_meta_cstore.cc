@@ -673,7 +673,7 @@ public:
         return it != _base_offset.end();
     }
 
-    bool empty() const { return size() == 0; }
+    bool empty() const { return _base_offset.empty(); }
 
     void serde_write(iobuf& out) {
         // hint_map_t (absl::btree_map) is not serde-enabled, it's serialized
@@ -852,6 +852,11 @@ class segment_meta_cstore::impl
 
 public:
     void append(const segment_meta& meta) { _col.append(meta); }
+
+    const auto& get_size_bytes_column() const {
+        flush_write_buffer();
+        return _col.get_column_cref<segment_meta_ix::size_bytes>();
+    }
 
     const auto& get_base_offset_column() const {
         flush_write_buffer();
@@ -1177,6 +1182,10 @@ segment_meta_cstore::append(const segment_meta& meta) {
 }
 
 void segment_meta_cstore::flush_write_buffer() { _impl->flush_write_buffer(); }
+
+const gauge_col_t& segment_meta_cstore::get_size_bytes_column() const {
+    return _impl->get_size_bytes_column();
+}
 
 const counter_col_t& segment_meta_cstore::get_base_offset_column() const {
     return _impl->get_base_offset_column();

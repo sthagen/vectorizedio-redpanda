@@ -110,23 +110,6 @@ configuration::configuration()
        .example = "31536000000",
        .visibility = visibility::tunable},
       24h * 365)
-  , log_storage_target_size(
-      *this,
-      "log_storage_target_size",
-      "The target size in bytes that log storage will try meet. When no target "
-      "is specified storage usage is unbounded.",
-      {.needs_restart = needs_restart::no,
-       .example = "2147483648000",
-       .visibility = visibility::tunable},
-      std::nullopt)
-  , log_storage_max_usage_interval(
-      *this,
-      "log_storage_max_usage_interval",
-      "The maximum amount of time before log storage usage will be calculated",
-      {.needs_restart = needs_restart::no,
-       .example = "31536000000",
-       .visibility = visibility::tunable},
-      30s)
   , rpc_server_listen_backlog(
       *this,
       "rpc_server_listen_backlog",
@@ -516,7 +499,7 @@ configuration::configuration()
       "use_fetch_scheduler_group",
       "Use a separate scheduler group for fetch processing",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      true)
+      false)
   , metadata_status_wait_timeout_ms(
       *this,
       "metadata_status_wait_timeout_ms",
@@ -1549,6 +1532,14 @@ configuration::configuration()
       "Grace period during which the scrubber will refuse to purge the topic.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       30s)
+  , cloud_storage_disable_upload_consistency_checks(
+      *this,
+      "cloud_storage_disable_upload_consistency_checks",
+      "Disable all upload consistency checks. This will allow redpanda to "
+      "upload logs with gaps and replicate metadata with consistency "
+      "violations. Normally, this options should be disabled.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",
@@ -1620,6 +1611,44 @@ configuration::configuration()
       "write enabled",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       24h)
+  , retention_local_is_advisory(
+      *this,
+      "retention_local_is_advisory",
+      "Allow log data to expand past local retention. When enabled, non-local "
+      "retention settings are used, and local retention settings are used to "
+      "inform data removal policies in low-disk space scenarios.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false)
+  , retention_local_target_capacity_bytes(
+      *this,
+      "retention_local_target_capacity_bytes",
+      "The target capacity in bytes that log storage will try to use before "
+      "additional retention rules will take over to trim data in order to meet "
+      "the target. When no target is specified storage usage is unbounded.",
+      {.needs_restart = needs_restart::no,
+       .example = "2147483648000",
+       .visibility = visibility::user},
+      std::nullopt)
+  , retention_local_trim_interval(
+      *this,
+      "retention_local_trim_interval",
+      "The maximum amount of time before log storage will examine usage to "
+      "determine of the target capacity has been exceeded and additional data "
+      "trimming is required.",
+      {.needs_restart = needs_restart::no,
+       .example = "31536000000",
+       .visibility = visibility::tunable},
+      30s)
+  , retention_local_trim_overage_coeff(
+      *this,
+      "retention_local_trim_overage_coeff",
+      "The space management control loop will reclaim the overage multiplied "
+      "by this this coefficient in order to compensate for data that is "
+      "written during the idle period between control loop invocations.",
+      {.needs_restart = needs_restart::no,
+       .example = "1.8",
+       .visibility = visibility::tunable},
+      2.0)
   , cloud_storage_cache_size(
       *this,
       "cloud_storage_cache_size",
@@ -1645,12 +1674,31 @@ configuration::configuration()
       "elapsed",
       {.visibility = visibility::tunable},
       5s)
-  , cloud_storage_max_readers_per_shard(
+  , cloud_storage_max_segment_readers_per_shard(
       *this,
-      "cloud_storage_max_readers_per_shard",
-      "Maximum concurrent readers of remote data per CPU core.  If unset, "
+      "cloud_storage_max_segment_readers_per_shard",
+      "Maximum concurrent I/O cursors of materialized remote segments per CPU "
+      "core.  If unset, "
+      "value of `topic_partitions_per_shard` is used, i.e. one segment reader "
+      "per "
+      "partition if the shard is at its maximum partition capacity.  These "
+      "readers are cached"
+      "across Kafka consume requests and store a readahead buffer.",
+      {.needs_restart = needs_restart::no,
+       .visibility = visibility::tunable,
+       .aliases = {"cloud_storage_max_readers_per_shard"}},
+      std::nullopt)
+  , cloud_storage_max_partition_readers_per_shard(
+      *this,
+      "cloud_storage_max_partition_readers_per_shard",
+      "Maximum concurrent partition readers of remote data per CPU core.  If "
+      "unset, "
       "value of `topic_partitions_per_shard` is used, i.e. one reader per "
-      "partition if the shard is at its maximum partition capacity.",
+      "partition if the shard is at its maximum partition capacity.  These "
+      "readers have the"
+      "lifetime of a Kafka consume request, so this property controls how many "
+      "consume"
+      "requests to remote data can make progress at the same time.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt)
   , cloud_storage_max_materialized_segments_per_shard(

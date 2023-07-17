@@ -645,6 +645,12 @@ public:
         return total;
     }
 
+    bool empty() const {
+        // short circuit at the first non empty frame
+        return std::ranges::all_of(
+          _frames, [](auto& f) { return f.size() == 0; });
+    }
+
     size_t mem_use() const {
         size_t total = 0;
         for (const auto& p : _frames) {
@@ -977,6 +983,7 @@ public:
     void flush_write_buffer();
 
     // Access individual columns
+    const gauge_col_t& get_size_bytes_column() const;
     const counter_col_t& get_base_offset_column() const;
     const gauge_col_t& get_committed_offset_column() const;
     const gauge_col_t& get_delta_offset_end_column() const;

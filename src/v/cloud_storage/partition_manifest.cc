@@ -539,12 +539,13 @@ void partition_manifest::flush_write_buffer() {
 }
 
 uint64_t partition_manifest::compute_cloud_log_size() const {
-    return std::transform_reduce(
-      find(_start_offset),
-      end(),
-      uint64_t{0},
-      std::plus{},
-      [](const auto& seg) { return seg.size_bytes; });
+    const auto& bo_col = _segments.get_base_offset_column();
+    const auto& sz_col = _segments.get_size_bytes_column();
+    auto it = bo_col.find(_start_offset);
+    if (it.is_end()) {
+        return 0;
+    }
+    return std::accumulate(sz_col.at_index(it.index()), sz_col.end(), 0);
 }
 
 uint64_t partition_manifest::cloud_log_size() const {
@@ -909,6 +910,51 @@ bool partition_manifest::add(
     return add(m);
 }
 
+bool partition_manifest::safe_segment_meta_to_add(const segment_meta& m) {
+    if (_segments.empty()) {
+        // The empty manifest can be started from any offset. If we deleted all
+        // segments due to retention we should start from last uploaded offset.
+        // The reuploads are not possible if the manifest is empty.
+        return _last_offset == model::offset{0}
+               || model::next_offset(_last_offset) == m.base_offset;
+    }
+    if (m.is_compacted) {
+        // For the compacted uploads we're actually allowing to start and
+        // stop inside the gap.
+        // TODO: consider making this more strict
+        return true;
+    }
+    auto last = _segments.last_segment().value();
+    auto next = model::next_offset(last.committed_offset);
+    if (m.base_offset == next) {
+        return last.delta_offset_end == m.delta_offset;
+    }
+    if (m.base_offset > next) {
+        // Base offset of the uploaded segment overshoots the expected value
+        return false;
+    }
+    // Check reupload correctness
+    // The segment should be aligned with existing segments in the manifest but
+    // there should be more than one segment covered by 'm'.
+    auto it = _segments.find(m.base_offset);
+    if (it == _segments.end()) {
+        return false;
+    }
+    if (it->committed_offset == m.committed_offset) {
+        // 'm' is a reupload of an individual segment, the segment should have
+        // different size
+        return it->size_bytes != m.size_bytes;
+    }
+    ++it;
+    while (it != _segments.end()) {
+        if (it->committed_offset == m.committed_offset) {
+            return true;
+        }
+        ++it;
+    }
+    return false;
+}
+
 partition_manifest
 partition_manifest::truncate(model::offset starting_rp_offset) {
     if (!advance_start_offset(starting_rp_offset)) {
@@ -1165,6 +1211,9 @@ struct partition_manifest_handler
         case state::expect_replaced_meta_start:
             _state = state::expect_replaced_meta_key;
             return true;
+        case state::expect_spillover_meta_start:
+            _state = state::expect_spillover_meta_key;
+            return true;
         case state::expect_manifest_key:
         case state::expect_manifest_value:
         case state::expect_segment_path:
@@ -1173,6 +1222,9 @@ struct partition_manifest_handler
         case state::expect_replaced_path:
         case state::expect_replaced_meta_key:
         case state::expect_replaced_meta_value:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_value:
+        case state::expect_spillover_start:
         case state::terminal_state:
             return false;
         }
@@ -1186,6 +1238,8 @@ struct partition_manifest_handler
                 _state = state::expect_segments_start;
             } else if (_manifest_key == "replaced") {
                 _state = state::expect_replaced_start;
+            } else if (_manifest_key == "spillover") {
+                _state = state::expect_spillover_start;
             } else {
                 _state = state::expect_manifest_value;
             }
@@ -1205,7 +1259,7 @@ struct partition_manifest_handler
               .term = _parsed_segment_key->term};
             if (_state == state::expect_segment_path) {
                 _state = state::expect_segment_meta_start;
-            } else {
+            } else if (_state == state::expect_replaced_path) {
                 _state = state::expect_replaced_meta_start;
             }
             return true;
@@ -1217,6 +1271,10 @@ struct partition_manifest_handler
             _segment_meta_key = key_string(str, length);
             _state = state::expect_replaced_meta_value;
             return true;
+        case state::expect_spillover_meta_key:
+            _segment_meta_key = key_string(str, length);
+            _state = state::expect_spillover_meta_value;
+            return true;
         case state::expect_manifest_start:
         case state::expect_manifest_value:
         case state::expect_segments_start:
@@ -1225,6 +1283,9 @@ struct partition_manifest_handler
         case state::expect_segment_meta_value:
         case state::expect_replaced_meta_start:
         case state::expect_replaced_meta_value:
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_value:
         case state::terminal_state:
             return false;
         }
@@ -1256,6 +1317,10 @@ struct partition_manifest_handler
         case state::expect_replaced_meta_key:
         case state::expect_replaced_meta_value:
         case state::terminal_state:
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_value:
             return false;
         }
     }
@@ -1298,6 +1363,7 @@ struct partition_manifest_handler
             return true;
         case state::expect_replaced_meta_value:
         case state::expect_segment_meta_value:
+        case state::expect_spillover_meta_value:
             if (_segment_meta_key == "size_bytes") {
                 _size_bytes = static_cast<size_t>(u);
             } else if (_segment_meta_key == "base_offset") {
@@ -1325,8 +1391,10 @@ struct partition_manifest_handler
             }
             if (_state == state::expect_segment_meta_value) {
                 _state = state::expect_segment_meta_key;
-            } else {
+            } else if (_state == state::expect_replaced_meta_value) {
                 _state = state::expect_replaced_meta_key;
+            } else if (_state == state::expect_spillover_meta_value) {
+                _state = state::expect_spillover_meta_key;
             }
             return true;
         case state::expect_manifest_start:
@@ -1339,6 +1407,9 @@ struct partition_manifest_handler
         case state::expect_replaced_path:
         case state::expect_replaced_meta_start:
         case state::expect_replaced_meta_key:
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_start:
         case state::terminal_state:
             return false;
         }
@@ -1356,6 +1427,7 @@ struct partition_manifest_handler
             return true;
         case state::expect_segment_meta_key:
         case state::expect_replaced_meta_key:
+        case state::expect_spillover_meta_key:
             check_that_required_meta_fields_are_present();
             _meta = {
               .is_compacted = _is_compacted.value_or(false),
@@ -1383,7 +1455,7 @@ struct partition_manifest_handler
                 }
                 _segments->insert(_meta);
                 _state = state::expect_segment_path;
-            } else {
+            } else if (_state == state::expect_replaced_meta_key) {
                 if (!_replaced) {
                     _replaced = std::make_unique<replaced_segments_list>();
                 }
@@ -1399,6 +1471,14 @@ struct partition_manifest_handler
                 _replaced->push_back(
                   partition_manifest::lw_segment_meta::convert(_meta));
                 _state = state::expect_replaced_path;
+            } else if (_state == state::expect_spillover_meta_key) {
+                _meta.is_compacted = false;
+                _meta.sname_format = segment_name_format::v3;
+                if (!_spillover) {
+                    _spillover = std::make_unique<segment_meta_cstore>();
+                }
+                _spillover->insert(_meta);
+                _state = state::expect_spillover_meta_start;
             }
             clear_meta_fields();
             return true;
@@ -1410,6 +1490,9 @@ struct partition_manifest_handler
         case state::expect_segment_meta_value:
         case state::expect_replaced_meta_start:
         case state::expect_replaced_meta_value:
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_value:
         case state::terminal_state:
             return false;
         }
@@ -1431,6 +1514,19 @@ struct partition_manifest_handler
                 return true;
             }
             return false;
+        case state::expect_spillover_meta_value:
+            /**
+             * Spillover manifest is never compacted, simply skip if the field
+             * is present
+             */
+            if (_segment_meta_key == "is_compacted") {
+                _state = state::expect_spillover_meta_key;
+                return true;
+            }
+            return false;
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_key:
         case state::expect_manifest_start:
         case state::expect_manifest_key:
         case state::expect_manifest_value:
@@ -1443,6 +1539,7 @@ struct partition_manifest_handler
         case state::expect_replaced_meta_start:
         case state::expect_replaced_meta_key:
         case state::terminal_state:
+
             return false;
         }
     }
@@ -1468,11 +1565,72 @@ struct partition_manifest_handler
         case state::expect_replaced_meta_value:
             _state = state::expect_replaced_meta_key;
             return true;
+        case state::expect_spillover_start:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_value:
+            _state = state::expect_spillover_meta_key;
+            return true;
         case state::terminal_state:
             return false;
         }
     }
+    bool StartArray() {
+        switch (_state) {
+        case state::expect_spillover_start:
+            _state = state::expect_spillover_meta_start;
+            return true;
+        case state::expect_manifest_value:
+        case state::expect_segment_meta_value:
+        case state::expect_manifest_start:
+        case state::expect_manifest_key:
+        case state::expect_segments_start:
+        case state::expect_segment_path:
+        case state::expect_segment_meta_start:
+        case state::expect_segment_meta_key:
+        case state::expect_replaced_start:
+        case state::expect_replaced_path:
+        case state::expect_replaced_meta_start:
+        case state::expect_replaced_meta_key:
+        case state::expect_replaced_meta_value:
+        case state::expect_spillover_meta_start:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_value:
+        case state::terminal_state:
+            return false;
+        };
+    }
+    bool EndArray(rapidjson::SizeType /*size*/) {
+        switch (_state) {
+        case state::expect_spillover_meta_start:
+            if (!_spillover) {
+                _spillover = std::make_unique<segment_meta_cstore>();
+            }
+            _spillover->insert(_meta);
+            _state = state::expect_manifest_key;
 
+            clear_meta_fields();
+            return true;
+        case state::expect_spillover_start:
+        case state::expect_manifest_value:
+        case state::expect_segment_meta_value:
+        case state::expect_manifest_start:
+        case state::expect_manifest_key:
+        case state::expect_segments_start:
+        case state::expect_segment_path:
+        case state::expect_segment_meta_start:
+        case state::expect_segment_meta_key:
+        case state::expect_replaced_start:
+        case state::expect_replaced_path:
+        case state::expect_replaced_meta_start:
+        case state::expect_replaced_meta_key:
+        case state::expect_replaced_meta_value:
+        case state::expect_spillover_meta_key:
+        case state::expect_spillover_meta_value:
+        case state::terminal_state:
+            return false;
+        };
+    }
     bool Default() { return false; }
 
     enum class state {
@@ -1489,6 +1647,10 @@ struct partition_manifest_handler
         expect_replaced_meta_start,
         expect_replaced_meta_key,
         expect_replaced_meta_value,
+        expect_spillover_start,
+        expect_spillover_meta_start,
+        expect_spillover_meta_key,
+        expect_spillover_meta_value,
         terminal_state,
     } _state{state::expect_manifest_start};
 
@@ -1503,6 +1665,7 @@ struct partition_manifest_handler
     partition_manifest::segment_meta _meta;
     std::unique_ptr<segment_map> _segments;
     std::unique_ptr<replaced_segments_list> _replaced;
+    std::unique_ptr<segment_meta_cstore> _spillover;
 
     // required manifest fields
     std::optional<int32_t> _version;
@@ -1725,6 +1888,14 @@ void partition_manifest::do_update(partition_manifest_handler&& handler) {
         _replaced = std::move(*handler._replaced);
     }
 
+    if (handler._archive_size_bytes) {
+        _archive_size_bytes = *handler._archive_size_bytes;
+    }
+
+    if (handler._spillover) {
+        _spillover_manifests = std::move(*handler._spillover);
+    }
+
     if (handler._cloud_log_size_bytes) {
         _cloud_log_size_bytes = handler._cloud_log_size_bytes.value();
     } else {
@@ -1753,10 +1924,15 @@ struct partition_manifest::serialization_cursor {
     model::offset next_offset{};
     size_t segments_serialized{0};
     size_t max_segments_per_call{0};
+    // Next serialized spillover manifest offset
+    model::offset next_spill_offset{};
+    size_t spills_serialized{0};
+
     // Flags that indicate serialization progress
     bool prologue_done{false};
     bool segments_done{false};
     bool replaced_done{false};
+    bool spillover_done{false};
     bool epilogue_done{false};
 };
 
@@ -1775,6 +1951,9 @@ void partition_manifest::serialize_json(std::ostream& out) const {
         serialize_segments(c);
     }
     serialize_replaced(c);
+    while (!c->spillover_done) {
+        serialize_spillover(c);
+    }
     serialize_end(c);
 }
 
@@ -1793,6 +1972,13 @@ partition_manifest::serialize_json(ss::output_stream<char>& output) const {
         serialized.clear();
     }
     serialize_replaced(c);
+    while (!c->spillover_done) {
+        serialize_spillover(c);
+
+        co_await write_iobuf_to_output_stream(
+          serialized.share(0, serialized.size_bytes()), output);
+        serialized.clear();
+    }
     serialize_end(c);
 
     co_await write_iobuf_to_output_stream(std::move(serialized), output);
@@ -1919,6 +2105,51 @@ void partition_manifest::serialize_segment_meta(
     w.EndObject();
 }
 
+void partition_manifest::serialize_spillover_manifest_meta(
+  const segment_meta& meta, serialization_cursor_ptr cursor) const {
+    vassert(
+      meta.segment_term != model::term_id{},
+      "Term id is not initialized, base offset {}",
+      meta.base_offset);
+    auto& w = cursor->writer;
+    w.StartObject();
+    w.Key("size_bytes");
+    w.Int64(meta.size_bytes);
+    w.Key("committed_offset");
+    w.Int64(meta.committed_offset());
+    w.Key("base_offset");
+    w.Int64(meta.base_offset());
+    if (meta.base_timestamp != model::timestamp::missing()) {
+        w.Key("base_timestamp");
+        w.Int64(meta.base_timestamp.value());
+    }
+    if (meta.max_timestamp != model::timestamp::missing()) {
+        w.Key("max_timestamp");
+        w.Int64(meta.max_timestamp.value());
+    }
+    if (meta.delta_offset != model::offset_delta::min()) {
+        w.Key("delta_offset");
+        w.Int64(meta.delta_offset());
+    }
+    if (meta.ntp_revision != _rev) {
+        w.Key("ntp_revision");
+        w.Int64(meta.ntp_revision());
+    }
+    if (meta.archiver_term != model::term_id::min()) {
+        w.Key("archiver_term");
+        w.Int64(meta.archiver_term());
+    }
+    w.Key("segment_term");
+    w.Int64(meta.segment_term());
+    if (meta.delta_offset_end != model::offset_delta::min()) {
+        w.Key("delta_offset_end");
+        w.Int64(meta.delta_offset_end());
+    }
+    w.Key("metadata_size_hint");
+    w.Int64(static_cast<int64_t>(meta.metadata_size_hint));
+    w.EndObject();
+}
+
 void partition_manifest::serialize_removed_segment_meta(
   const lw_segment_meta& meta, serialization_cursor_ptr cursor) const {
     // Here we are serializing all fields stored in 'lw_segment_meta'.
@@ -2018,6 +2249,49 @@ void partition_manifest::serialize_replaced(
         w.EndObject();
     }
     cursor->replaced_done = true;
+}
+void partition_manifest::serialize_spillover(
+  partition_manifest::serialization_cursor_ptr cursor) const {
+    auto& w = cursor->writer;
+    if (_spillover_manifests.empty()) {
+        cursor->next_spill_offset = model::offset{};
+        cursor->spillover_done = true;
+        return;
+    }
+
+    if (
+      cursor->next_spill_offset == model::offset{}
+      && !_spillover_manifests.empty()) {
+        // The method is called first time
+        w.Key("spillover");
+        w.StartArray();
+        cursor->next_spill_offset = _spillover_manifests.begin()->base_offset;
+    }
+
+    if (!_spillover_manifests.empty()) {
+        auto it = _spillover_manifests.lower_bound(cursor->next_spill_offset);
+        for (; it != _spillover_manifests.end(); ++it) {
+            serialize_spillover_manifest_meta(*it, cursor);
+            cursor->spills_serialized++;
+            if (cursor->spills_serialized >= cursor->max_segments_per_call) {
+                cursor->spills_serialized = 0;
+                ++it;
+                break;
+            }
+        }
+        if (it == _spillover_manifests.end()) {
+            cursor->next_spill_offset = _last_offset;
+        } else {
+            cursor->next_spill_offset = it->base_offset;
+        }
+    }
+    if (
+      cursor->next_spill_offset == _last_offset
+      && !_spillover_manifests.empty()) {
+        // next_offset will overshoot by one
+        w.EndArray();
+        cursor->spillover_done = true;
+    }
 }
 
 void partition_manifest::serialize_end(serialization_cursor_ptr cursor) const {

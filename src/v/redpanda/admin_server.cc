@@ -463,6 +463,29 @@ bool get_boolean_query_param(
     return ss::http::request::case_insensitive_cmp()(str_param, "true")
            || str_param == "1";
 }
+
+/**
+ * Helper for requests with decimal_integer URL query parameters.
+ *
+ * Throws a bad_request exception if the parameter is present but not
+ * an integer.
+ */
+std::optional<uint64_t>
+get_integer_query_param(const ss::http::request& req, std::string_view name) {
+    auto key = ss::sstring(name);
+    if (!req.query_parameters.contains(key)) {
+        return std::nullopt;
+    }
+
+    const ss::sstring& str_param = req.query_parameters.at(key);
+    try {
+        return std::stoi(str_param);
+    } catch (const std::invalid_argument&) {
+        throw ss::httpd::bad_request_exception(
+          fmt::format("Parameter {} must be an integer", name));
+    }
+}
+
 } // namespace
 
 void admin_server::configure_metrics_route() {
@@ -2376,6 +2399,11 @@ admin_server::get_decommission_progress_handler(
     ret.replicas_left = decommission_progress.replicas_left;
     ret.finished = decommission_progress.finished;
 
+    for (const auto& ntp : decommission_progress.allocation_failures) {
+        ret.allocation_failures.push(
+          fmt::format("{}/{}/{}", ntp.ns(), ntp.tp.topic(), ntp.tp.partition));
+    }
+
     for (auto& p : decommission_progress.current_reconfigurations) {
         ss::httpd::broker_json::partition_reconfiguration_status status;
         status.ns = p.ntp.ns;
@@ -2775,9 +2803,14 @@ admin_server::get_reconfigurations_handler(std::unique_ptr<ss::http::request>) {
             reconfiguration_states.error()),
           ss::http::reply::status_type::service_unavailable);
     }
+    // we are forced to use shared pointer as underlying chunked_fifo is not
+    // copyable
+    auto reconciliations_ptr
+      = ss::make_lw_shared<cluster::global_reconciliation_state>(
+        std::move(reconciliations));
     co_return ss::json::json_return_type(ss::json::stream_range_as_array(
       std::move(reconfiguration_states.value()),
-      [reconciliations = std::move(reconciliations)](auto& s) {
+      [reconciliations = std::move(reconciliations_ptr)](auto& s) {
           reconfiguration r;
           r.ns = s.ntp.ns;
           r.topic = s.ntp.tp.topic;
@@ -2812,8 +2845,8 @@ admin_server::get_reconfigurations_handler(std::unique_ptr<ss::http::request>) {
               r.bytes_left_to_move = s.current_partition_size;
           }
 
-          auto it = reconciliations.ntp_backend_operations.find(s.ntp);
-          if (it != reconciliations.ntp_backend_operations.end()) {
+          auto it = reconciliations->ntp_backend_operations.find(s.ntp);
+          if (it != reconciliations->ntp_backend_operations.end()) {
               for (auto& node_ops : it->second) {
                   seastar::httpd::partition_json::
                     partition_reconciliation_status per_node_status;
@@ -4262,6 +4295,12 @@ void admin_server::register_debug_routes() {
       });
 
     register_route<superuser>(
+      ss::httpd::debug_json::get_local_offsets_translated,
+      [this](std::unique_ptr<ss::http::request> request) {
+          return get_local_offsets_translated_handler(std::move(request));
+      });
+
+    register_route<superuser>(
       ss::httpd::debug_json::put_disk_stat,
       [this](std::unique_ptr<ss::http::request> request) {
           return put_disk_stat_handler(std::move(request));
@@ -4294,6 +4333,75 @@ admin_server::get_disk_stat_handler(std::unique_ptr<ss::http::request> req) {
     disk.free_bytes = stat.stat.f_bfree * stat.stat.f_frsize;
 
     co_return disk;
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::get_local_offsets_translated_handler(
+  std::unique_ptr<ss::http::request> req) {
+    static const std::string_view to_kafka = "kafka";
+    static const std::string_view to_rp = "redpanda";
+    const model::ntp ntp = parse_ntp_from_request(req->param);
+    const auto shard = _controller->get_shard_table().local().shard_for(ntp);
+    auto translate_to = to_kafka;
+    if (auto e = req->get_query_param("translate_to"); !e.empty()) {
+        if (e != to_kafka && e != to_rp) {
+            throw ss::httpd::bad_request_exception(fmt::format(
+              "'translate_to' parameter must be one of either {} or {}",
+              to_kafka,
+              to_rp));
+        }
+        translate_to = e;
+    }
+    if (!shard) {
+        throw ss::httpd::not_found_exception(
+          fmt::format("ntp {} could not be found on the node", ntp));
+    }
+    const auto doc = co_await parse_json_body(req.get());
+    if (!doc.IsArray()) {
+        throw ss::httpd::bad_request_exception(
+          "Request body must be JSON array of integers");
+    }
+    std::vector<model::offset> input;
+    for (auto& item : doc.GetArray()) {
+        if (!item.IsInt()) {
+            throw ss::httpd::bad_request_exception(
+              "Offsets must all be integers");
+        }
+        input.emplace_back(item.GetInt());
+    }
+    co_return co_await _controller->get_partition_manager().invoke_on(
+      *shard,
+      [ntp, translate_to, input = std::move(input)](
+        cluster::partition_manager& pm) {
+          auto partition = pm.get(ntp);
+          if (!partition) {
+              return ss::make_exception_future<ss::json::json_return_type>(
+                ss::httpd::not_found_exception(fmt::format(
+                  "partition with ntp {} could not be found on the node",
+                  ntp)));
+          }
+          const auto ots = partition->get_offset_translator_state();
+          std::vector<ss::httpd::debug_json::translated_offset> result;
+          for (const auto offset : input) {
+              try {
+                  ss::httpd::debug_json::translated_offset to;
+                  if (translate_to == to_kafka) {
+                      to.kafka_offset = ots->from_log_offset(offset);
+                      to.rp_offset = offset;
+                  } else {
+                      to.rp_offset = ots->to_log_offset(offset);
+                      to.kafka_offset = offset;
+                  }
+                  result.push_back(std::move(to));
+              } catch (const std::runtime_error&) {
+                  throw ss::httpd::bad_request_exception(fmt::format(
+                    "Offset provided {} was out of offset translator range",
+                    offset));
+              }
+          }
+          return ss::make_ready_future<ss::json::json_return_type>(
+            std::move(result));
+      });
 }
 
 namespace {
@@ -4520,12 +4628,15 @@ void admin_server::register_cluster_routes() {
               model::time_from_now(std::chrono::seconds(5)))
             .then([](auto health_overview) {
                 ss::httpd::cluster_json::cluster_health_overview ret;
-                ret.is_healthy = health_overview.is_healthy;
+                ret.is_healthy = health_overview.is_healthy();
+
+                ret.unhealthy_reasons._set = true;
                 ret.all_nodes._set = true;
                 ret.nodes_down._set = true;
                 ret.leaderless_partitions._set = true;
                 ret.under_replicated_partitions._set = true;
 
+                ret.unhealthy_reasons = health_overview.unhealthy_reasons;
                 ret.all_nodes = health_overview.all_nodes;
                 ret.nodes_down = health_overview.nodes_down;
 
@@ -4973,6 +5084,21 @@ admin_server::delete_cloud_storage_lifecycle(
     co_return ss::json::json_return_type(ss::json::json_void());
 }
 
+ss::future<ss::json::json_return_type>
+admin_server::post_cloud_storage_cache_trim(
+  std::unique_ptr<ss::http::request> req) {
+    auto size_limit = get_integer_query_param(*req, "objects");
+    auto bytes_limit = static_cast<std::optional<size_t>>(
+      get_integer_query_param(*req, "bytes"));
+
+    co_await _cloud_storage_cache.invoke_on(
+      ss::shard_id{0}, [size_limit, bytes_limit](auto& c) {
+          return c.trim_manually(size_limit, bytes_limit);
+      });
+
+    co_return ss::json::json_return_type(ss::json::json_void());
+}
+
 ss::future<std::unique_ptr<ss::http::reply>> admin_server::get_manifest(
   std::unique_ptr<ss::http::request> req,
   std::unique_ptr<ss::http::reply> rep) {
@@ -5069,6 +5195,12 @@ void admin_server::register_shadow_indexing_routes() {
       ss::httpd::shadow_indexing_json::delete_cloud_storage_lifecycle,
       [this](auto req) {
           return delete_cloud_storage_lifecycle(std::move(req));
+      });
+
+    register_route<user>(
+      ss::httpd::shadow_indexing_json::post_cloud_storage_cache_trim,
+      [this](auto req) {
+          return post_cloud_storage_cache_trim(std::move(req));
       });
 
     register_route_raw_async<user>(

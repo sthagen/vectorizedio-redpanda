@@ -12,6 +12,8 @@
 #include "bytes/iostream.h"
 #include "cloud_storage/remote_segment_index.h"
 #include "cloud_storage/tests/common_def.h"
+#include "model/fundamental.h"
+#include "model/namespace.h"
 #include "random/generators.h"
 
 #include <seastar/testing/test_case.hh>
@@ -41,15 +43,18 @@ BOOST_AUTO_TEST_CASE(remote_segment_index_search_test) {
     std::vector<model::offset> rp_offsets;
     std::vector<kafka::offset> kaf_offsets;
     std::vector<size_t> file_offsets;
+    std::vector<model::timestamp> timestamps;
     int64_t rp = segment_base_rp_offset();
     int64_t kaf = segment_base_kaf_offset();
     size_t fpos = random_generators::get_int(1000, 2000);
+    model::timestamp timestamp{123456};
     bool is_config = false;
     for (size_t i = 0; i < segment_num_batches; i++) {
         if (!is_config) {
             rp_offsets.push_back(model::offset(rp));
             kaf_offsets.push_back(kafka::offset(kaf));
             file_offsets.push_back(fpos);
+            timestamps.push_back(timestamp);
         }
         // The test queries every element using the key that matches the element
         // exactly and then it queries the element using the key which is
@@ -61,22 +66,35 @@ BOOST_AUTO_TEST_CASE(remote_segment_index_search_test) {
         rp += batch_size;
         kaf += is_config ? batch_size - 1 : batch_size;
         fpos += random_generators::get_int(1000, 2000);
+        timestamp = model::timestamp(timestamp.value() + 1);
     }
 
     offset_index tmp_index(
-      segment_base_rp_offset, segment_base_kaf_offset, 0U, 1000);
+      segment_base_rp_offset,
+      segment_base_kaf_offset,
+      0U,
+      1000,
+      model::timestamp{0xdeadbeef});
     model::offset last;
     kafka::offset klast;
     size_t flast;
     for (size_t i = 0; i < rp_offsets.size(); i++) {
-        tmp_index.add(rp_offsets.at(i), kaf_offsets.at(i), file_offsets.at(i));
+        tmp_index.add(
+          rp_offsets.at(i),
+          kaf_offsets.at(i),
+          file_offsets.at(i),
+          timestamps.at(i));
         last = rp_offsets.at(i);
         klast = kaf_offsets.at(i);
         flast = file_offsets.at(i);
     }
 
     offset_index index(
-      segment_base_rp_offset, segment_base_kaf_offset, 0U, 1000);
+      segment_base_rp_offset,
+      segment_base_kaf_offset,
+      0U,
+      1000,
+      model::timestamp{0xdeadbeef});
     auto buf = tmp_index.to_iobuf();
     index.from_iobuf(std::move(buf));
 
@@ -134,7 +152,8 @@ SEASTAR_THREAD_TEST_CASE(test_remote_segment_index_builder) {
     }
     auto segment = generate_segment(base_offset, batches);
     auto is = make_iobuf_input_stream(std::move(segment));
-    offset_index ix(base_offset, kbase_offset, 0, 0);
+    offset_index ix(
+      base_offset, kbase_offset, 0, 0, model::timestamp{0xdeadbeef});
     auto parser = make_remote_segment_index_builder(
       test_ntp, std::move(is), ix, model::offset_delta(0), 0);
     auto result = parser->consume().get();
@@ -159,6 +178,9 @@ SEASTAR_THREAD_TEST_CASE(test_remote_segment_build_coarse_index) {
     const model::offset base_offset{100};
     const kafka::offset kbase_offset{100};
     std::vector<batch_t> batches;
+    model::offset expected_base_offset = base_offset, expected_last_offset;
+    size_t expected_conf_records = 0;
+    size_t expected_data_records = 0;
     for (int i = 0; i < 1000; i++) {
         auto num_records = random_generators::get_int(1, 20);
         std::vector<size_t> record_sizes;
@@ -172,16 +194,27 @@ SEASTAR_THREAD_TEST_CASE(test_remote_segment_build_coarse_index) {
           .record_sizes = std::move(record_sizes),
         };
         batches.push_back(std::move(batch));
+        expected_data_records += num_records;
     }
+    expected_last_offset = base_offset
+                           + model::offset(
+                             expected_conf_records + expected_data_records - 1);
     auto segment = generate_segment(base_offset, batches);
     auto is = make_iobuf_input_stream(std::move(segment));
-    offset_index ix(base_offset, kbase_offset, 0, 0);
+    offset_index ix(
+      base_offset, kbase_offset, 0, 0, model::timestamp{0xdeadbeef});
+    segment_record_stats stats{};
     auto parser = make_remote_segment_index_builder(
-      test_ntp, std::move(is), ix, model::offset_delta(0), 0);
+      test_ntp, std::move(is), ix, model::offset_delta(0), 0, std::ref(stats));
     auto pclose = ss::defer([&parser] { parser->close().get(); });
     auto result = parser->consume().get();
     BOOST_REQUIRE(result.has_value());
     BOOST_REQUIRE_NE(result.value(), 0);
+
+    BOOST_REQUIRE_EQUAL(stats.total_conf_records, expected_conf_records);
+    BOOST_REQUIRE_EQUAL(stats.total_data_records, expected_data_records);
+    BOOST_REQUIRE_EQUAL(stats.base_rp_offset, expected_base_offset);
+    BOOST_REQUIRE_EQUAL(stats.last_rp_offset, expected_last_offset);
 
     auto mini_ix = ix.build_coarse_index(100_KiB, "test");
     absl::btree_map<int64_t, kafka::offset> file_to_koffset;
@@ -255,7 +288,8 @@ SEASTAR_THREAD_TEST_CASE(
     }
     auto segment = generate_segment(base_offset, batches);
     auto is = make_iobuf_input_stream(std::move(segment));
-    offset_index ix(base_offset, kbase_offset, 0, 0);
+    offset_index ix(
+      base_offset, kbase_offset, 0, 0, model::timestamp{0xdeadbeef});
     auto parser = make_remote_segment_index_builder(
       test_ntp, std::move(is), ix, model::offset_delta(0), 0);
     auto pclose = ss::defer([&parser] { parser->close().get(); });

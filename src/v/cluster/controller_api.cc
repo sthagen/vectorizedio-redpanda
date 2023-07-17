@@ -17,6 +17,9 @@
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/logger.h"
 #include "cluster/members_table.h"
+#include "cluster/partition_balancer_backend.h"
+#include "cluster/partition_balancer_rpc_service.h"
+#include "cluster/partition_balancer_types.h"
 #include "cluster/partition_manager.h"
 #include "cluster/shard_table.h"
 #include "cluster/topic_table.h"
@@ -27,6 +30,7 @@
 #include "rpc/connection_cache.h"
 #include "ssx/future-util.h"
 
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/loop.hh>
@@ -45,6 +49,7 @@ controller_api::controller_api(
   ss::sharded<rpc::connection_cache>& cache,
   ss::sharded<health_monitor_frontend>& health_monitor,
   ss::sharded<members_table>& members,
+  ss::sharded<partition_balancer_backend>& partition_balancer,
   ss::sharded<ss::abort_source>& as)
   : _self(self)
   , _backend(backend)
@@ -53,6 +58,7 @@ controller_api::controller_api(
   , _connections(cache)
   , _health_monitor(health_monitor)
   , _members(members)
+  , _partition_balancer(partition_balancer)
   , _as(as) {}
 
 ss::future<std::vector<ntp_reconciliation_state>>
@@ -142,7 +148,7 @@ controller_api::get_reconciliation_state(model::topic_namespace_view tp_ns) {
     co_return co_await get_reconciliation_state(std::move(ntps));
 }
 
-ss::future<std::vector<controller_backend::delta_metadata>>
+ss::future<ss::chunked_fifo<controller_backend::delta_metadata>>
 controller_api::get_remote_core_deltas(model::ntp ntp, ss::shard_id shard) {
     return _backend.invoke_on(
       shard, [ntp = std::move(ntp)](controller_backend& backend) {
@@ -164,7 +170,7 @@ controller_api::get_reconciliation_state(model::ntp ntp) {
           std::move(ntp), errc::partition_not_exists);
     }
     // query controller backends for in progress operations
-    std::vector<backend_operation> ops;
+    ss::chunked_fifo<backend_operation> ops;
     const auto shards = boost::irange<ss::shard_id>(0, ss::smp::count);
     for (auto shard : shards) {
         auto local_deltas = co_await get_remote_core_deltas(ntp, shard);
@@ -268,7 +274,7 @@ controller_api::get_reconciliation_state(
           }
           vassert(result.value().size() == 1, "result MUST contain single ntp");
 
-          return ret_t(result.value().front());
+          return ret_t(std::move(result.value().front()));
       });
 }
 
@@ -384,6 +390,68 @@ controller_api::get_partitions_reconfiguration_state(
     co_return ret;
 }
 
+ss::future<result<ss::chunked_fifo<model::ntp>>>
+controller_api::get_decommission_allocation_failures(model::node_id node) {
+    using result_t = std::variant<
+      cluster::partition_balancer_overview_reply,
+      model::node_id,
+      cluster::errc>;
+
+    result_t result = co_await _partition_balancer.invoke_on(
+      cluster::partition_balancer_backend::shard,
+      [](cluster::partition_balancer_backend& backend) {
+          if (backend.is_leader()) {
+              return result_t(backend.overview());
+          } else {
+              auto leader_id = backend.leader_id();
+              if (leader_id) {
+                  return result_t(leader_id.value());
+              } else {
+                  return result_t(cluster::errc::no_leader_controller);
+              }
+          }
+      });
+
+    cluster::partition_balancer_overview_reply overview;
+    if (std::holds_alternative<cluster::partition_balancer_overview_reply>(
+          result)) {
+        overview = std::move(
+          std::get<cluster::partition_balancer_overview_reply>(result));
+    } else if (std::holds_alternative<model::node_id>(result)) {
+        auto node_id = std::get<model::node_id>(result);
+        auto rpc_result
+          = co_await _connections.local()
+              .with_node_client<
+                cluster::partition_balancer_rpc_client_protocol>(
+                _self,
+                ss::this_shard_id(),
+                node_id,
+                5s,
+                [](cluster::partition_balancer_rpc_client_protocol cp) {
+                    return cp.overview(
+                      cluster::partition_balancer_overview_request{},
+                      rpc::client_opts(5s));
+                });
+
+        if (rpc_result.has_error()) {
+            co_return rpc_result.error();
+        }
+        overview = std::move(rpc_result.value().data);
+    } else {
+        co_return std::get<cluster::errc>(result);
+    }
+
+    ss::chunked_fifo<model::ntp> ret;
+    auto it = overview.decommission_realloc_failures.find(node);
+    if (it == overview.decommission_realloc_failures.end()) {
+        co_return ret;
+    }
+    for (const auto& ntp : it->second) {
+        ret.push_back(ntp);
+    }
+    co_return ret;
+}
+
 ss::future<result<node_decommission_progress>>
 controller_api::get_node_decommission_progress(
   model::node_id id, model::timeout_clock::time_point timeout) {
@@ -417,6 +485,11 @@ controller_api::get_node_decommission_progress(
 
     if (states) {
         ret.current_reconfigurations = std::move(states.value());
+    }
+
+    auto alloc_failures = co_await get_decommission_allocation_failures(id);
+    if (alloc_failures) {
+        ret.allocation_failures = std::move(alloc_failures.value());
     }
 
     co_return ret;

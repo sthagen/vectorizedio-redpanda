@@ -102,7 +102,7 @@ Trim records from a JSON file
 				err := printDeleteRecordRequest(cmd.Context(), adm, o)
 				out.MaybeDie(err, "unable to print trimming request: %v", err)
 				fmt.Println()
-				confirmed, err := out.Confirm("Confirm trimming of the above offsets?")
+				confirmed, err := out.Confirm("Confirm deletion of all data before the new start offsets?")
 				out.MaybeDie(err, "unable to confirm: %v", err)
 				if !confirmed {
 					out.Exit("Trimming canceled.")
@@ -148,11 +148,17 @@ func parseOffsetArgs(ctx context.Context, adm *kadm.Client, topic, offset string
 			return nil, errors.New("invalid offset '@end'; use '--offset end' if you want to trim all")
 		}
 		listedOffsets, err = adm.ListOffsetsAfterMilli(ctx, startAt.UnixMilli(), topic)
+		if err == nil {
+			err = listedOffsets.Error()
+		}
 		if err != nil {
 			return nil, fmt.Errorf("unable to list offsets after milli %d: %v", startAt.UnixMilli(), err)
 		}
 	case offset == "end":
 		listedOffsets, err = adm.ListEndOffsets(ctx, topic)
+		if err == nil {
+			err = listedOffsets.Error()
+		}
 		if err != nil {
 			return nil, fmt.Errorf("unable to list end offset for topic %q: %v", topic, err)
 		}
@@ -165,6 +171,9 @@ func parseOffsetArgs(ctx context.Context, adm *kadm.Client, topic, offset string
 		// partition.
 		if len(partitions) == 0 {
 			topicDetails, err := adm.ListTopics(ctx, topic)
+			if err == nil {
+				err = topicDetails.Error()
+			}
 			if err != nil {
 				return nil, fmt.Errorf("unable to list topic %q metadata: %v", topic, err)
 			}

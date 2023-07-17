@@ -79,7 +79,8 @@ public:
       const remote_segment_path& path,
       const model::ntp& ntp,
       const segment_meta& meta,
-      retry_chain_node& parent);
+      retry_chain_node& parent,
+      partition_probe& probe);
 
     remote_segment(const remote_segment&) = delete;
     remote_segment(remote_segment&&) = delete;
@@ -263,6 +264,7 @@ private:
     model::offset _base_rp_offset;
     model::offset_delta _base_offset_delta;
     model::offset _max_rp_offset;
+    model::timestamp _base_timestamp;
 
     // The expected size according to the manifest entry for the segment
     size_t _size{0};
@@ -301,6 +303,7 @@ private:
 
     std::optional<segment_chunks> _chunks_api;
     std::optional<offset_index::coarse_index_t> _coarse_index;
+    partition_probe& _probe;
 
     friend class split_segment_into_chunk_range_consumer;
 };

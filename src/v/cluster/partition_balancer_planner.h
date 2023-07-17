@@ -67,12 +67,25 @@ public:
         actions_planned,
         waiting_for_maintenance_end,
         waiting_for_reports,
+        missing_sizes,
+    };
+    /**
+     * class describing a reason underlying partition replica set change
+     */
+    enum class change_reason {
+        rack_constraint_repair,
+        partition_count_rebalancing,
+        node_decommissioning,
+        node_unavailable,
+        disk_full,
     };
 
     struct plan_data {
         partition_balancer_violations violations;
         std::vector<ntp_reassignment> reassignments;
         std::vector<model::ntp> cancellations;
+        absl::flat_hash_map<model::node_id, absl::btree_set<model::ntp>>
+          decommission_realloc_failures;
         bool counts_rebalancing_finished = false;
         size_t failed_actions_count = 0;
         status status = status::empty;
@@ -97,7 +110,8 @@ private:
     static ss::future<> get_node_drain_actions(
       request_context&,
       const absl::flat_hash_set<model::node_id>&,
-      std::string_view reason);
+      change_reason reason);
+
     static ss::future<> get_rack_constraint_repair_actions(request_context&);
     static ss::future<> get_full_node_actions(request_context&);
     static ss::future<> get_counts_rebalancing_actions(request_context&);
@@ -108,6 +122,8 @@ private:
     planner_config _config;
     partition_balancer_state& _state;
     partition_allocator& _partition_allocator;
+
+    friend std::ostream& operator<<(std::ostream&, change_reason);
 };
 
 } // namespace cluster

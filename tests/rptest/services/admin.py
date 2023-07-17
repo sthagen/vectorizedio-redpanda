@@ -429,6 +429,21 @@ class Admin:
                              f"cloud_storage/lifecycle/{topic}/{revision}",
                              node=node)
 
+    def cloud_storage_trim(self, *, byte_limit: Optional[int],
+                           object_limit: Optional[int], node: ClusterNode):
+        path = "cloud_storage/cache/trim"
+        params = {}
+        if byte_limit is not None:
+            params['bytes'] = str(byte_limit)
+        if object_limit is not None:
+            params['objects'] = str(object_limit)
+
+        if params:
+            joined = "&".join([f"{k}={v}" for k, v in params.items()])
+            path = path + f"?{joined}"
+
+        return self._request("POST", path, node=node)
+
     def supports_feature(self, feature_name: str, nodes=None):
         """
         Returns true whether all nodes in 'nodes' support the given feature. If
@@ -1013,3 +1028,20 @@ class Admin:
         Get the CPU profile of a node.
         """
         return self._request("get", "debug/cpu_profile", node=node).json()
+
+    def get_local_offsets_translated(self,
+                                     offsets,
+                                     topic,
+                                     partition,
+                                     translate_to="kafka",
+                                     node=None):
+        """
+        Query offset translator to translate offsets from one type to another
+
+        Options for param "translate_to" are "kafka" and "redpanda"
+        """
+        return self._request(
+            "get",
+            f"debug/storage/offset_translator/kafka/{topic}/{partition}?translate_to={translate_to}",
+            node=node,
+            json=offsets).json()

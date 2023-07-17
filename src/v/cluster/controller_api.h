@@ -20,6 +20,7 @@
 #include "seastarx.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/sharded.hh>
 
 #include <absl/container/node_hash_map.h>
@@ -40,6 +41,7 @@ public:
       ss::sharded<rpc::connection_cache>&,
       ss::sharded<health_monitor_frontend>&,
       ss::sharded<members_table>&,
+      ss::sharded<partition_balancer_backend>&,
       ss::sharded<ss::abort_source>&);
 
     ss::future<result<std::vector<ntp_reconciliation_state>>>
@@ -88,8 +90,11 @@ public:
     std::optional<ss::shard_id> shard_for(const model::ntp& ntp) const;
 
 private:
-    ss::future<std::vector<controller_backend::delta_metadata>>
+    ss::future<ss::chunked_fifo<controller_backend::delta_metadata>>
       get_remote_core_deltas(model::ntp, ss::shard_id);
+
+    ss::future<result<ss::chunked_fifo<model::ntp>>>
+      get_decommission_allocation_failures(model::node_id);
 
     model::node_id _self;
     ss::sharded<controller_backend>& _backend;
@@ -98,6 +103,7 @@ private:
     ss::sharded<rpc::connection_cache>& _connections;
     ss::sharded<health_monitor_frontend>& _health_monitor;
     ss::sharded<members_table>& _members;
+    ss::sharded<partition_balancer_backend>& _partition_balancer;
     ss::sharded<ss::abort_source>& _as;
 };
 } // namespace cluster

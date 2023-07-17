@@ -130,6 +130,20 @@ remote_probe::remote_probe(
               "spillover_manifest_downloads",
               [this] { return get_spillover_manifest_downloads(); },
               sm::description("Number of spillover manifest downloads")),
+            sm::make_histogram(
+              "client_acquisition_latency",
+              [this] {
+                  return ssx::metrics::report_default_histogram(
+                    _client_acquisition_latency);
+              },
+              sm::description("Client acquisition latency histogram")),
+            sm::make_histogram(
+              "segment_download_latency",
+              [this] {
+                  return ssx::metrics::report_default_histogram(
+                    _segment_download_latency);
+              },
+              sm::description("Segment download latency histogram")),
           });
     }
 
@@ -206,6 +220,22 @@ remote_probe::remote_probe(
               "spillover_manifest_uploads_total",
               [this] { return get_spillover_manifest_uploads(); },
               sm::description("Successful spillover manifest uploads"),
+              {})
+              .aggregate({sm::shard_label}),
+            sm::make_gauge(
+              "spillover_manifests_materialized_count",
+              [&ms] { return ms.get_materialized_manifest_cache().size(); },
+              sm::description(
+                "How many spilled manifests are currently cached in memory"),
+              {})
+              .aggregate({sm::shard_label}),
+            sm::make_gauge(
+              "spillover_manifests_materialized_bytes",
+              [&ms] {
+                  return ms.get_materialized_manifest_cache().size_bytes();
+              },
+              sm::description("Bytes of memory used for spilled manifests "
+                              "currently cached in memory"),
               {})
               .aggregate({sm::shard_label}),
           });

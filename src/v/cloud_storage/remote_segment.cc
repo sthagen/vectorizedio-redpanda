@@ -96,6 +96,7 @@ public:
             auto dsi = std::make_unique<bounded_stream>(stream, bytes_to_read);
             auto stream_upto = ss::input_stream<char>{
               ss::data_source{std::move(dsi)}};
+            _segment._probe.chunk_size(bytes_to_read);
             co_await _segment.put_chunk_in_cache(
               reservation, std::move(stream_upto), start);
         }
@@ -165,7 +166,8 @@ remote_segment::remote_segment(
   const remote_segment_path& path,
   const model::ntp& ntp,
   const segment_meta& meta,
-  retry_chain_node& parent)
+  retry_chain_node& parent,
+  partition_probe& probe)
   : _api(r)
   , _cache(c)
   , _bucket(std::move(bucket))
@@ -178,6 +180,7 @@ remote_segment::remote_segment(
   , _base_offset_delta(std::clamp(
       meta.delta_offset, model::offset_delta(0), model::offset_delta::max()))
   , _max_rp_offset(meta.committed_offset)
+  , _base_timestamp(meta.base_timestamp)
   , _size(meta.size_bytes)
   , _rtc(&parent)
   , _ctxlog(cst_log, _rtc, generate_log_prefix(meta, ntp))
@@ -192,7 +195,8 @@ remote_segment::remote_segment(
   // segment in chunks at the same time. In the first case roughly half the
   // segment may be hydrated at a time.
   , _chunks_in_segment(
-      std::max(static_cast<uint64_t>(ceil(_size / _chunk_size)), 1UL)) {
+      std::max(static_cast<uint64_t>(ceil(_size / _chunk_size)), 1UL))
+  , _probe(probe) {
     if (
       meta.sname_format == segment_name_format::v3
       && meta.metadata_size_hint == 0) {
@@ -402,7 +406,8 @@ ss::future<uint64_t> remote_segment::put_segment_in_cache_and_create_index(
       get_base_rp_offset(),
       get_base_kafka_offset(),
       0,
-      remote_segment_sampling_step_bytes);
+      remote_segment_sampling_step_bytes,
+      _base_timestamp);
     auto [sparse, sput] = input_stream_fanout<2>(std::move(s), 1);
     auto parser = make_remote_segment_index_builder(
       get_ntp(),
@@ -523,7 +528,8 @@ ss::future<> remote_segment::do_hydrate_index() {
       _base_rp_offset,
       _base_rp_offset - _base_offset_delta,
       0,
-      remote_segment_sampling_step_bytes);
+      remote_segment_sampling_step_bytes,
+      _base_timestamp);
 
     auto result = co_await _api.download_index(
       _bucket, remote_segment_path{_index_path}, ix, local_rtc);
@@ -689,7 +695,8 @@ ss::future<bool> remote_segment::maybe_materialize_index() {
       _base_rp_offset,
       _base_rp_offset - _base_offset_delta,
       0,
-      remote_segment_sampling_step_bytes);
+      remote_segment_sampling_step_bytes,
+      _base_timestamp);
     if (auto cache_item = co_await _cache.get(path); cache_item.has_value()) {
         // The cache item is expected to be present if the segment is present
         // so it's very unlikely that we will call this method if there is no
@@ -965,9 +972,12 @@ ss::future<> remote_segment::hydrate_chunk(segment_chunk_range range) {
     const auto end = range.last_offset().value_or(_size - 1);
     auto consumer = split_segment_into_chunk_range_consumer{
       *this, std::move(range)};
+
+    auto measurement = _probe.chunk_hydration_latency();
     auto res = co_await _api.download_segment(
       _bucket, _path, std::move(consumer), rtc, std::make_pair(start, end));
     if (res != download_result::success) {
+        measurement->set_trace(false);
         throw download_exception{res, _path};
     }
 }
