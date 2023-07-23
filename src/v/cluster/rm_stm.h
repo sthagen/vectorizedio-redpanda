@@ -23,6 +23,7 @@
 #include "raft/logger.h"
 #include "raft/state_machine.h"
 #include "raft/types.h"
+#include "ssx/metrics.h"
 #include "storage/offset_translator_state.h"
 #include "storage/snapshot.h"
 #include "utils/available_promise.h"
@@ -221,13 +222,25 @@ public:
       model::producer_identity, model::tx_seq, model::timeout_clock::duration);
     ss::future<tx_errc> abort_tx(
       model::producer_identity, model::tx_seq, model::timeout_clock::duration);
-
+    /**
+     * Returns the next after the last one decided. If there are no ongoing
+     * transactions this will return next offset to be applied to the the stm.
+     */
     model::offset last_stable_offset();
     ss::future<fragmented_vector<rm_stm::tx_range>>
       aborted_transactions(model::offset, model::offset);
 
     model::offset max_collectible_offset() override {
-        return last_stable_offset();
+        const auto lso = last_stable_offset();
+        if (lso < model::offset{0}) {
+            return model::offset{};
+        }
+        /**
+         * Since the LSO may be equal to `_next` we must return offset which has
+         * already been decided and applied hence we subtract one from the last
+         * stable offset.
+         */
+        return model::prev_offset(lso);
     }
 
     storage::stm_type type() override {
@@ -965,7 +978,8 @@ private:
     prefix_logger _ctx_log;
     config::binding<uint64_t> _max_concurrent_producer_ids;
     mutex _clean_old_pids_mtx;
-    ss::metrics::metric_groups _metrics;
+    ssx::metrics::metric_groups _metrics
+      = ssx::metrics::metric_groups::make_internal();
 };
 
 struct fence_batch_data {

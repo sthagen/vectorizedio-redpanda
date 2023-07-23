@@ -1332,6 +1332,27 @@ ntp_archiver::schedule_single_upload(const upload_context& upload_ctx) {
     auto upload = upload_with_locks.candidate;
     auto locks = std::move(upload_with_locks.read_locks);
 
+    if (
+      upload.sources.empty()
+      && upload_ctx.upload_kind == segment_upload_kind::compacted
+      && model::offset{} != upload.final_offset) {
+        vlog(
+          _rtclog.warn,
+          "Upload skipped for range: {}-{} because these offsets lie inside "
+          "batches",
+          upload.starting_offset,
+          upload.final_offset);
+        co_return scheduled_upload{
+          .result = std::nullopt,
+          .inclusive_last_offset = upload.final_offset,
+          .meta = std::nullopt,
+          .name = std::nullopt,
+          .delta = std::nullopt,
+          .stop = ss::stop_iteration::yes,
+          .upload_kind = upload_ctx.upload_kind,
+        };
+    }
+
     if (upload.sources.empty()) {
         vlog(
           _rtclog.debug,
@@ -2041,7 +2062,7 @@ ss::future<> ntp_archiver::apply_archive_retention() {
     if (
       res.value().offset == model::offset{}
       || res.value().offset
-           == _manifest_view->stm_manifest().get_archive_start_offset()) {
+           <= _manifest_view->stm_manifest().get_archive_start_offset()) {
         co_return;
     }
 
@@ -2092,6 +2113,23 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
       "Garbage collecting archive segments in offest range [{}, {})",
       clean_offset,
       start_offset);
+
+    if (clean_offset == start_offset) {
+        vlog(
+          _rtclog.debug,
+          "Garbage collection in the archive not required as clean offset "
+          "equals the start offset ({})",
+          clean_offset);
+        co_return;
+    } else if (clean_offset > start_offset) {
+        vlog(
+          _rtclog.error,
+          "Garbage collection requested until offset {}, but start offset is "
+          "at {}. Skipping garbage collection.",
+          clean_offset,
+          start_offset);
+        co_return;
+    }
 
     model::offset new_clean_offset;
     // Value includes segments but doesn't include manifests
@@ -2162,9 +2200,11 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
     }
 
     // Drop out if we have no work to do, avoid doing things like the following
-    // manifest flushing unnecessarily.
+    // manifest flushing unnecessarily. This is potentially problematic since,
+    // we've already checked that the clean offset is greater than the start
+    // offset.
     if (objects_to_remove.empty() && manifests_to_remove.empty()) {
-        vlog(_rtclog.debug, "Nothing to remove in archive GC");
+        vlog(_rtclog.warn, "Nothing to remove in archive GC");
         co_return;
     }
 

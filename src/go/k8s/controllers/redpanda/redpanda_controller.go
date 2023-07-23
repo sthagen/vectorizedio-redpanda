@@ -75,6 +75,7 @@ type RedpandaReconciler struct {
 // +kubebuilder:rbac:groups=apps,namespace=default,resources=replicasets,verbs=get;list;watch;create;update;patch;delete
 
 // additional k8s resources required by flux
+// +kubebuilder:rbac:groups="",namespace=default,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,namespace=default,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,namespace=default,resources=roles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,namespace=default,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -131,6 +132,10 @@ func (r *RedpandaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Examine if the object is under deletion
 	if !rp.ObjectMeta.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, rp)
+	}
+
+	if !isRedpandaManaged(ctx, rp) {
+		return ctrl.Result{}, nil
 	}
 
 	rp, result, err := r.reconcile(ctx, rp)
@@ -482,4 +487,15 @@ func helmChartRequiresUpdate(template, chart *helmv2beta1.HelmChartTemplate) boo
 	default:
 		return false
 	}
+}
+
+func isRedpandaManaged(ctx context.Context, redpandaCluster *v1alpha1.Redpanda) bool {
+	log := ctrl.LoggerFrom(ctx).WithName("RedpandaReconciler.isRedpandaManaged")
+
+	managedAnnotationKey := v1alpha1.GroupVersion.Group + "/managed"
+	if managed, exists := redpandaCluster.Annotations[managedAnnotationKey]; exists && managed == NotManaged {
+		log.Info(fmt.Sprintf("management is disabled; to enable it, change the '%s' annotation to true or remove it", managedAnnotationKey))
+		return false
+	}
+	return true
 }

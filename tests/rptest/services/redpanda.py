@@ -57,6 +57,7 @@ from rptest.services.admin import Admin
 from rptest.services.redpanda_installer import RedpandaInstaller, VERSION_RE as RI_VERSION_RE, int_tuple as ri_int_tuple
 from rptest.services.rolling_restarter import RollingRestarter
 from rptest.services.storage import ClusterStorage, NodeStorage, NodeCacheStorage
+from rptest.services.storage_failure_injection import FailureInjectionConfig
 from rptest.services.utils import BadLogLines, NodeCrash
 from rptest.util import inject_remote_script, ssh_output_stderr, wait_until_result
 
@@ -157,6 +158,14 @@ PREV_VERSION_LOG_ALLOW_LIST = [
 
 # Path to the LSAN suppressions file
 LSAN_SUPPRESSIONS_FILE = "/opt/lsan_suppressions.txt"
+
+FAILURE_INJECTION_LOG_ALLOW_LIST = [
+    re.compile(
+        "Assert failure: .* filesystem error: Injected Failure: Input/output error"
+    ),
+    re.compile("assert - Backtrace below:"),
+    re.compile("finject - .* flush called concurrently with other operations")
+]
 
 
 class MetricSamples:
@@ -377,7 +386,8 @@ class SISettings:
                  cloud_storage_housekeeping_interval_ms: Optional[int] = None,
                  cloud_storage_spillover_manifest_max_segments: Optional[
                      int] = None,
-                 fast_uploads=False):
+                 fast_uploads=False,
+                 retention_local_strict=True):
         """
         :param fast_uploads: if true, set low upload intervals to help tests run
                              quickly when they wait for uploads to complete.
@@ -426,6 +436,7 @@ class SISettings:
         self.bypass_bucket_creation = bypass_bucket_creation
         self.cloud_storage_housekeeping_interval_ms = cloud_storage_housekeeping_interval_ms
         self.cloud_storage_spillover_manifest_max_segments = cloud_storage_spillover_manifest_max_segments
+        self.retention_local_strict = retention_local_strict
 
         if fast_uploads:
             self.cloud_storage_segment_max_upload_interval_sec = 10
@@ -564,6 +575,9 @@ class SISettings:
         if self.cloud_storage_spillover_manifest_max_segments:
             conf[
                 'cloud_storage_spillover_manifest_max_segments'] = self.cloud_storage_spillover_manifest_max_segments
+
+        conf['retention_local_strict'] = self.retention_local_strict
+
         return conf
 
     def set_expected_damage(self, damage_types: set[str]):
@@ -661,6 +675,9 @@ class LoggingConfig:
         self.default_level = default_level
         self.logger_levels = logger_levels
 
+    def enable_finject_logging(self):
+        self.logger_levels["finject"] = "trace"
+
     def to_args(self) -> str:
         """
         Generate redpanda CLI arguments for this logging config
@@ -749,6 +766,8 @@ class RedpandaServiceBase(Service):
 
     # Where we put a compressed binary if saving it after failure
     EXECUTABLE_SAVE_PATH = "/tmp/redpanda.gz"
+
+    FAILURE_INJECTION_CONFIG_PATH = "/etc/redpanda/failure_injection_config.json"
 
     # When configuring multiple listeners for testing, a secondary port to use
     # instead of the default.
@@ -1085,10 +1104,16 @@ class RedpandaServiceBase(Service):
 
 
 class RedpandaServiceK8s(RedpandaServiceBase):
-    def __init__(self, context, num_brokers, cluster_spec=None):
+    def __init__(self,
+                 context,
+                 num_brokers,
+                 *,
+                 cluster_spec=None,
+                 superuser: Optional[SaslCredentials] = None):
         super(RedpandaServiceK8s, self).__init__(context,
                                                  num_brokers,
-                                                 cluster_spec=cluster_spec)
+                                                 cluster_spec=cluster_spec,
+                                                 superuser=superuser)
         self._trim_logs = False
         self._helm = None
         self._kubectl = None
@@ -1274,7 +1299,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                 self._token = j['access_token']
             return self._token
 
-        def _http_get(self, endpoint, **kwargs):
+        def _http_get(self, endpoint='', **kwargs):
             token = self._get_token()
             headers = {
                 'Authorization': f'Bearer {token}',
@@ -1286,19 +1311,21 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             resp.raise_for_status()
             return resp.json()
 
-        def _http_post(self, endpoint, **kwargs):
+        def _http_post(self, base_url=None, endpoint='', **kwargs):
             token = self._get_token()
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Accept': 'application/json'
             }
-            resp = requests.post(f'{self._api_url}{endpoint}',
+            if base_url is None:
+                base_url = self._api_url
+            resp = requests.post(f'{base_url}{endpoint}',
                                  headers=headers,
                                  **kwargs)
             resp.raise_for_status()
             return resp.json()
 
-        def _http_delete(self, endpoint, **kwargs):
+        def _http_delete(self, endpoint='', **kwargs):
             token = self._get_token()
             headers = {
                 'Authorization': f'Bearer {token}',
@@ -1314,14 +1341,15 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             name = f'rp-ducktape-ns-{self._unique_id}'  # e.g. rp-ducktape-ns-3b36f516
             self._logger.debug(f'creating namespace name {name}')
             body = {'name': name}
-            r = self._http_post('/api/v1/namespaces', json=body)
+            r = self._http_post(endpoint='/api/v1/namespaces', json=body)
             self._logger.debug(f'created namespaceUuid {r["id"]}')
             return r['id']
 
         def _cluster_ready(self, namespace_uuid, name):
             self._logger.debug(f'checking readiness of cluster {name}')
             params = {'namespaceUuid': namespace_uuid}
-            clusters = self._http_get('/api/v1/clusters', params=params)
+            clusters = self._http_get(endpoint='/api/v1/clusters',
+                                      params=params)
             for c in clusters:
                 if c['name'] == name:
                     if c['state'] == 'ready':
@@ -1338,7 +1366,8 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             """
 
             params = {'namespaceUuid': namespace_uuid}
-            clusters = self._http_get('/api/v1/clusters', params=params)
+            clusters = self._http_get(endpoint='/api/v1/clusters',
+                                      params=params)
             for c in clusters:
                 if c['name'] == name:
                     return c['id']
@@ -1351,7 +1380,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             """
 
             versions = self._http_get(
-                '/api/v1/clusters-resources/install-pack-versions')
+                endpoint='/api/v1/clusters-resources/install-pack-versions')
             latest_version = ''
             for v in versions:
                 if v['certified'] and v['version'] > latest_version:
@@ -1370,8 +1399,8 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             """
 
             params = {'cluster_type': cluster_type}
-            regions = self._http_get('/api/v1/clusters-resources/regions',
-                                     params=params)
+            regions = self._http_get(
+                endpoint='/api/v1/clusters-resources/regions', params=params)
             for r in regions[provider]:
                 if r['name'] == region:
                     return r['id']
@@ -1399,14 +1428,16 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                 'region': region,
                 'install_pack_version': install_pack_ver
             }
-            products = self._http_get('/api/v1/clusters-resources/products',
-                                      params=params)
+            products = self._http_get(
+                endpoint='/api/v1/clusters-resources/products', params=params)
             for p in products:
                 if p['redpandaConfigProfileName'] == config_profile_name:
                     return p['id']
             return None
 
-        def create(self, config_profile_name='tier-1-aws'):
+        def create(self,
+                   config_profile_name: str = 'tier-1-aws',
+                   superuser: Optional[SaslCredentials] = None) -> str:
             """Create a cloud cluster and a new namespace; block until cluster is finished creating.
 
             :param config_profile_name: config profile name, default 'tier-1-aws'
@@ -1465,7 +1496,8 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
 
             self._logger.debug(f'body: {json.dumps(body)}')
 
-            r = self._http_post('/api/v1/workflows/network-cluster', json=body)
+            r = self._http_post(endpoint='/api/v1/workflows/network-cluster',
+                                json=body)
 
             self._logger.info(
                 f'waiting for creation of cluster {name} namespaceUuid {r["namespaceUuid"]}, checking every {self.CHECK_BACKOFF_SEC} seconds'
@@ -1479,6 +1511,13 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                 f'Unable to deterimine readiness of cloud cluster {name}')
             self._cluster_id = self._get_cluster_id(namespace_uuid, name)
 
+            if superuser is not None:
+                self._logger.debug(
+                    f'super username: {superuser.username}, algorithm: {superuser.algorithm}'
+                )
+                self._create_user(superuser)
+                self._create_acls(superuser.username)
+
             return self._cluster_id
 
         def delete(self):
@@ -1491,29 +1530,99 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
                     f'cluster_id is empty, unable to delete cluster')
                 return
 
-            resp = self._http_get(f'/api/v1/clusters/{self.cluster_id}')
+            resp = self._http_get(
+                endpoint=f'/api/v1/clusters/{self.cluster_id}')
             namespace_uuid = resp['namespaceUuid']
 
-            resp = self._http_delete(f'/api/v1/clusters/{self.cluster_id}')
+            resp = self._http_delete(
+                endpoint=f'/api/v1/clusters/{self.cluster_id}')
             self._logger.debug(f'resp: {json.dumps(resp)}')
             self._cluster_id = ''
 
             # skip namespace deletion to avoid error because cluster delete not complete yet
             if self._delete_namespace:
                 resp = self._http_delete(
-                    f'/api/v1/namespaces/{namespace_uuid}')
+                    endpoint=f'/api/v1/namespaces/{namespace_uuid}')
                 self._logger.debug(f'resp: {json.dumps(resp)}')
 
-    def __init__(self, context, num_brokers, tier_name: str):
-        """
-        Initialize a RedpandaServiceCloud object.
+        def _create_user(self, user: SaslCredentials):
+            """Create SASL user
+            """
+
+            cluster = self._http_get(
+                endpoint=f'/api/v1/clusters/{self._cluster_id}')
+            base_url = cluster['status']['listeners']['redpandaConsole'][
+                'default']['urls'][0]
+            payload = {
+                'mechanism': user.algorithm,
+                'password': user.password,
+                'username': user.username,
+            }
+            # use the console api url to create sasl users; uses the same auth token
+            return self._http_post(base_url=base_url,
+                                   endpoint='/api/users',
+                                   json=payload)
+
+        def _create_acls(self, username):
+            """Create ACLs for user
+            """
+
+            cluster = self._http_get(
+                endpoint=f'/api/v1/clusters/{self._cluster_id}')
+            base_url = cluster['status']['listeners']['redpandaConsole'][
+                'default']['urls'][0]
+            for rt in ('Topic', 'Group', 'TransactionalID'):
+                payload = {
+                    'host': '*',
+                    'operation': 'All',
+                    'permissionType': 'Allow',
+                    'principal': f'User:{username}',
+                    'resourceName': '*',
+                    'resourcePatternType': 'Literal',
+                    'resourceType': rt,
+                }
+                self._http_post(base_url=base_url,
+                                endpoint='/api/acls',
+                                json=payload)
+
+            payload = {
+                'host': '*',
+                'operation': 'All',
+                'permissionType': 'Allow',
+                'principal': f'User:{username}',
+                'resourceName': 'kafka-cluster',
+                'resourcePatternType': 'Literal',
+                'resourceType': 'Cluster',
+            }
+            self._http_post(base_url=base_url,
+                            endpoint='/api/acls',
+                            json=payload)
+
+        def get_broker_address(self):
+            cluster = self._http_get(
+                endpoint=f'/api/v1/clusters/{self._cluster_id}')
+            return cluster['status']['listeners']['kafka']['default']['urls'][
+                0]
+
+    def __init__(self,
+                 context,
+                 num_brokers,
+                 *,
+                 superuser: Optional[SaslCredentials] = None,
+                 tier_name: Optional[str] = None):
+        """Initialize a RedpandaServiceCloud object.
 
         :param context: test context object
         :param num_brokers: ignored because Redpanda Cloud will launch the number of brokers necessary to satisfy the product needs
+        :param superuser:  if None, then create SUPERUSER_CREDENTIALS with full acls
+        :param tier_name:  the redpanda cloud tier name to create
         """
 
         super(RedpandaServiceCloud,
-              self).__init__(context, None, cluster_spec=ClusterSpec.empty())
+              self).__init__(context,
+                             None,
+                             cluster_spec=ClusterSpec.empty(),
+                             superuser=superuser)
         if num_brokers is not None:
             self.logger.info(
                 f'num_brokers is {num_brokers}, but setting to None for cloud')
@@ -1550,7 +1659,10 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         pass
 
     def start(self, **kwargs):
-        cluster_id = self._cloud_cluster.create()
+        superuser = None
+        if not self._skip_create_superuser:
+            superuser = self._superuser
+        cluster_id = self._cloud_cluster.create(superuser=superuser)
         remote_uri = f'redpanda@{cluster_id}-agent'
         self._kubectl = KubectlTool(self,
                                     remote_uri=remote_uri,
@@ -1573,6 +1685,9 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
 
     def node_id(self, node, force_refresh=False, timeout_sec=30):
         pass
+
+    def brokers(self, limit=None, listener: str = "dnslistener") -> str:
+        return self._cloud_cluster.get_broker_address()
 
 
 class RedpandaService(RedpandaServiceBase):
@@ -1607,6 +1722,8 @@ class RedpandaService(RedpandaServiceBase):
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
         self._pandaproxy_config = pandaproxy_config
         self._schema_registry_config = schema_registry_config
+        self._failure_injection_enabled = False
+        self._tolerate_crashes = False
 
         if node_ready_timeout_s is None:
             node_ready_timeout_s = RedpandaService.DEFAULT_NODE_READY_TIMEOUT_SEC
@@ -2069,6 +2186,19 @@ class RedpandaService(RedpandaServiceBase):
 
         node.account.ssh(cmd)
 
+    def check_node(self, node):
+        pid = self.redpanda_pid(node)
+        if not pid:
+            self.logger.warn(f"No redpanda PIDs found on {node.name}")
+            return False
+
+        if not node.account.exists(f"/proc/{pid}"):
+            self.logger.warn(f"PID {pid} (node {node.name}) dead")
+            return False
+
+        # fall through
+        return True
+
     def all_up(self):
         def check_node(node):
             pid = self.redpanda_pid(node)
@@ -2103,7 +2233,7 @@ class RedpandaService(RedpandaServiceBase):
             r = fn()
             if not r and time.time() > t_initial + grace_period:
                 # Check the cluster is up before waiting + retrying
-                assert self.all_up()
+                assert self.all_up() or self._tolerate_crashes
             return r
 
         wait_until(wrapped,
@@ -2570,7 +2700,12 @@ class RedpandaService(RedpandaServiceBase):
                         (node, "Redpanda process unexpectedly stopped"))
 
         if crashes:
-            raise NodeCrash(crashes)
+            if self._tolerate_crashes:
+                self.logger.warn(
+                    f"Detected crashes, but RedpandaService is configured to allow them: {crashes}"
+                )
+            else:
+                raise NodeCrash(crashes)
 
     def cloud_storage_diagnostics(self):
         """
@@ -3036,7 +3171,7 @@ class RedpandaService(RedpandaServiceBase):
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
 
-    def redpanda_pid(self, node):
+    def redpanda_pid(self, node, timeout=None):
         try:
             cmd = "pgrep --list-full --exact redpanda"
             for line in node.account.ssh_capture(cmd,
@@ -3179,6 +3314,11 @@ class RedpandaService(RedpandaServiceBase):
                 "Setting custom cluster configuration options: {}".format(
                     self._extra_rp_conf))
             conf.update(self._extra_rp_conf)
+
+        if cur_ver != RedpandaInstaller.HEAD and cur_ver < (23, 2, 1):
+            # this configuration property was introduced in 23.2, ensure
+            # it doesn't appear in older configurations
+            conf.pop('retention_local_strict', None)
 
         if cur_ver != RedpandaInstaller.HEAD and cur_ver < (22, 2, 1):
             # this configuration property was introduced in 22.2.1, ensure
@@ -3648,6 +3788,17 @@ class RedpandaService(RedpandaServiceBase):
         self.logger.warn(f"{self.COV_KEY} should be one of 'ON', or 'OFF'")
         return False
 
+    def count_log_node(self, node: ClusterNode, pattern: str):
+        accum = 0
+        for line in node.account.ssh_capture(
+                f"grep \"{pattern}\" {RedpandaService.STDOUT_STDERR_CAPTURE} || true",
+                timeout_sec=60):
+            # We got a match
+            self.logger.debug(f"Found {pattern} on node {node.name}: {line}")
+            accum += 1
+
+        return accum
+
     def search_log_node(self, node: ClusterNode, pattern: str):
         for line in node.account.ssh_capture(
                 f"grep \"{pattern}\" {RedpandaService.STDOUT_STDERR_CAPTURE} || true",
@@ -3925,6 +4076,44 @@ class RedpandaService(RedpandaServiceBase):
     def set_expected_controller_records(self, max_records: Optional[int]):
         self._expect_max_controller_records = max_records
 
+    def set_up_failure_injection(self, finject_cfg: FailureInjectionConfig,
+                                 enabled: bool, nodes: list[ClusterNode],
+                                 tolerate_crashes: bool):
+        """
+        Deploy the given failure injection configuration to the
+        requested nodes. Should be called before
+        `RedpandaService.start`.
+        """
+        tmp_file = "/tmp/failure_injection_config.json"
+        finject_cfg.write_to_file(tmp_file)
+        for node in nodes:
+            node.account.mkdirs(
+                os.path.dirname(RedpandaService.FAILURE_INJECTION_CONFIG_PATH))
+            node.account.copy_to(tmp_file,
+                                 RedpandaService.FAILURE_INJECTION_CONFIG_PATH)
+
+            self._extra_node_conf[node].update({
+                "storage_failure_injection_enabled":
+                enabled,
+                "storage_failure_injection_config_path":
+                RedpandaService.FAILURE_INJECTION_CONFIG_PATH
+            })
+
+        # Disable segment size jitter in order to get more deterministic
+        # failure injection.
+        self.add_extra_rp_conf({"log_segment_size_jitter_percent": 0})
+
+        # This flag prevents RedpandaService from asserting out when it
+        # detects that a Redpanda node has crashed. See
+        # `RedpandaService.wait_until`.
+        self._failure_injection_enabled = True
+
+        self._tolerate_crashes = tolerate_crashes
+
+        self._log_config.enable_finject_logging()
+
+        self.logger.info(f"Set up failure injection config for nodes: {nodes}")
+
     def validate_controller_log(self):
         """
         This method is for use at end of tests, to detect issues that might
@@ -4071,7 +4260,9 @@ def make_redpanda_service(context: TestContext,
             context.logger.info(
                 f"extra_rp_conf is ignored with RedpandaServiceCloud")
 
-        service = RedpandaServiceCloud(context, num_brokers, cloud_tier.value,
+        service = RedpandaServiceCloud(context,
+                                       num_brokers,
+                                       tier_name=cloud_tier.value,
                                        **kwargs)
 
     else:

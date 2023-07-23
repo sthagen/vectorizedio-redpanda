@@ -43,8 +43,8 @@ class LogStorageTargetSizeTest(RedpandaTest):
 
     @cluster(num_nodes=4)
     @matrix(log_segment_size=[1024 * 1024, 100 * 1024 * 1024],
-            advisory=[True, False])
-    def streaming_cache_test(self, log_segment_size, advisory):
+            strict=[True, False])
+    def size_within_target_threshold_test(self, log_segment_size, strict):
         if self.redpanda.dedicated_nodes:
             partition_count = 64
             rate_limit_bps = int(120E6)
@@ -91,22 +91,24 @@ class LogStorageTargetSizeTest(RedpandaTest):
             'cloud_storage_manifest_max_upload_interval_sec':
             self.manifest_upload_interval,
             'retention_local_trim_interval':
-            self.retention_local_trim_interval,
+            self.retention_local_trim_interval * 1000,
             'retention_local_target_capacity_bytes': target_size,
-            'retention_local_is_advisory': advisory,
+            'disk_reservation_percent': 0,
+            'retention_local_target_capacity_percent': 100,
         }
 
-        # when local retention is advisory, data can expand past the local
+        # when local retention is not strict, data can expand past the local
         # retention and this expanded data will be subject to reclaim first in
         # the eviction policy. reduce the expiration age from default 24 hours
         # to 30 seconds in order to make it more likely that we are testing this.
-        if advisory:
+        if not strict:
             extra_rp_conf.update({
                 'retention_local_target_ms_default':
                 30 * 1000,
             })
 
         si_settings = SISettings(test_context=self.test_context,
+                                 retention_local_strict=strict,
                                  log_segment_size=log_segment_size)
         self.redpanda.set_extra_rp_conf(extra_rp_conf)
         self.redpanda.set_si_settings(si_settings)

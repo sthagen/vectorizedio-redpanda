@@ -6,10 +6,13 @@
 # As of the Change Date specified in that file, in accordance with
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
+import requests
 from rptest.services.cluster import cluster
 from rptest.clients.types import TopicSpec
 from rptest.tests.end_to_end import EndToEndTest
+from rptest.clients.rpk import RpkTool
 from ducktape.mark import matrix
+from ducktape.utils.util import wait_until
 from random import shuffle
 import time
 from rptest.tests.partition_movement import PartitionMovementMixin
@@ -49,10 +52,10 @@ class PartitionForceReconfigurationTest(EndToEndTest, PartitionMovementMixin):
                 f"Leaderless partitions: {leaderless_parts}")
             return ntp in leaderless_parts
 
-        self.redpanda.wait_until(no_leader,
-                                 timeout_sec=30,
-                                 backoff_sec=1,
-                                 err_msg="Partition has a leader")
+        wait_until(no_leader,
+                   timeout_sec=30,
+                   backoff_sec=1,
+                   err_msg="Partition has a leader")
 
     def _alive_nodes(self):
         return [n.account.hostname for n in self.redpanda.started_nodes()]
@@ -80,15 +83,42 @@ class PartitionForceReconfigurationTest(EndToEndTest, PartitionMovementMixin):
         self._wait_until_no_leader()
         return (killed, alive)
 
+    def _do_force_reconfiguration(self, replicas):
+        try:
+            self.redpanda._admin.force_set_partition_replicas(
+                topic=self.topic, partition=0, replicas=replicas)
+            return True
+        except requests.exceptions.RetryError:
+            return False
+        except requests.exceptions.ConnectionError:
+            return False
+        except requests.exceptions.HTTPError:
+            return False
+
     def _force_reconfiguration(self, new_replicas):
         replicas = [
             dict(node_id=replica.node_id, core=replica.core)
             for replica in new_replicas
         ]
         self.redpanda.logger.info(f"Force reconfiguring to: {replicas}")
-        self.redpanda._admin.force_set_partition_replicas(topic=self.topic,
-                                                          partition=0,
-                                                          replicas=replicas)
+        self.redpanda.wait_until(
+            lambda: self._do_force_reconfiguration(replicas=replicas),
+            timeout_sec=60,
+            backoff_sec=2,
+            err_msg=f"Unable to force reconfigure {self.topic}/0 to {replicas}"
+        )
+
+    def _start_consumer(self):
+        self.start_consumer()
+        # Wait for all consumer offsets partitions to have a stable leadership.
+        # With lost nodes on debug builds, this seems to take time to converge.
+        for part in range(0, 16):
+            self.redpanda._admin.await_stable_leader(
+                topic="__consumer_offsets",
+                partition=part,
+                timeout_s=30,
+                backoff_s=2,
+                hosts=self._alive_nodes())
 
     @cluster(num_nodes=9)
     @matrix(acks=[-1, 1],
@@ -113,7 +143,7 @@ class PartitionForceReconfigurationTest(EndToEndTest, PartitionMovementMixin):
                                                  replication=len(alive),
                                                  hosts=self._alive_nodes())
 
-        self.start_consumer()
+        self._start_consumer()
         if controller_snapshots:
             # Wait for few seconds to make sure snapshots
             # happen.
