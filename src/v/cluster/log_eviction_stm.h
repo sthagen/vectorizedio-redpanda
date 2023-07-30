@@ -21,6 +21,7 @@
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/queue.hh>
 #include <seastar/util/log.hh>
 
 namespace cluster {
@@ -42,8 +43,7 @@ class consensus;
  * stm will be searching for. Upon processing of this record a new snapshot will
  * be written which may also trigger deletion of data on disk.
  */
-class log_eviction_stm final
-  : public persisted_stm<kvstore_backed_stm_snapshot> {
+class log_eviction_stm : public persisted_stm<kvstore_backed_stm_snapshot> {
 public:
     using offset_result = result<model::offset, std::error_code>;
     log_eviction_stm(
@@ -108,13 +108,15 @@ protected:
 
     ss::future<stm_snapshot> take_snapshot() override;
 
+    virtual ss::future<model::offset> storage_eviction_event();
+
 private:
     void increment_start_offset(model::offset);
     bool should_process_evict(model::offset);
 
     ss::future<> monitor_log_eviction();
     ss::future<> do_write_raft_snapshot(model::offset);
-    ss::future<> write_raft_snapshots_in_background();
+    ss::future<> handle_log_eviction_events();
     ss::future<> apply(model::record_batch) override;
     ss::future<> handle_raft_snapshot() override;
 
@@ -124,15 +126,20 @@ private:
       std::optional<std::reference_wrapper<ss::abort_source>> as);
 
 private:
-    ss::logger& _logger;
     ss::abort_source& _as;
+
+    // Offset we are able to truncate based on local retention policy, as
+    // signaled by the storage layer. This value is not maintained via the
+    // persisted_stm and may be different across replicas.
     model::offset _storage_eviction_offset;
+
+    // Offset corresponding to a delete-records request from the user. This
+    // value is maintained via the persisted_stm and is identical on every
+    // replica.
     model::offset _delete_records_eviction_offset;
 
-    /// Signaled when a snapshot should be taken, and data deleted
-    ss::condition_variable _reap_condition;
-    /// To maintain backpressure on snapshot writes from storage
-    raft::offset_monitor _last_snapshot_monitor;
+    // Should be signaled every time either of the above offsets are updated.
+    ss::condition_variable _has_pending_truncation;
 };
 
 } // namespace cluster

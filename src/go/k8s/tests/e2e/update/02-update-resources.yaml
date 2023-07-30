@@ -5,4 +5,6 @@ metadata:
 spec:
   resources:
     requests:
-      memory: 99M
+      memory: 2Gi
+    limits:
+      memory: 2Gi

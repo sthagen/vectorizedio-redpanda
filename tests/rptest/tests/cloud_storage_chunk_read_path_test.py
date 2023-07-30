@@ -78,9 +78,23 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
         hit a target size of zero irrespective of what kind of content we promoted.
         """
         admin = Admin(self.redpanda)
-        self.redpanda.for_nodes(
-            self.redpanda.nodes, lambda n: admin.cloud_storage_trim(
-                byte_limit=0, object_limit=0, node=n))
+        trim_pending = {node.name: node for node in self.redpanda.nodes}
+
+        def trim_done():
+            self.redpanda.for_nodes(
+                trim_pending.values(), lambda node: admin.cloud_storage_trim(
+                    byte_limit=0, object_limit=0, node=node))
+            for ns in self.redpanda.storage().nodes:
+                if ns.cache.objects <= 1 and ns.name in trim_pending:
+                    trim_pending.pop(ns.name)
+            self.logger.debug(
+                f'nodes with more than one cache entry: {trim_pending}')
+            return len(trim_pending) == 0
+
+        wait_until(trim_done,
+                   timeout_sec=60,
+                   backoff_sec=10,
+                   err_msg=f'Nodes {trim_pending} have extra entries in cache')
 
         for node_storage in self.redpanda.storage().nodes:
             assert node_storage.cache is not None, f"Node {node_storage.name} has no cache stats"
@@ -325,7 +339,16 @@ class CloudStorageChunkReadTest(PreallocNodesTest):
 
         self._trim_and_verify()
 
-    @cluster(num_nodes=4, log_allow_list=["Exceeded cache size limit"])
+    @cluster(
+        num_nodes=4,
+        log_allow_list=[
+            "Exceeded cache size limit",
+            # Ignore trim related errors for small cache, expected
+            # due to part files being present when exhaustive trim
+            # runs, and being converted to full chunk files by the
+            # time trim gets to deleting them.
+            "failed to free sufficient space in exhaustive trim"
+        ])
     def test_read_when_cache_smaller_than_segment_size(self):
         self.si_settings.cloud_storage_cache_size = 1048576 * 4
         self.redpanda.set_si_settings(self.si_settings)

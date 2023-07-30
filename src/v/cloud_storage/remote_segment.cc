@@ -1334,16 +1334,16 @@ remote_segment_batch_reader::read_some(
         if (
           _bytes_consumed != 0 && _bytes_consumed == new_bytes_consumed.value()
           && !_config.over_budget) {
-            auto context = fmt_with_ctx(
-              fmt::format,
+            vlog(
+              _ctxlog.error,
               "segment_reader is stuck, segment ntp: {}, _cur_rp_offset: {}, "
-              "_bytes_consumed: "
-              "{}",
+              "_bytes_consumed: {}, parser error state: {}",
               _seg->get_ntp(),
               _cur_rp_offset,
-              _bytes_consumed);
-            throw stuck_reader_exception{
-              _cur_rp_offset, _bytes_consumed, context};
+              _bytes_consumed,
+              _parser->error());
+            _is_unexpected_eof = true;
+            co_return ss::circular_buffer<model::record_batch>{};
         }
         _bytes_consumed = new_bytes_consumed.value();
     }
