@@ -106,6 +106,7 @@ class RpkGroup(typing.NamedTuple):
     state: str
     balancer: str
     members: int
+    total_lag: int
     partitions: list[RpkGroupPartition]
 
 
@@ -227,6 +228,11 @@ class RpkTool:
         self._sasl_mechanism = sasl_mechanism
         self._tls_cert = tls_cert
         self._tls_enabled = tls_enabled
+
+        # if testing redpanda cloud, override with default superuser
+        if hasattr(redpanda, 'GLOBAL_CLOUD_CLUSTER_CONFIG'):
+            self._username, self._password, self._sasl_mechanism = redpanda._superuser
+            self._tls_enabled = True
 
     def create_topic(self, topic, partitions=1, replicas=None, config=None):
         def create_topic():
@@ -639,7 +645,7 @@ class RpkTool:
             try:
                 out = self._run_group(cmd)
             except RpkException as e:
-                if "COORDINATOR_NOT_AVAILABLE" in e.msg:
+                if "COORDINATOR_NOT_AVAILABLE" in e.msg + e.stderr:
                     # Transient, return None to retry
                     return None
                 elif "NOT_COORDINATOR" in e.msg:
@@ -666,8 +672,9 @@ class RpkTool:
             state = parse_field("STATE", lines[2])
             balancer = parse_field("BALANCER", lines[3])
             members = parse_field("MEMBERS", lines[4])
+            total_lag = parse_field("TOTAL-LAG", lines[5])
             partitions = []
-            for l in lines[5:]:
+            for l in lines[6:]:
                 #skip header line
                 if l.startswith("TOPIC") or len(l) < 2:
                     continue
@@ -683,7 +690,8 @@ class RpkTool:
                             state=state,
                             balancer=balancer,
                             members=int(members),
-                            partitions=partitions)
+                            partitions=partitions,
+                            total_lag=int(total_lag))
 
         attempts = 10
         rpk_group = None
@@ -936,8 +944,8 @@ class RpkTool:
         return f"{rp_install_path_root}/bin/rpk"
 
     def cluster_maintenance_enable(self, node, wait=False):
-        node_id = self._redpanda.idx(node) if isinstance(node,
-                                                         ClusterNode) else node
+        node_id = self._redpanda.node_id(node) if isinstance(
+            node, ClusterNode) else node
         cmd = [
             self._rpk_binary(), "--api-urls",
             self._admin_host(), "cluster", "maintenance", "enable",
@@ -948,8 +956,8 @@ class RpkTool:
         return self._execute(cmd)
 
     def cluster_maintenance_disable(self, node):
-        node_id = self._redpanda.idx(node) if isinstance(node,
-                                                         ClusterNode) else node
+        node_id = self._redpanda.node_id(node) if isinstance(
+            node, ClusterNode) else node
         cmd = [
             self._rpk_binary(), "--api-urls",
             self._admin_host(), "cluster", "maintenance", "disable",

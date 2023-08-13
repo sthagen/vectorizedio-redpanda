@@ -64,6 +64,47 @@ spec:
                       Helm action. Defaults to '15m0s'.
                     pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
                     type: string
+                  upgrade:
+                    description: Upgrade contains the details for handling upgrades
+                      including failures
+                    properties:
+                      cleanupOnFail:
+                        type: boolean
+                      force:
+                        type: boolean
+                      preserveValues:
+                        type: boolean
+                      remediation:
+                        description: UpgradeRemediation holds the configuration for
+                          Helm upgrade remediation.
+                        properties:
+                          ignoreTestFailures:
+                            description: IgnoreTestFailures tells the controller to
+                              skip remediation when the Helm tests are run after an
+                              upgrade action but fail. Defaults to 'Test.IgnoreFailures'.
+                            type: boolean
+                          remediateLastFailure:
+                            description: RemediateLastFailure tells the controller
+                              to remediate the last failure, when no retries remain.
+                              Defaults to 'false' unless 'Retries' is greater than
+                              0.
+                            type: boolean
+                          retries:
+                            description: Retries is the number of retries that should
+                              be attempted on failures before bailing. Remediation,
+                              using 'Strategy', is performed between each attempt.
+                              Defaults to '0', a negative integer equals to unlimited
+                              retries.
+                            type: integer
+                          strategy:
+                            description: Strategy to use for failure remediation.
+                              Defaults to 'rollback'.
+                            enum:
+                            - rollback
+                            - uninstall
+                            type: string
+                        type: object
+                    type: object
                 type: object
               clusterSpec:
                 description: ClusterSpec defines the values to use in the cluster
@@ -234,12 +275,7 @@ spec:
                                       type: boolean
                                     requireClientAuth:
                                       type: boolean
-                                  required:
-                                  - requireClientAuth
                                   type: object
-                              required:
-                              - advertisedPorts
-                              - port
                               type: object
                             type: object
                           port:
@@ -254,12 +290,7 @@ spec:
                                 type: boolean
                               requireClientAuth:
                                 type: boolean
-                            required:
-                            - requireClientAuth
                             type: object
-                        required:
-                        - external
-                        - port
                         type: object
                       http:
                         description: HTTP is a top level field of the values file`
@@ -287,12 +318,7 @@ spec:
                                       type: boolean
                                     requireClientAuth:
                                       type: boolean
-                                  required:
-                                  - requireClientAuth
                                   type: object
-                              required:
-                              - advertisedPorts
-                              - port
                               type: object
                             type: object
                           kafkaEndpoint:
@@ -309,14 +335,7 @@ spec:
                                 type: boolean
                               requireClientAuth:
                                 type: boolean
-                            required:
-                            - requireClientAuth
                             type: object
-                        required:
-                        - enabled
-                        - external
-                        - kafkaEndpoint
-                        - port
                         type: object
                       kafka:
                         description: Kafka is a top level field of the values file
@@ -342,12 +361,7 @@ spec:
                                       type: boolean
                                     requireClientAuth:
                                       type: boolean
-                                  required:
-                                  - requireClientAuth
                                   type: object
-                              required:
-                              - advertisedPorts
-                              - port
                               type: object
                             type: object
                           port:
@@ -362,12 +376,7 @@ spec:
                                 type: boolean
                               requireClientAuth:
                                 type: boolean
-                            required:
-                            - requireClientAuth
                             type: object
-                        required:
-                        - external
-                        - port
                         type: object
                       rpc:
                         description: RPC is a top level field of the values file
@@ -384,11 +393,7 @@ spec:
                                 type: boolean
                               requireClientAuth:
                                 type: boolean
-                            required:
-                            - requireClientAuth
                             type: object
-                        required:
-                        - port
                         type: object
                       schemaRegistry:
                         description: SchemaRegistry is a top level field of the values
@@ -417,12 +422,7 @@ spec:
                                       type: boolean
                                     requireClientAuth:
                                       type: boolean
-                                  required:
-                                  - requireClientAuth
                                   type: object
-                              required:
-                              - advertisedPorts
-                              - port
                               type: object
                             type: object
                           kafkaEndpoint:
@@ -439,14 +439,7 @@ spec:
                                 type: boolean
                               requireClientAuth:
                                 type: boolean
-                            required:
-                            - requireClientAuth
                             type: object
-                        required:
-                        - enabled
-                        - external
-                        - kafkaEndpoint
-                        - port
                         type: object
                     type: object
                   logging:
@@ -829,8 +822,6 @@ spec:
                                 - type: string
                                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                                 x-kubernetes-int-or-string: true
-                            required:
-                            - max
                             type: object
                           enable_memory_locking:
                             type: boolean
@@ -855,9 +846,6 @@ spec:
                         required:
                         - container
                         type: object
-                    required:
-                    - cpu
-                    - memory
                     type: object
                   serviceAccount:
                     properties:
@@ -2847,12 +2835,6 @@ spec:
                         type: string
                     type: object
                 type: object
-              helmRepositoryName:
-                description: HelmRepositoryName defines the repository to use, defaults
-                  to redpanda if not defined
-                type: string
-            required:
-            - chartRef
             type: object
           status:
             description: RedpandaStatus defines the observed state of Redpanda

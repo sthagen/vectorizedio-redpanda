@@ -108,7 +108,10 @@ func (r *RedpandaReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *RedpandaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *RedpandaReconciler) Reconcile(c context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ctx, done := context.WithCancel(c)
+	defer done()
+
 	start := time.Now()
 	log := ctrl.LoggerFrom(ctx).WithName("RedpandaReconciler.Reconcile")
 
@@ -394,6 +397,31 @@ func (r *RedpandaReconciler) createHelmReleaseFromTemplate(ctx context.Context, 
 		timeout = &metav1.Duration{Duration: 15 * time.Minute}
 	}
 
+	rollBack := helmv2beta1.RemediationStrategy("rollback")
+
+	upgrade := &helmv2beta1.Upgrade{
+		Remediation: &helmv2beta1.UpgradeRemediation{
+			Retries:  1,
+			Strategy: &rollBack,
+		},
+	}
+
+	helmUpgrade := rp.Spec.ChartRef.Upgrade
+	if rp.Spec.ChartRef.Upgrade != nil {
+		if helmUpgrade.Force != nil {
+			upgrade.Force = pointer.BoolDeref(helmUpgrade.Force, false)
+		}
+		if helmUpgrade.CleanupOnFail != nil {
+			upgrade.CleanupOnFail = pointer.BoolDeref(helmUpgrade.CleanupOnFail, false)
+		}
+		if helmUpgrade.PreserveValues != nil {
+			upgrade.PreserveValues = pointer.BoolDeref(helmUpgrade.PreserveValues, false)
+		}
+		if helmUpgrade.Remediation != nil {
+			upgrade.Remediation = helmUpgrade.Remediation
+		}
+	}
+
 	return &helmv2beta1.HelmRelease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rp.GetHelmReleaseName(),
@@ -415,6 +443,7 @@ func (r *RedpandaReconciler) createHelmReleaseFromTemplate(ctx context.Context, 
 			Values:   values,
 			Interval: metav1.Duration{Duration: 30 * time.Second},
 			Timeout:  timeout,
+			Upgrade:  upgrade,
 		},
 	}, nil
 }
@@ -459,7 +488,7 @@ func (r *RedpandaReconciler) helmReleaseRequiresUpdate(ctx context.Context, hr, 
 	log := ctrl.LoggerFrom(ctx).WithName("RedpandaReconciler.helmReleaseRequiresUpdate")
 
 	switch {
-	case !reflect.DeepEqual(hr.Spec.Values, hrTemplate.Spec.Values):
+	case !reflect.DeepEqual(hr.GetValues(), hrTemplate.GetValues()):
 		log.Info("values found different")
 		return true
 	case helmChartRequiresUpdate(&hr.Spec.Chart, &hrTemplate.Spec.Chart):

@@ -15,7 +15,6 @@
 #include "http/client.h"
 #include "seastarx.h"
 #include "syschecks/syschecks.h"
-#include "utils/hdr_hist.h"
 #include "vlog.h"
 
 #include <seastar/core/app-template.hh>
@@ -283,7 +282,6 @@ int main(int args, char** argv, char** env) {
                                                 lcfg.objects.front(),
                                                 payload_size,
                                                 std::move(payload),
-                                                {},
                                                 http::default_connect_timeout)
                                               .get0();
 

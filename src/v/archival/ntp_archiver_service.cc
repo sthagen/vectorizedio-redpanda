@@ -170,14 +170,8 @@ ntp_archiver::ntp_archiver(
       config::shard_local_cfg().cloud_storage_housekeeping_interval_ms.bind())
   , _housekeeping_jitter(_housekeeping_interval(), housekeeping_jit)
   , _next_housekeeping(_housekeeping_jitter())
-  , _segment_tags(cloud_storage::remote::make_segment_tags(_ntp, _rev))
-  , _manifest_tags(
-      cloud_storage::remote::make_partition_manifest_tags(_ntp, _rev))
-  , _tx_tags(cloud_storage::remote::make_tx_manifest_tags(_ntp, _rev))
-  , _segment_index_tags(
-      cloud_storage::remote::make_segment_index_tags(_ntp, _rev))
   , _local_segment_merger(maybe_make_adjacent_segment_merger(
-      *this, _rtclog, parent.log().config(), parent.is_leader()))
+      *this, _rtclog, parent.log()->config(), parent.is_leader()))
   , _manifest_upload_interval(
       config::shard_local_cfg()
         .cloud_storage_manifest_max_upload_interval_sec.bind())
@@ -937,7 +931,7 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest(
       manifest().get_manifest_path());
 
     auto result = co_await _remote.upload_manifest(
-      get_bucket_name(), manifest(), fib, _manifest_tags);
+      get_bucket_name(), manifest(), fib);
 
     if (result == cloud_storage::upload_result::success) {
         _last_manifest_upload_time = ss::lowres_clock::now();
@@ -1070,8 +1064,7 @@ ss::future<cloud_storage::upload_result> ntp_archiver::do_upload_segment(
           candidate.content_length,
           std::move(reset_func),
           fib,
-          lazy_abort_source,
-          _segment_tags);
+          lazy_abort_source);
     } catch (const ss::gate_closed_exception&) {
         response = cloud_storage::upload_result::cancelled;
     } catch (const ss::abort_requested_exception&) {
@@ -1134,7 +1127,6 @@ ss::future<ntp_archiver_upload_result> ntp_archiver::upload_segment(
           cloud_storage_clients::object_key{index_path},
           idx_res->index.to_iobuf(),
           fib,
-          _segment_index_tags,
           "segment-index");
 
         co_return ntp_archiver_upload_result(idx_res->stats);
@@ -1239,7 +1231,7 @@ ss::future<ntp_archiver_upload_result> ntp_archiver::upload_tx(
     cloud_storage::tx_range_manifest manifest(path, std::move(tx_range));
 
     co_return co_await _remote.upload_manifest(
-      get_bucket_name(), manifest, fib, _tx_tags);
+      get_bucket_name(), manifest, fib);
 }
 
 ss::future<std::optional<ntp_archiver::make_segment_index_result>>
@@ -1904,8 +1896,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
 uint64_t ntp_archiver::estimate_backlog_size() {
     auto last_offset = manifest().size() ? manifest().get_last_offset()
                                          : model::offset(0);
-    auto log_generic = _parent.log();
-    auto log = dynamic_cast<storage::disk_log_impl*>(log_generic.get_impl());
+    auto log = _parent.log();
     uint64_t total_size = std::accumulate(
       std::begin(log->segments()),
       std::end(log->segments()),
@@ -2717,8 +2708,7 @@ ntp_archiver::find_reupload_candidate(manifest_scanner_t scanner) {
     auto units = co_await ss::get_units(_mutex, 1, _as);
     if (run->meta.base_offset >= _parent.raft_start_offset()) {
         auto log_generic = _parent.log();
-        auto& log = dynamic_cast<storage::disk_log_impl&>(
-          *log_generic.get_impl());
+        auto& log = *log_generic;
         segment_collector collector(
           run->meta.base_offset,
           manifest(),

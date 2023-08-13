@@ -23,6 +23,72 @@
             ]
         },
         {
+            "path": "/v1/debug/stress_fiber_start",
+            "operations": [
+                {
+                    "method": "PUT",
+                    "summary": "Spawns fibers to artificially inflate CPU utilization",
+                    "type": "void",
+                    "nickname": "stress_fiber_start",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "min_spins_per_scheduling_point",
+                            "in": "query",
+                            "required": false,
+                            "allowMultiple": false,
+                            "type": "long"
+                        },
+                        {
+                            "name": "max_spins_per_scheduling_point",
+                            "in": "query",
+                            "required": false,
+                            "allowMultiple": false,
+                            "type": "long"
+                        },
+                        {
+                            "name": "min_ms_per_scheduling_point",
+                            "in": "query",
+                            "required": false,
+                            "allowMultiple": false,
+                            "type": "long"
+                        },
+                        {
+                            "name": "max_ms_per_scheduling_point",
+                            "in": "query",
+                            "required": false,
+                            "allowMultiple": false,
+                            "type": "long"
+                        },
+                        {
+                            "name": "num_fibers",
+                            "in": "query",
+                            "required": true,
+                            "allowMultiple": false,
+                            "type": "long"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "path": "/v1/debug/stress_fiber_stop",
+            "operations": [
+                {
+                    "method": "PUT",
+                    "summary": "Stops any stress fibers that may be running",
+                    "type": "void",
+                    "nickname": "stress_fiber_stop",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": []
+                }
+            ]
+        },
+        {
             "path": "/v1/debug/partition_leaders_table",
             "operations": [
                 {
@@ -829,6 +895,24 @@
                 }
             }
         },
+        "stm_state": {
+            "id" : "stm_state",
+            "description": "Stm related state for a given replica.",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "name of the stm"
+                },
+                "last_applied_offset": {
+                    "type": "long",
+                    "description": "Last applied offset"
+                },
+                "max_collectible_offset": {
+                    "type": "long",
+                    "description": "Max collectible offset"
+                }
+            }
+        },
         "raft_replica_state": {
             "id": "raft_replica_state",
             "description": "Raft level state for a single replica of a partition",
@@ -907,6 +991,13 @@
                         "type" : "raft_follower_state"
                     },
                     "description": "Follower metadata for this leader."
+                },
+                "stms": {
+                    "type": "array",
+                    "items": {
+                        "type": "stm_state"
+                    },
+                    "description": "All snapshottable stms attached to this replica"
                 }
             }
         },

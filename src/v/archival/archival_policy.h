@@ -16,11 +16,10 @@
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "storage/fwd.h"
-#include "storage/log_manager.h"
 #include "storage/ntp_config.h"
-#include "storage/segment_set.h"
 
 #include <seastar/core/io_priority_class.hh>
+#include <seastar/core/rwlock.hh>
 
 namespace archival {
 
@@ -66,13 +65,13 @@ public:
     ss::future<upload_candidate_with_locks> get_next_candidate(
       model::offset begin_inclusive,
       model::offset end_exclusive,
-      storage::log,
+      ss::shared_ptr<storage::log>,
       const storage::offset_translator_state&,
       ss::lowres_clock::duration segment_lock_duration);
 
     ss::future<upload_candidate_with_locks> get_next_compacted_segment(
       model::offset begin_inclusive,
-      storage::log log,
+      ss::shared_ptr<storage::log> log,
       const cloud_storage::partition_manifest& manifest,
       ss::lowres_clock::duration segment_lock_duration);
 
@@ -93,7 +92,7 @@ private:
     lookup_result find_segment(
       model::offset last_offset,
       model::offset adjusted_lso,
-      storage::log,
+      ss::shared_ptr<storage::log>,
       const storage::offset_translator_state&);
 
     model::ntp _ntp;

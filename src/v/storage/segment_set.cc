@@ -12,6 +12,7 @@
 #include "storage/fs_utils.h"
 #include "storage/log_replayer.h"
 #include "storage/logger.h"
+#include "storage/segment.h"
 #include "utils/directory_walker.h"
 #include "utils/filtered_lower_bound.h"
 #include "vassert.h"
@@ -52,6 +53,8 @@ segment_set::segment_set(segment_set::underlying_t segs)
   : _handles(std::move(segs)) {
     std::sort(_handles.begin(), _handles.end(), segment_ordering{});
 }
+
+segment_set::~segment_set() noexcept = default;
 
 void segment_set::add(ss::lw_shared_ptr<segment> h) {
     if (!_handles.empty()) {
@@ -156,8 +159,20 @@ segment_set::upper_bound(model::term_id term) const {
 
 std::ostream& operator<<(std::ostream& o, const segment_set& s) {
     o << "{size: " << s.size() << ", [";
-    for (auto& p : s) {
-        o << p;
+    static constexpr size_t max_to_log = 8;
+    static constexpr size_t halved = max_to_log / 2;
+    if (s.size() <= max_to_log) {
+        for (auto& p : s) {
+            o << p;
+        }
+    } else {
+        for (size_t i = 0; i < halved; i++) {
+            o << s[i];
+        }
+        o << "...";
+        for (size_t i = s.size() - halved; i < s.size(); i++) {
+            o << s[i];
+        }
     }
     return o << "]}";
 }

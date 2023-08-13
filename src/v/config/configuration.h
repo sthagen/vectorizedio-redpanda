@@ -140,6 +140,7 @@ struct configuration final : public config_store {
     // same as log.retention.ms in kafka
     retention_duration_property delete_retention_ms;
     property<std::chrono::milliseconds> log_compaction_interval_ms;
+    property<bool> log_disable_housekeeping_for_tests;
     // same as retention.size in kafka - TODO: size not implemented
     property<std::optional<size_t>> retention_bytes;
     property<int32_t> group_topic_partitions;
@@ -198,6 +199,7 @@ struct configuration final : public config_store {
     property<size_t> max_compacted_log_segment_size;
     property<std::optional<std::chrono::seconds>>
       storage_ignore_timestamps_in_future_sec;
+    property<bool> storage_ignore_cstore_hints;
     bounded_property<int16_t> storage_reserve_min_segments;
 
     property<int16_t> id_allocator_log_capacity;

@@ -86,6 +86,7 @@ type ClusterReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;delete;
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;delete
 //+kubebuilder:rbac:groups=core,resources=pods/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=pods/status,verbs=update;patch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;
@@ -107,8 +108,10 @@ type ClusterReconciler struct {
 //
 //nolint:funlen,gocyclo // todo break down
 func (r *ClusterReconciler) Reconcile(
-	ctx context.Context, req ctrl.Request,
+	c context.Context, req ctrl.Request,
 ) (ctrl.Result, error) {
+	ctx, done := context.WithCancel(c)
+	defer done()
 	log := ctrl.LoggerFrom(ctx).WithName("ClusterReconciler.Reconcile")
 
 	log.Info("Starting reconcile loop")
@@ -264,6 +267,9 @@ func (r *ClusterReconciler) Reconcile(
 	if err := r.setPodNodeIDAnnotation(ctx, &vectorizedCluster, log, ar); err != nil {
 		return ctrl.Result{}, fmt.Errorf("setting pod node_id annotation: %w", err)
 	}
+	if err := r.setPodNodeIDLabel(ctx, &vectorizedCluster, log, ar); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting pod node_id label: %w", err)
+	}
 
 	// want: refactor above to resources (i.e. setInitialSuperUserPassword, reconcileConfiguration)
 	// ensuring license must be at the end when condition ClusterConfigured=true and AdminAPI is ready
@@ -406,27 +412,10 @@ func (r *ClusterReconciler) handlePodFinalizer(
 			return nil
 		}
 		//   delete the associated pvc
-		pvc := corev1.PersistentVolumeClaim{}
-		//nolint: gocritic // 248 bytes 6 times is not worth decreasing the readability over
-		for _, v := range pod.Spec.Volumes {
-			if v.PersistentVolumeClaim != nil {
-				key = types.NamespacedName{
-					Name:      v.PersistentVolumeClaim.ClaimName,
-					Namespace: pod.GetNamespace(),
-				}
-				err = r.Get(ctx, key, &pvc)
-				if err != nil {
-					if !apierrors.IsNotFound(err) {
-						return fmt.Errorf(`unable to fetch PersistentVolumeClaim "%s/%s": %w`, key.Namespace, key.Name, err)
-					}
-					continue
-				}
-				log.WithValues("persistent-volume-claim", key).Info("deleting PersistentVolumeClaim")
-				if err := r.Delete(ctx, &pvc, &client.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-					return fmt.Errorf(`unable to delete PersistentVolumeClaim "%s/%s": %w`, key.Name, key.Namespace, err)
-				}
-			}
+		if err = utils.DeletePodPVCs(ctx, r.Client, pod, log); err != nil {
+			return fmt.Errorf(`unable to remove VPCs for pod "%s/%s: %w"`, pod.GetNamespace(), pod.GetName(), err)
 		}
+
 		//   remove the finalizer
 		if err := r.removePodFinalizer(ctx, pod, log); err != nil {
 			return fmt.Errorf(`unable to remove finalizer from pod "%s/%s: %w"`, pod.GetNamespace(), pod.GetName(), err)
@@ -477,7 +466,7 @@ func (r *ClusterReconciler) setPodNodeIDAnnotation(
 		if pod.Annotations == nil {
 			pod.Annotations = make(map[string]string)
 		}
-		nodeIDStr, ok := pod.Annotations[resources.PodAnnotationNodeIDKey]
+		nodeIDStrAnnotation, annotationExist := pod.Annotations[resources.PodAnnotationNodeIDKey]
 
 		nodeID, err := r.fetchAdminNodeID(ctx, rp, pod, ar)
 		if err != nil {
@@ -487,15 +476,15 @@ func (r *ClusterReconciler) setPodNodeIDAnnotation(
 
 		realNodeIDStr := fmt.Sprintf("%d", nodeID)
 
-		if ok && realNodeIDStr == nodeIDStr {
+		if annotationExist && realNodeIDStr == nodeIDStrAnnotation {
 			continue
 		}
 
 		var oldNodeID int
-		if ok {
-			oldNodeID, err = strconv.Atoi(nodeIDStr)
+		if annotationExist {
+			oldNodeID, err = strconv.Atoi(nodeIDStrAnnotation)
 			if err != nil {
-				return fmt.Errorf("unable to convert node ID (%s) to int: %w", nodeIDStr, err)
+				return fmt.Errorf("unable to convert node ID (%s) to int: %w", nodeIDStrAnnotation, err)
 			}
 
 			log.WithValues("pod-name", pod.Name, "old-node-id", oldNodeID).Info("decommission old node-id")
@@ -506,6 +495,43 @@ func (r *ClusterReconciler) setPodNodeIDAnnotation(
 
 		log.WithValues("pod-name", pod.Name, "new-node-id", nodeID).Info("setting node-id annotation")
 		pod.Annotations[resources.PodAnnotationNodeIDKey] = realNodeIDStr
+		if err := r.Update(ctx, pod, &client.UpdateOptions{}); err != nil {
+			return fmt.Errorf(`unable to update pod "%s" with node-id annotation: %w`, pod.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *ClusterReconciler) setPodNodeIDLabel(
+	ctx context.Context, rp *vectorizedv1alpha1.Cluster, l logr.Logger, ar *attachedResources,
+) error {
+	log := l.WithName("setPodNodeIDLabel")
+	log.V(logger.DebugLevel).Info("setting pod node-id label")
+	pods, err := r.podList(ctx, rp)
+	if err != nil {
+		return fmt.Errorf("unable to fetch PodList: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		nodeIDStrLabel, labelExist := pod.Labels[resources.PodAnnotationNodeIDKey]
+
+		nodeID, err := r.fetchAdminNodeID(ctx, rp, pod, ar)
+		if err != nil {
+			log.Error(err, `cannot fetch node id for node-id annotation`)
+			continue
+		}
+
+		realNodeIDStr := fmt.Sprintf("%d", nodeID)
+
+		if labelExist && realNodeIDStr == nodeIDStrLabel {
+			continue
+		}
+
+		log.WithValues("pod-name", pod.Name, "new-node-id", nodeID).Info("setting node-id label")
+		pod.Labels[resources.PodAnnotationNodeIDKey] = realNodeIDStr
 		if err := r.Update(ctx, pod, &client.UpdateOptions{}); err != nil {
 			return fmt.Errorf(`unable to update pod "%s" with node-id annotation: %w`, pod.Name, err)
 		}
@@ -530,7 +556,7 @@ func (r *ClusterReconciler) decommissionBroker(
 	}
 
 	err = adminClient.DecommissionBroker(ctx, nodeID)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "failed: Not Found") {
 		return fmt.Errorf("unable to decommission broker: %w", err)
 	}
 	return nil
@@ -547,7 +573,7 @@ func (r *ClusterReconciler) fetchAdminNodeID(ctx context.Context, rp *vectorized
 		return -1, fmt.Errorf("cluster %s: cannot convert pod name (%s) to ordinal: %w", rp.Name, pod.Name, err)
 	}
 
-	adminClient, err := r.AdminAPIClientFactory(ctx, r.Client, rp, ar.getHeadlessServiceFQDN(), pki.AdminAPIConfigProvider(), int32(ordinal))
+	adminClient, err := r.AdminAPIClientFactory(ctx, r.Client, rp, ar.getHeadlessServiceFQDN(), pki.AdminAPIConfigProvider(), ordinal)
 	if err != nil {
 		return -1, fmt.Errorf("unable to create admin client: %w", err)
 	}
@@ -1139,6 +1165,8 @@ func newAttachedResources(ctx context.Context, r *ClusterReconciler, log logr.Lo
 	}
 }
 
+type resourceKey string
+
 func (a *attachedResources) Ensure() (ctrl.Result, error) {
 	result := ctrl.Result{}
 	var errs error
@@ -1146,7 +1174,7 @@ func (a *attachedResources) Ensure() (ctrl.Result, error) {
 		if resource == nil {
 			continue
 		}
-		err := resource.Ensure(a.ctx)
+		err := resource.Ensure(context.WithValue(a.ctx, resourceKey("resource"), key))
 		var e *resources.RequeueAfterError
 		if errors.As(err, &e) {
 			a.log.Info(e.Error())

@@ -97,6 +97,7 @@ public:
       : app(ssx::sformat("redpanda-{}", node_id()))
       , proxy_port(proxy_port)
       , schema_reg_port(schema_reg_port)
+      , kafka_port(kafka_port)
       , data_dir(std::move(base_dir))
       , remove_on_shutdown(remove_on_shutdown)
       , app_signal(std::make_unique<::stop_signal>()) {
@@ -414,7 +415,7 @@ public:
                     .local()
                     .wait_for_leader(model::controller_ntp, tout, {});
 
-        co_await tests::cooperative_spin_wait_with_timeout(10s, [this, id] {
+        boost_await_eventually(10s, [this, id] {
             auto& members = app.controller->get_members_table();
             return members.local().contains(id);
         });
@@ -423,52 +424,49 @@ public:
         // the raft0 log on first startup, so must be complete before
         // tests start (tests use raft0 offsets to guess at the revision
         // ids of partitions they create)
-        co_await tests::cooperative_spin_wait_with_timeout(
-          10s, [this]() -> bool {
-              // Await feature manager bootstrap
-              auto& feature_table = app.controller->get_feature_table().local();
-              if (
-                feature_table.get_active_version()
-                == cluster::invalid_version) {
-                  return false;
-              }
+        boost_await_eventually(10s, [this]() -> bool {
+            // Await feature manager bootstrap
+            auto& feature_table = app.controller->get_feature_table().local();
+            if (
+              feature_table.get_active_version() == cluster::invalid_version) {
+                return false;
+            }
 
-              // Await config manager bootstrap
-              auto& config_mgr = app.controller->get_config_manager().local();
-              if (config_mgr.get_version() == cluster::config_version_unset) {
-                  return false;
-              }
+            // Await config manager bootstrap
+            auto& config_mgr = app.controller->get_config_manager().local();
+            if (config_mgr.get_version() == cluster::config_version_unset) {
+                return false;
+            }
 
-              // Await initial config status messages from all nodes
-              auto& members = app.controller->get_members_table().local();
-              return config_mgr.get_status().size() == members.node_count();
-          });
+            // Await initial config status messages from all nodes
+            auto& members = app.controller->get_members_table().local();
+            return config_mgr.get_status().size() == members.node_count();
+        });
     }
 
     // Wait for the Raft leader of the given partition to become leader.
     ss::future<> wait_for_leader(
       model::ntp ntp, model::timeout_clock::duration timeout = 3s) {
-        return tests::cooperative_spin_wait_with_timeout(
-          timeout, [this, ntp = std::move(ntp)]() {
-              auto shard = app.shard_table.local().shard_for(ntp);
-              if (!shard) {
-                  return ss::make_ready_future<bool>(false);
-              }
-              return app.partition_manager.invoke_on(
-                *shard, [ntp](cluster::partition_manager& mgr) {
-                    auto partition = mgr.get(ntp);
-                    return partition
-                           && partition->raft()->term() != model::term_id{}
-                           && partition->raft()->is_leader();
-                });
-          });
+        boost_await_eventually(timeout, [this, ntp = std::move(ntp)]() {
+            auto shard = app.shard_table.local().shard_for(ntp);
+            if (!shard) {
+                return ss::make_ready_future<bool>(false);
+            }
+            return app.partition_manager.invoke_on(
+              *shard, [ntp](cluster::partition_manager& mgr) {
+                  auto partition = mgr.get(ntp);
+                  return partition
+                         && partition->raft()->term() != model::term_id{}
+                         && partition->raft()->is_leader();
+              });
+        });
     }
 
     ss::future<kafka::client::transport>
     make_kafka_client(std::optional<ss::sstring> client_id = "test_client") {
         return ss::make_ready_future<kafka::client::transport>(
           net::base_transport::configuration{
-            .server_addr = config::node().kafka_api()[0].address,
+            .server_addr = {"127.0.0.1", kafka_port},
           },
           std::move(client_id));
     }
@@ -487,33 +485,33 @@ public:
     }
 
     ss::future<> wait_for_topics(std::vector<cluster::topic_result> results) {
-        return tests::cooperative_spin_wait_with_timeout(
-          10s, [this, results = std::move(results)] {
-              return std::all_of(
-                results.begin(),
-                results.end(),
-                [this](const cluster::topic_result& r) {
-                    auto md = app.metadata_cache.local().get_topic_metadata(
-                      r.tp_ns);
-                    return md
-                           && std::all_of(
-                             md->get_assignments().begin(),
-                             md->get_assignments().end(),
-                             [this,
-                              &r](const cluster::partition_assignment& p) {
-                                 return app.shard_table.local().shard_for(
-                                   model::ntp(r.tp_ns.ns, r.tp_ns.tp, p.id));
-                             });
-                });
-          });
+        boost_await_eventually(10s, [this, results = std::move(results)] {
+            return std::all_of(
+              results.begin(),
+              results.end(),
+              [this](const cluster::topic_result& r) {
+                  auto md = app.metadata_cache.local().get_topic_metadata(
+                    r.tp_ns);
+                  return md
+                         && std::all_of(
+                           md->get_assignments().begin(),
+                           md->get_assignments().end(),
+                           [this, &r](const cluster::partition_assignment& p) {
+                               return app.shard_table.local().shard_for(
+                                 model::ntp(r.tp_ns.ns, r.tp_ns.tp, p.id));
+                           });
+              });
+        });
     }
 
     ss::future<> add_topic(
       model::topic_namespace_view tp_ns,
       int partitions = 1,
-      std::optional<cluster::topic_properties> props = std::nullopt) {
+      std::optional<cluster::topic_properties> props = std::nullopt,
+      int16_t replication_factor = 1) {
         std::vector<cluster::topic_configuration> cfgs = {
-          cluster::topic_configuration{tp_ns.ns, tp_ns.tp, partitions, 1}};
+          cluster::topic_configuration{
+            tp_ns.ns, tp_ns.tp, partitions, replication_factor}};
         if (props.has_value()) {
             cfgs[0].properties = std::move(props.value());
         }
@@ -561,18 +559,17 @@ public:
       model::ntp ntp,
       model::offset o,
       model::timeout_clock::duration tout = 3s) {
-        return tests::cooperative_spin_wait_with_timeout(
-          tout, [this, ntp = std::move(ntp), o]() mutable {
-              auto shard = app.shard_table.local().shard_for(ntp);
-              if (!shard) {
-                  return ss::make_ready_future<bool>(false);
-              }
-              return app.partition_manager.invoke_on(
-                *shard, [ntp, o](cluster::partition_manager& mgr) {
-                    auto partition = mgr.get(ntp);
-                    return partition && partition->committed_offset() >= o;
-                });
-          });
+        boost_await_eventually(tout, [this, ntp = std::move(ntp), o]() mutable {
+            auto shard = app.shard_table.local().shard_for(ntp);
+            if (!shard) {
+                return ss::make_ready_future<bool>(false);
+            }
+            return app.partition_manager.invoke_on(
+              *shard, [ntp, o](cluster::partition_manager& mgr) {
+                  auto partition = mgr.get(ntp);
+                  return partition && partition->committed_offset() >= o;
+              });
+        });
     }
 
     /**
@@ -583,44 +580,85 @@ public:
         auto ntp = model::controller_ntp;
         auto shard = app.shard_table.local().shard_for(ntp);
         assert(shard);
+        // flush any in flight changes for a consistent committed_offset.
+        app.partition_manager
+          .invoke_on(
+            *shard,
+            [ntp](cluster::partition_manager& mgr) {
+                auto partition = mgr.get(ntp);
+                assert(partition);
+                return partition->linearizable_barrier();
+            })
+          .get();
         return app.partition_manager.invoke_on(
           *shard, [ntp](cluster::partition_manager& mgr) -> model::revision_id {
               auto partition = mgr.get(ntp);
               assert(partition);
-              return model::revision_id{partition->last_stable_offset()}
-                     + model::revision_id{1};
+              return model::revision_id{partition->committed_offset()}
+                     + model::offset{1};
           });
     }
 
-    model::ktp make_data(
-      model::revision_id rev,
-      std::optional<model::timestamp> base_ts = std::nullopt) {
+    model::ktp
+    make_data(std::optional<model::timestamp> base_ts = std::nullopt) {
         auto topic_name = ssx::sformat("my_topic_{}", 0);
         model::ktp ktp(model::topic(topic_name), model::partition_id(0));
 
-        storage::ntp_config ntp_cfg(
-          ktp.to_ntp(),
-          config::node().data_directory().as_sstring(),
-          nullptr,
-          rev);
+        const auto& topic_table = app.controller->get_topics_state().local();
+        model::topic_namespace tp_ns{model::kafka_namespace, ktp.get_topic()};
+        while (true) {
+            if (topic_table.contains(ktp.as_tn_view())) {
+                delete_topic(tp_ns).get();
+            }
 
-        storage::disk_log_builder builder(make_default_config());
-        using namespace storage; // NOLINT
+            // Here we first request a potential revision from the controller
+            // and create an ntp structure on the disk. The expectation is that
+            // when the topic is eventually created, the segments are recovered
+            // at bootstrap and we have the exact data in the structure we
+            // populated.
 
-        builder | start(std::move(ntp_cfg)) | add_segment(model::offset(0))
-          | add_random_batches(
-            model::offset(0),
-            20,
-            maybe_compress_batches::yes,
-            log_append_config{
-              .should_fsync = log_append_config::fsync::yes,
-              .io_priority = ss::default_priority_class(),
-              .timeout = model::no_timeout},
-            disk_log_builder::should_flush_after::yes,
-            base_ts)
-          | stop();
+            // This is inherently racy because there could be other controller
+            // updates between the time we request a revision and create a
+            // table. That invalidates the revision as the topic is created with
+            // a newer revision and the desired segements are not recovered from
+            // disk. This loop mitigates this problem by deleting and recreating
+            // the topic if there is a revision mismatch.
 
-        add_topic(ktp.as_tn_view()).get();
+            // Get a potential revision for ntp.
+            auto rev = get_next_partition_revision_id().get();
+            storage::ntp_config ntp_cfg(
+              ktp.to_ntp(),
+              config::node().data_directory().as_sstring(),
+              nullptr,
+              rev);
+
+            storage::disk_log_builder builder(make_default_config());
+            using namespace storage; // NOLINT
+
+            builder | start(std::move(ntp_cfg)) | add_segment(model::offset(0))
+              | add_random_batches(
+                model::offset(0),
+                20,
+                maybe_compress_batches::yes,
+                log_append_config{
+                  .should_fsync = log_append_config::fsync::yes,
+                  .io_priority = ss::default_priority_class(),
+                  .timeout = model::no_timeout},
+                disk_log_builder::should_flush_after::yes,
+                base_ts)
+              | stop();
+
+            add_topic(ktp.as_tn_view()).get();
+            // validate if version matches
+            const auto& topic_meta = topic_table.get_topic_metadata(
+              ktp.as_tn_view());
+            assert(topic_meta);
+            // Check if the topic revision matches the desired revision, if not
+            // delete and recreate the topic.
+            if (topic_meta->get_revision() == rev) {
+                break;
+            }
+        }
 
         return ktp;
     }
@@ -672,6 +710,7 @@ public:
     application app;
     uint16_t proxy_port;
     uint16_t schema_reg_port;
+    uint16_t kafka_port;
     std::filesystem::path data_dir;
     ss::sharded<net::server_configuration> configs;
     ss::sharded<kafka::server> proto;

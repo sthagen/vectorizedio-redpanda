@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	helmv2beta1 "github.com/fluxcd/helm-controller/api/v2beta1"
+
 	"github.com/fluxcd/pkg/apis/meta"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -34,14 +36,14 @@ type ChartRef struct {
 	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+	// Upgrade contains the details for handling upgrades including failures
+	Upgrade *HelmUpgrade `json:"upgrade,omitempty"`
 }
 
 // RedpandaSpec defines the desired state of Redpanda
 type RedpandaSpec struct {
 	// ChartRef defines chart details including repository
-	ChartRef ChartRef `json:"chartRef"`
-	// HelmRepositoryName defines the repository to use, defaults to redpanda if not defined
-	HelmRepositoryName string `json:"helmRepositoryName,omitempty"`
+	ChartRef ChartRef `json:"chartRef,omitempty"`
 	// ClusterSpec defines the values to use in the cluster
 	ClusterSpec *RedpandaClusterSpec `json:"clusterSpec,omitempty"`
 }
@@ -90,6 +92,16 @@ type RedpandaStatus struct {
 	InstallFailures int64 `json:"installFailures,omitempty"`
 }
 
+type RemediationStrategy string
+
+// HelmUpgrade represents the configurations upgrading helm releases
+type HelmUpgrade struct {
+	Remediation    *helmv2beta1.UpgradeRemediation `json:"remediation,omitempty"`
+	Force          *bool                           `json:"force,omitempty"`
+	PreserveValues *bool                           `json:"preserveValues,omitempty"`
+	CleanupOnFail  *bool                           `json:"cleanupOnFail,omitempty"`
+}
+
 // Redpanda is the Schema for the redpanda API
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -126,7 +138,7 @@ func (in *Redpanda) GetHelmReleaseName() string {
 }
 
 func (in *Redpanda) GetHelmRepositoryName() string {
-	helmRepository := in.Spec.HelmRepositoryName
+	helmRepository := in.Spec.ChartRef.HelmRepositoryName
 	if helmRepository == "" {
 		helmRepository = "redpanda-repository"
 	}

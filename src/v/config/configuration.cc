@@ -499,7 +499,7 @@ configuration::configuration()
       "use_fetch_scheduler_group",
       "Use a separate scheduler group for fetch processing",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false)
+      true)
   , metadata_status_wait_timeout_ms(
       *this,
       "metadata_status_wait_timeout_ms",
@@ -597,6 +597,13 @@ configuration::configuration()
       "How often do we trigger background compaction",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       10s)
+  , log_disable_housekeeping_for_tests(
+      *this,
+      "log_disable_housekeeping_for_tests",
+      "Disables the housekeeping loop for local storage. The property exists "
+      "to simplify testing and shouldn't be set in production.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      false)
   , retention_bytes(
       *this,
       "retention_bytes",
@@ -932,6 +939,13 @@ configuration::configuration()
        .example = "3600",
        .visibility = visibility::tunable},
       std::nullopt)
+  , storage_ignore_cstore_hints(
+      *this,
+      "storage_ignore_cstore_hints",
+      "if set, cstore hints will be ignored and will not be used for data "
+      "access (but will otherwise be generated)",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      false)
   , storage_reserve_min_segments(
       *this,
       "storage_reserve_min_segments",
