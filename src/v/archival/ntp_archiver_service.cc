@@ -422,8 +422,9 @@ ss::future<> ntp_archiver::upload_topic_manifest() {
         } else {
             _topic_manifest_dirty = false;
         }
-    } catch (const ss::gate_closed_exception& err) {
-    } catch (const ss::abort_requested_exception& err) {
+    } catch (const ss::gate_closed_exception&) {
+    } catch (const ss::broken_named_semaphore&) {
+    } catch (const ss::abort_requested_exception&) {
     } catch (...) {
         vlog(
           _rtclog.warn,
@@ -919,7 +920,6 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_manifest(
       _conf->cloud_storage_initial_backoff,
       &rtc.get());
     retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
-    auto units = co_await _parent.archival_meta_stm()->acquire_manifest_lock();
 
     auto upload_insync_offset = manifest().get_insync_offset();
 
@@ -1068,6 +1068,8 @@ ss::future<cloud_storage::upload_result> ntp_archiver::do_upload_segment(
     } catch (const ss::gate_closed_exception&) {
         response = cloud_storage::upload_result::cancelled;
     } catch (const ss::abort_requested_exception&) {
+        response = cloud_storage::upload_result::cancelled;
+    } catch (const ss::broken_named_semaphore&) {
         response = cloud_storage::upload_result::cancelled;
     } catch (const std::exception& e) {
         vlog(_rtclog.error, "failed to upload segment {}: {}", path, e);
@@ -1894,8 +1896,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
 }
 
 uint64_t ntp_archiver::estimate_backlog_size() {
-    auto last_offset = manifest().size() ? manifest().get_last_offset()
-                                         : model::offset(0);
+    auto last_offset = manifest().get_last_offset();
     auto log = _parent.log();
     uint64_t total_size = std::accumulate(
       std::begin(log->segments()),

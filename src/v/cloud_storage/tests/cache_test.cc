@@ -26,6 +26,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chrono>
+#include <fstream>
 #include <stdexcept>
 
 using namespace cloud_storage;
@@ -465,4 +466,75 @@ FIXTURE_TEST(test_clean_up_on_start_empty, cache_test_fixture) {
     clean_up_at_start().get();
 
     BOOST_CHECK(ss::file_exists(CACHE_DIR.native()).get());
+}
+
+/**
+ * Given a cache dir populated with files which are filtered out by fast trim,
+ * validate that a failing fast trim should be followed up by an exhaustive trim
+ * and clean up the required object count.
+ */
+FIXTURE_TEST(test_exhaustive_trim_runs_after_fast_trim, cache_test_fixture) {
+    std::vector<std::filesystem::path> indices;
+    const auto count_indices = 5;
+    indices.reserve(count_indices);
+
+    for (auto i = 0; i < count_indices; ++i) {
+        indices.emplace_back(CACHE_DIR / fmt::format("{}.index", i, i, i));
+        std::ofstream f{indices.back()};
+        f.flush();
+    }
+
+    BOOST_REQUIRE(
+      std::all_of(indices.cbegin(), indices.cend(), [](const auto& path) {
+          return std::filesystem::exists(path);
+      }));
+
+    // Make cache service scan the disk for objects
+    clean_up_at_start().get();
+
+    // Only allow the access time tracker to remain on disk.
+    trim_cache(std::nullopt, 1);
+
+    BOOST_REQUIRE(
+      std::all_of(indices.cbegin(), indices.cend(), [](const auto& path) {
+          return !std::filesystem::exists(path);
+      }));
+}
+
+FIXTURE_TEST(test_log_segment_cleanup, cache_test_fixture) {
+    std::vector<std::filesystem::path> objects{
+      CACHE_DIR / "test.log.1",
+      CACHE_DIR / "test.log.1.index",
+      CACHE_DIR / "test.log.1.tx",
+      CACHE_DIR / "test.log",
+      CACHE_DIR / "test.log.index",
+      CACHE_DIR / "test.log.tx"};
+    for (const auto& obj : objects) {
+        std::ofstream f{obj};
+        f.flush();
+    }
+
+    // An un-removable file makes sure the fast trim will have to remove the two
+    // segment files.
+    {
+        std::ofstream f{CACHE_DIR / "accesstime"};
+        f.flush();
+    }
+
+    BOOST_REQUIRE(
+      std::all_of(objects.cbegin(), objects.cend(), [](const auto& path) {
+          return std::filesystem::exists(path);
+      }));
+
+    clean_up_at_start().get();
+
+    // With this limit all of the index+tx files should not have to be removed,
+    // but fast trim will remove all of these files after removing the two
+    // segments.
+    trim_cache(std::nullopt, 4);
+
+    BOOST_REQUIRE(
+      std::all_of(objects.cbegin(), objects.cend(), [](const auto& path) {
+          return !std::filesystem::exists(path);
+      }));
 }

@@ -266,7 +266,9 @@ class TestReadReplicaService(EndToEndTest):
             return None
 
     @cluster(num_nodes=7, log_allow_list=READ_REPLICA_LOG_ALLOW_LIST)
-    @matrix(partition_count=[5], cloud_storage_type=[CloudStorageType.S3])
+    @matrix(
+        partition_count=[5],
+        cloud_storage_type=get_cloud_storage_type(docker_use_arbitrary=True))
     def test_identical_lwms_after_delete_records(
             self, partition_count: int,
             cloud_storage_type: CloudStorageType) -> None:
@@ -322,7 +324,9 @@ class TestReadReplicaService(EndToEndTest):
         check_lwm(7)
 
     @cluster(num_nodes=8, log_allow_list=READ_REPLICA_LOG_ALLOW_LIST)
-    @matrix(partition_count=[5], cloud_storage_type=[CloudStorageType.S3])
+    @matrix(
+        partition_count=[5],
+        cloud_storage_type=get_cloud_storage_type(docker_use_arbitrary=True))
     def test_identical_hwms(self, partition_count: int,
                             cloud_storage_type: CloudStorageType) -> None:
         self._setup_read_replica(partition_count=partition_count,
@@ -444,7 +448,7 @@ class ReadReplicasUpgradeTest(EndToEndTest):
                 log_segment_size=self.log_segment_size,
                 cloud_storage_readreplica_manifest_sync_timeout_ms=500,
                 cloud_storage_segment_max_upload_interval_sec=3,
-                fast_uploads=False))
+                fast_uploads=True))
 
         # Read replica shouldn't have it's own bucket.
         # We're adding 'none' as a bucket name without creating
@@ -460,7 +464,9 @@ class ReadReplicasUpgradeTest(EndToEndTest):
         self.second_cluster = None
 
     @cluster(num_nodes=8)
-    def test_upgrades(self):
+    @matrix(cloud_storage_type=get_cloud_storage_type(
+        applies_only_on=[CloudStorageType.S3]))
+    def test_upgrades(self, cloud_storage_type):
         partition_count = 1
         install_opts = InstallOptions(install_previous_version=True)
         self.start_redpanda(3,

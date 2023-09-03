@@ -155,7 +155,9 @@ PREV_VERSION_LOG_ALLOW_LIST = [
     # e.g.  raft - [group_id:3, {kafka/topic/2}] consensus.cc:2317 - unable to replicate updated configuration: raft::errc::replicated_entry_truncated
     "raft - .*unable to replicate updated configuration: .*",
     # e.g. recovery_stm.cc:432 - recovery append entries error: rpc::errc::client_request_timeout"
-    "raft - .*recovery append entries error.*client_request_timeout"
+    "raft - .*recovery append entries error.*client_request_timeout",
+    # Pre v23.2 Redpanda's don't know how to interact with HNS Storage Accounts correctly
+    "abs - .*FeatureNotYetSupportedForHierarchicalNamespaceAccounts"
 ]
 
 # Path to the LSAN suppressions file
@@ -757,6 +759,7 @@ class RedpandaServiceBase(Service):
     COVERAGE_PROFRAW_CAPTURE = os.path.join(PERSISTENT_ROOT,
                                             "redpanda.profraw")
     DEFAULT_NODE_READY_TIMEOUT_SEC = 20
+    DEFAULT_CLOUD_STORAGE_SCRUB_TIMEOUT_SEC = 60
     DEDICATED_NODE_KEY = "dedicated_nodes"
     RAISE_ON_ERRORS_KEY = "raise_on_error"
     LOG_LEVEL_KEY = "redpanda_log_level"
@@ -1024,7 +1027,8 @@ class RedpandaServiceBase(Service):
                               start_timeout=None,
                               stop_timeout=None,
                               use_maintenance_mode=True,
-                              omit_seeds_on_idx_one=True):
+                              omit_seeds_on_idx_one=True,
+                              auto_assign_node_id=False):
         nodes = [nodes] if isinstance(nodes, ClusterNode) else nodes
         restarter = RollingRestarter(self)
         restarter.restart_nodes(nodes,
@@ -1032,7 +1036,8 @@ class RedpandaServiceBase(Service):
                                 start_timeout=start_timeout,
                                 stop_timeout=stop_timeout,
                                 use_maintenance_mode=use_maintenance_mode,
-                                omit_seeds_on_idx_one=omit_seeds_on_idx_one)
+                                omit_seeds_on_idx_one=omit_seeds_on_idx_one,
+                                auto_assign_node_id=auto_assign_node_id)
 
     def set_cluster_config(self,
                            values: dict,
@@ -1414,6 +1419,14 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         # later to dataclass
         self._cc_config = context.globals.get(self.GLOBAL_CLOUD_CLUSTER_CONFIG,
                                               None)
+        self._provider_config = {
+            "access_key":
+            context.globals.get(SISettings.GLOBAL_S3_ACCESS_KEY, None),
+            "secret_key":
+            context.globals.get(SISettings.GLOBAL_S3_SECRET_KEY, None),
+            "region":
+            context.globals.get(SISettings.GLOBAL_S3_REGION_KEY, None)
+        }
         # log cloud cluster id
         self.logger.debug(f"initial cluster_id: {self._cc_config['id']}")
 
@@ -1450,7 +1463,11 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         # self._cloud_peer_owner_id = context.globals.get(
         #     self.GLOBAL_CLOUD_PEER_OWNER_ID, None)
 
-        self._cloud_cluster = CloudCluster(self.logger, self._cc_config)
+        self._cloud_cluster = CloudCluster(
+            self.logger,
+            self._cc_config,
+            provider_config=self._provider_config)
+
         self._kubectl = None
 
         self._dedicated_nodes = True
@@ -1479,6 +1496,8 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             self,
             remote_uri=remote_uri,
             cluster_id=self._cloud_cluster.config.id,
+            cluster_privider=self._cloud_cluster.config.provider,
+            cluster_region=self._cloud_cluster.config.region,
             tp_proxy=self._cloud_cluster.config.teleport_auth_server,
             tp_token=self._cloud_cluster.config.teleport_bot_token)
 
@@ -1504,6 +1523,15 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
     def get_version(self, node):
         return self._cloud_cluster.get_install_pack_version()
 
+    def set_cluster_config(self, values: dict, timeout: int = 300):
+        pass
+
+    def sockets_clear(self, node):
+        True
+
+    def all_up(self):
+        return self._cloud_cluster.isAlive
+
 
 class RedpandaService(RedpandaServiceBase):
     def __init__(self,
@@ -1523,7 +1551,8 @@ class RedpandaService(RedpandaServiceBase):
                  skip_if_no_redpanda_log: bool = False,
                  pandaproxy_config: Optional[PandaproxyConfig] = None,
                  schema_registry_config: Optional[SchemaRegistryConfig] = None,
-                 disable_cloud_storage_diagnostics=False):
+                 disable_cloud_storage_diagnostics=False,
+                 cloud_storage_scrub_timeout_s=None):
         super(RedpandaService, self).__init__(
             context,
             num_brokers,
@@ -1544,6 +1573,10 @@ class RedpandaService(RedpandaServiceBase):
         if node_ready_timeout_s is None:
             node_ready_timeout_s = RedpandaService.DEFAULT_NODE_READY_TIMEOUT_SEC
         self.node_ready_timeout_s = node_ready_timeout_s
+
+        if cloud_storage_scrub_timeout_s is None:
+            cloud_storage_scrub_timeout_s = RedpandaService.DEFAULT_CLOUD_STORAGE_SCRUB_TIMEOUT_SEC
+        self.cloud_storage_scrub_timeout_s = cloud_storage_scrub_timeout_s
 
         self._extra_node_conf = {}
         for node in self.nodes:
@@ -3680,6 +3713,7 @@ class RedpandaService(RedpandaServiceBase):
         # can be set to None for no timeout
 
         def all_partitions_uploaded_manifest():
+            manifest_not_uploaded = []
             for p in self.partitions():
                 try:
                     status = self._admin.get_partition_cloud_storage_status(
@@ -3699,8 +3733,13 @@ class RedpandaService(RedpandaServiceBase):
                     "metadata_update_pending"] is False or status.get(
                         'ms_since_last_manifest_upload', None) is not None
                 if remote_write and not has_uploaded_manifest:
-                    self.logger.info(f"Partition {p} hasn't yet uploaded")
-                    return False
+                    manifest_not_uploaded.append(p)
+
+            if len(manifest_not_uploaded) != 0:
+                self.logger.info(
+                    f"Partitions that haven't yet uploaded: {manifest_not_uploaded}"
+                )
+                return False
 
             return True
 
@@ -3708,8 +3747,11 @@ class RedpandaService(RedpandaServiceBase):
         # check tiered storage status to wait for uploads to complete.
         if self._started:
             # Aggressive retry because almost always this should already be done
+            # Each 1000 partititions add 30s of timeout
+            n_partitions = len(self.partitions())
+            timeout = 30 if n_partitions < 1000 else (n_partitions / 1000) * 30
             wait_until(all_partitions_uploaded_manifest,
-                       timeout_sec=30,
+                       timeout_sec=30 + timeout,
                        backoff_sec=1)
 
         # We stop because the scrubbing routine would otherwise interpret
@@ -3718,7 +3760,8 @@ class RedpandaService(RedpandaServiceBase):
         # flushing data to remote storage.
         self.stop()
 
-        report = self._get_object_storage_report(timeout=run_timeout)
+        scrub_timeout = max(run_timeout, self.cloud_storage_scrub_timeout_s)
+        report = self._get_object_storage_report(timeout=scrub_timeout)
 
         # It is legal for tiered storage to leak objects under
         # certain circumstances: this will remain the case until

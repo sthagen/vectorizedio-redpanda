@@ -143,7 +143,9 @@ public:
 
     std::unique_ptr<cluster::controller> controller;
 
-    std::unique_ptr<ssx::thread_worker> thread_worker;
+    std::unique_ptr<ssx::singleton_thread_worker> thread_worker;
+
+    ss::sharded<kafka::server> _kafka_server;
 
     const std::unique_ptr<pandaproxy::schema_registry::api>& schema_registry() {
         return _schema_registry;
@@ -170,9 +172,10 @@ private:
     void start_bootstrap_services();
 
     // Constructs services across shards meant for Redpanda runtime.
-    void wire_up_runtime_services(model::node_id node_id);
+    void
+    wire_up_runtime_services(model::node_id node_id, ::stop_signal& app_signal);
     void configure_admin_server();
-    void wire_up_redpanda_services(model::node_id);
+    void wire_up_redpanda_services(model::node_id, ::stop_signal& app_signal);
 
     void load_feature_table_snapshot();
 
@@ -258,7 +261,6 @@ private:
     ss::sharded<rpc::rpc_server> _rpc;
     ss::sharded<admin_server> _admin;
     ss::sharded<net::conn_quota> _kafka_conn_quotas;
-    ss::sharded<kafka::server> _kafka_server;
     std::unique_ptr<pandaproxy::rest::api> _proxy;
     std::unique_ptr<pandaproxy::schema_registry::api> _schema_registry;
     ss::sharded<storage::compaction_controller> _compaction_controller;

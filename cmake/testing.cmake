@@ -74,8 +74,8 @@ function (rp_test)
     ${RP_TEST_BINARY_NAME} "${RP_TEST_SOURCES}")
   target_link_libraries(
     ${RP_TEST_BINARY_NAME} PUBLIC "${RP_TEST_LIBRARIES}")
-  if(${BUILD_DEPENDENCIES})
-    add_dependencies(${RP_TEST_BINARY_NAME} ${BUILD_DEPENDENCIES})
+  if (RP_TEST_BUILD_DEPENDENCIES)
+    add_dependencies(${RP_TEST_BINARY_NAME} ${RP_TEST_BUILD_DEPENDENCIES})
   endif()
 
   foreach(i ${RP_TEST_INCLUDES})
@@ -85,6 +85,9 @@ function (rp_test)
   foreach(i ${RP_TEST_DEFINITIONS})
     target_compile_definitions(${RP_TEST_BINARY_NAME} PRIVATE "${i}")
   endforeach()
+  if (RP_TEST_GTEST)
+    target_compile_definitions(${RP_TEST_BINARY_NAME} PRIVATE "IS_GTEST")
+  endif()
 
   install(TARGETS ${RP_TEST_BINARY_NAME} DESTINATION bin)
 

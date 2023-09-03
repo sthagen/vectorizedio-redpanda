@@ -44,6 +44,7 @@
 #include <cluster/partition_manager.h>
 
 #include <span>
+#include <system_error>
 
 namespace kafka {
 
@@ -156,9 +157,6 @@ public:
     ss::future<cluster::begin_group_tx_reply>
     begin_tx(cluster::begin_group_tx_request&&);
 
-    ss::future<cluster::prepare_group_tx_reply>
-    prepare_tx(cluster::prepare_group_tx_request&&);
-
     ss::future<cluster::abort_group_tx_reply>
     abort_tx(cluster::abort_group_tx_request&&);
 
@@ -256,7 +254,7 @@ private:
 
     ss::future<> gc_partition_state(ss::lw_shared_ptr<attached_partition>);
 
-    ss::future<> inject_noop(
+    ss::future<std::error_code> inject_noop(
       ss::lw_shared_ptr<cluster::partition> p,
       ss::lowres_clock::time_point timeout);
 

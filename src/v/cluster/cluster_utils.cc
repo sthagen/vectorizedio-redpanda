@@ -467,8 +467,7 @@ partition_raft_state get_partition_raft_state(consensus_ptr ptr) {
             state.last_received_seq = md.last_received_seq;
             state.last_successful_received_seq
               = md.last_successful_received_seq;
-            state.suppress_heartbeats = md.suppress_heartbeats
-                                        == raft::heartbeats_suppressed::yes;
+            state.suppress_heartbeats = md.are_heartbeats_suppressed();
             followers.push_back(std::move(state));
         }
         raft_state.followers = std::move(followers);
@@ -498,11 +497,11 @@ std::optional<ss::sstring> check_result_configuration(
   const members_table::cache_t& current_brokers,
   const model::broker& new_configuration) {
     auto it = current_brokers.find(new_configuration.id());
-    vassert(
-      it != current_brokers.end(),
-      "When broker configuration is being updated the broker must exists. "
-      "Updating broker {} configuration.",
-      new_configuration);
+    if (it == current_brokers.end()) {
+        return fmt::format(
+          "broker {} does not exists in list of cluster members",
+          new_configuration.id());
+    }
     auto& current_configuration = it->second.broker;
     /**
      * do no allow to decrease node core count

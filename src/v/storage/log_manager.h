@@ -236,6 +236,8 @@ public:
      */
     void trigger_gc();
 
+    gc_config default_gc_config() const;
+
 private:
     using logs_type
       = absl::flat_hash_map<model::ntp, std::unique_ptr<log_housekeeping_meta>>;
@@ -268,6 +270,7 @@ private:
     storage_resources& _resources;
     ss::sharded<features::feature_table>& _feature_table;
     simple_time_jitter<ss::lowres_clock> _jitter;
+    simple_time_jitter<ss::lowres_clock> _trigger_gc_jitter;
     logs_type _logs;
     compaction_list_type _logs_list;
     batch_cache _batch_cache;

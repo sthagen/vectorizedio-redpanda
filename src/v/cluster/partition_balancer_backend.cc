@@ -17,11 +17,13 @@
 #include "cluster/members_table.h"
 #include "cluster/partition_balancer_planner.h"
 #include "cluster/partition_balancer_state.h"
+#include "cluster/topic_table.h"
 #include "cluster/topics_frontend.h"
 #include "config/configuration.h"
 #include "config/property.h"
 #include "random/generators.h"
 #include "utils/gate_guard.h"
+#include "utils/stable_iterator_adaptor.h"
 
 #include <seastar/core/coroutine.hh>
 
@@ -244,6 +246,22 @@ void partition_balancer_backend::tick() {
           })
           .handle_exception_type([](balancer_tick_aborted_exception& e) {
               vlog(clusterlog.info, "tick aborted, reason: {}", e.what());
+          })
+          .handle_exception_type(
+            [this](topic_table::concurrent_modification_error& e) {
+                vlog(
+                  clusterlog.debug,
+                  "concurrent modification of topics table: {}, rescheduling "
+                  "tick",
+                  e.what());
+                maybe_rearm_timer(true);
+            })
+          .handle_exception_type([this](iterator_stability_violation& e) {
+              vlog(
+                clusterlog.debug,
+                "iterator_stability_violation: {}, rescheduling tick",
+                e.what());
+              maybe_rearm_timer(true);
           })
           .handle_exception([](const std::exception_ptr& e) {
               vlog(clusterlog.warn, "tick error: {}", e);

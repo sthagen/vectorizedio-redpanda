@@ -11,8 +11,11 @@
 
 #include "net/exceptions.h"
 #include "rpc/service.h"
+#include "seastarx.h"
+#include "ssx/abort_source.h"
 
 #include <seastar/core/future.hh>
+#include <seastar/net/tls.hh>
 
 #include <gnutls/gnutls.h>
 
@@ -26,10 +29,7 @@ namespace net {
 bool is_reconnect_error(const std::system_error& e) {
     auto v = e.code().value();
 
-    // The name() of seastar's gnutls_error_category class
-    constexpr std::string_view gnutls_category_name{"GnuTLS"};
-
-    if (e.code().category().name() == gnutls_category_name) {
+    if (e.code().category() == ss::tls::error_category()) {
         switch (v) {
         case GNUTLS_E_PUSH_ERROR:
         case GNUTLS_E_PULL_ERROR:
@@ -89,6 +89,10 @@ std::optional<ss::sstring> is_disconnect_exception(std::exception_ptr e) {
             return fmt::format("invalid request: {}", e.what());
         }
         return "invalid request";
+    } catch (const ssx::connection_aborted_exception&) {
+        return "connection aborted";
+    } catch (const ssx::shutdown_requested_exception&) {
+        return "shutdown requested";
     } catch (const ss::nested_exception& e) {
         if (auto err = is_disconnect_exception(e.inner)) {
             return err;

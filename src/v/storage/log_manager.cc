@@ -139,6 +139,7 @@ log_manager::log_manager(
   , _resources(resources)
   , _feature_table(feature_table)
   , _jitter(_config.compaction_interval())
+  , _trigger_gc_jitter(0s, 5s)
   , _batch_cache(config.reclaim_opts) {
     _config.compaction_interval.watch([this]() {
         _jitter = simple_time_jitter<ss::lowres_clock>{
@@ -749,26 +750,22 @@ ss::future<usage_report> log_manager::disk_usage() {
      * TODO: this will be factored out to make the sharing of settings easier to
      * maintain.
      */
-    model::timestamp collection_threshold;
-    if (!_config.delete_retention()) {
-        collection_threshold = model::timestamp(0);
-    } else {
-        collection_threshold = model::timestamp(
-          model::timestamp::now().value()
-          - _config.delete_retention()->count());
-    }
+    auto cfg = default_gc_config();
 
     fragmented_vector<ss::shared_ptr<log>> logs;
     for (auto& it : _logs) {
         logs.push_back(it.second->handle);
     }
 
+    ss::semaphore limit(std::max<size_t>(
+      1, config::shard_local_cfg().space_management_max_log_concurrency()));
+
     co_return co_await ss::map_reduce(
       logs.begin(),
       logs.end(),
-      [this, collection_threshold](ss::shared_ptr<log> log) {
-          return log->disk_usage(
-            gc_config(collection_threshold, _config.retention_bytes()));
+      [&limit, cfg](ss::shared_ptr<log> log) {
+          return ss::with_semaphore(
+            limit, 1, [cfg, log] { return log->disk_usage(cfg); });
       },
       usage_report{},
       [](usage_report acc, usage_report update) { return acc + update; });
@@ -793,8 +790,26 @@ void log_manager::handle_disk_notification(storage::disk_space_alert alert) {
 }
 
 void log_manager::trigger_gc() {
-    _gc_triggered = true;
-    _housekeeping_sem.signal();
+    ssx::spawn_with_gate(_open_gate, [this] {
+        return ss::sleep_abortable(
+                 _trigger_gc_jitter.next_duration(), _abort_source)
+          .then([this] {
+              _gc_triggered = true;
+              _housekeeping_sem.signal();
+          });
+    });
+}
+
+gc_config log_manager::default_gc_config() const {
+    model::timestamp collection_threshold;
+    if (!_config.delete_retention()) {
+        collection_threshold = model::timestamp(0);
+    } else {
+        collection_threshold = model::timestamp(
+          model::timestamp::now().value()
+          - _config.delete_retention()->count());
+    }
+    return {collection_threshold, _config.retention_bytes()};
 }
 
 } // namespace storage

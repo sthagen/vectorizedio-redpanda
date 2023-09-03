@@ -13,6 +13,7 @@
 #include "bytes/iobuf.h"
 #include "bytes/iostream.h"
 #include "cloud_storage/cache_service.h"
+#include "cloud_storage/download_exception.h"
 #include "cloud_storage/logger.h"
 #include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote_segment_index.h"
@@ -118,37 +119,6 @@ using namespace std::chrono_literals;
 
 static constexpr size_t max_consume_size = 128_KiB;
 
-// These timeout/backoff settings are for S3 requests
-static ss::lowres_clock::duration cache_hydration_timeout = 60s;
-static ss::lowres_clock::duration cache_hydration_backoff = 250ms;
-
-// This backoff is for failure of the local cache to retain recently
-// promoted data (i.e. highly stressed cache)
-static ss::lowres_clock::duration cache_thrash_backoff = 5000ms;
-
-download_exception::download_exception(
-  download_result r, std::filesystem::path p)
-  : result(r)
-  , path(std::move(p)) {
-    vassert(
-      r != download_result::success,
-      "Exception created with successful error code");
-}
-
-const char* download_exception::what() const noexcept {
-    switch (result) {
-    case download_result::failed:
-        return "Failed";
-    case download_result::notfound:
-        return "NotFound";
-    case download_result::timedout:
-        return "TimedOut";
-    case download_result::success:
-        vassert(false, "Successful result can't be used as an error");
-    }
-    __builtin_unreachable();
-}
-
 inline void expiry_handler_impl(ss::promise<ss::file>& pr) {
     pr.set_exception(ss::timed_out_error());
 }
@@ -167,7 +137,8 @@ remote_segment::remote_segment(
   const model::ntp& ntp,
   const segment_meta& meta,
   retry_chain_node& parent,
-  partition_probe& probe)
+  partition_probe& probe,
+  ts_read_path_probe& ts_probe)
   : _api(r)
   , _cache(c)
   , _bucket(std::move(bucket))
@@ -188,6 +159,7 @@ remote_segment::remote_segment(
   , _cache_backoff_jitter(cache_thrash_backoff)
   , _compacted(meta.is_compacted)
   , _sname_format(meta.sname_format)
+  , _metadata_size_hint(meta.metadata_size_hint)
   , _chunk_size(config::shard_local_cfg().cloud_storage_cache_chunk_size())
   // The max hydrated chunks per segment are either 0.5 of total number of
   // chunks possible, or in case of small segments the total number of chunks
@@ -196,14 +168,8 @@ remote_segment::remote_segment(
   // segment may be hydrated at a time.
   , _chunks_in_segment(
       std::max(static_cast<uint64_t>(ceil(_size / _chunk_size)), 1UL))
-  , _probe(probe) {
-    if (
-      meta.sname_format == segment_name_format::v3
-      && meta.metadata_size_hint == 0) {
-        // The tx-manifest is empty, no need to download it.
-        _tx_range.emplace();
-    }
-
+  , _probe(probe)
+  , _ts_probe(ts_probe) {
     vassert(_chunk_size != 0, "cloud_storage_cache_chunk_size should not be 0");
 
     if (
@@ -316,28 +282,32 @@ remote_segment::offset_data_stream(
     vlog(_ctxlog.debug, "remote segment file input stream at offset {}", start);
     ss::gate::holder g(_gate);
     co_await hydrate();
-    offset_index::find_result pos;
+
+    std::optional<offset_index::find_result> indexed_pos;
     std::optional<uint16_t> prefetch_override = std::nullopt;
+
+    // Perform index lookup by timestamp or offset. This reduces the number
+    // of hydrated chunks required to serve the request.
     if (first_timestamp) {
-        // Time queries are linear search from front of the segment.  The
-        // dominant cost of a time query on a remote partition is promoting
-        // the segment into our local cache: once it's here, the cost of
-        // a scan is comparatively small.  For workloads that do many time
-        // queries in close proximity on the same partition, an additional
-        // index could be added here, for hydrated segments.
-        pos = {
-          .rp_offset = _base_rp_offset,
-          .kaf_offset = _base_rp_offset - _base_offset_delta,
-          .file_pos = 0,
-        };
+        // The dominant cost of a time query on a remote partition is promoting
+        // the chunks into our local cache: once they're here, the cost of a
+        // scan is comparatively small.
+
         prefetch_override = 0;
+        indexed_pos = maybe_get_offsets(*first_timestamp);
     } else {
-        pos = maybe_get_offsets(start).value_or(offset_index::find_result{
-          .rp_offset = _base_rp_offset,
-          .kaf_offset = _base_rp_offset - _base_offset_delta,
-          .file_pos = 0,
-        });
+        indexed_pos = maybe_get_offsets(start);
     }
+
+    // If the index lookup failed, scan the entire segement starting from the
+    // first chunk.
+    offset_index::find_result pos = indexed_pos.value_or(
+      offset_index::find_result{
+        .rp_offset = _base_rp_offset,
+        .kaf_offset = _base_rp_offset - _base_offset_delta,
+        .file_pos = 0,
+      });
+
     vlog(
       _ctxlog.debug,
       "Offset data stream start reading at {}, log offset {}, delta {}",
@@ -385,9 +355,31 @@ remote_segment::maybe_get_offsets(kafka::offset kafka_offset) {
     }
     vlog(
       _ctxlog.debug,
-      "Using index to locate {}, the result is rp-offset: {}, kafka-offset: "
+      "Using index to locate Kafka offset {}, the result is rp-offset: {}, "
+      "kafka-offset: "
       "{}, file-pos: {}",
       kafka_offset,
+      pos->rp_offset,
+      pos->kaf_offset,
+      pos->file_pos);
+    return pos;
+}
+
+std::optional<offset_index::find_result>
+remote_segment::maybe_get_offsets(model::timestamp ts) {
+    if (!_index) {
+        return {};
+    }
+    auto pos = _index->find_timestamp(ts);
+    if (!pos) {
+        return {};
+    }
+    vlog(
+      _ctxlog.debug,
+      "Using index to locate timestamp {}, the result is rp-offset: {}, "
+      "kafka-offset: "
+      "{}, file-pos: {}",
+      ts,
       pos->rp_offset,
       pos->kaf_offset,
       pos->file_pos);
@@ -555,6 +547,12 @@ ss::future<> remote_segment::do_hydrate_txrange() {
     ss::gate::holder guard(_gate);
     retry_chain_node local_rtc(
       cache_hydration_timeout, cache_hydration_backoff, &_rtc);
+    if (_sname_format == segment_name_format::v3 && _metadata_size_hint == 0) {
+        // The tx-manifest is empty, no need to download it, and
+        // avoid putting this empty manifest into the cache.
+        _tx_range.emplace();
+        co_return;
+    }
 
     tx_range_manifest manifest(_path);
 
@@ -740,33 +738,6 @@ ss::future<bool> remote_segment::maybe_materialize_index() {
         co_return false;
     }
 }
-
-// NOTE: Aborted transactions handled using tx_range manifests.
-// The manifests are uploaded alongside the segments with (.tx)
-// suffix added to the name. The hydration of tx_range manifest
-// is not optional. We can't use the segment without it. The following
-// cases are possible:
-// - Both segment and tx-range are not hydrated;
-// - The segment is hydrated but tx-range isn't
-// - The segment is not hydrated but tx-range is
-// - Both segment and tx-range are hydrated
-// This doesn't include various 'in_progress' combinations which are
-// disallowed.
-//
-// Also, both segment and tx-range can be materialized or not. In case
-// of the segment this means that we're holding an opened file handler.
-// In case of tx-range this means that we parsed the json and populated
-// _tx_range collection.
-//
-// In order to be able to deal with the complexity this code combines
-// the flags and tries to handle all combinations that makes sense.
-enum class segment_txrange_status {
-    in_progress,
-    available,
-    not_available,
-    available_not_available,
-    not_available_available,
-};
 
 void remote_segment::set_waiter_errors(const std::exception_ptr& err) {
     while (!_wait_list.empty()) {
@@ -969,17 +940,21 @@ ss::future<> remote_segment::hydrate_chunk(segment_chunk_range range) {
     retry_chain_node rtc{
       cache_hydration_timeout, cache_hydration_backoff, &_rtc};
 
+    const auto chunk_count = range.chunk_count();
+
     const auto end = range.last_offset().value_or(_size - 1);
     auto consumer = split_segment_into_chunk_range_consumer{
       *this, std::move(range)};
 
-    auto measurement = _probe.chunk_hydration_latency();
+    auto measurement = _ts_probe.chunk_hydration_latency();
     auto res = co_await _api.download_segment(
       _bucket, _path, std::move(consumer), rtc, std::make_pair(start, end));
     if (res != download_result::success) {
         measurement->cancel();
         throw download_exception{res, _path};
     }
+
+    _ts_probe.on_chunks_hydration(chunk_count);
 }
 
 ss::future<ss::file>
@@ -1292,16 +1267,18 @@ remote_segment_batch_reader::remote_segment_batch_reader(
   ss::lw_shared_ptr<remote_segment> s,
   const storage::log_reader_config& config,
   partition_probe& probe,
+  ts_read_path_probe& ts_probe,
   ssx::semaphore_units units) noexcept
   : _seg(std::move(s))
   , _config(config)
   , _probe(probe)
+  , _ts_probe(ts_probe)
   , _rtc(_seg->get_retry_chain_node())
   , _ctxlog(cst_log, _rtc, _seg->get_ntp().path())
   , _cur_rp_offset(_seg->get_base_rp_offset())
   , _cur_delta(_seg->get_base_offset_delta())
   , _units(std::move(units)) {
-    _probe.segment_reader_created();
+    _ts_probe.segment_reader_created();
 }
 
 ss::future<result<ss::circular_buffer<model::record_batch>>>
@@ -1334,14 +1311,19 @@ remote_segment_batch_reader::read_some(
         if (
           _bytes_consumed != 0 && _bytes_consumed == new_bytes_consumed.value()
           && !_config.over_budget) {
-            vlog(
-              _ctxlog.error,
-              "segment_reader is stuck, segment ntp: {}, _cur_rp_offset: {}, "
+            const auto msg = fmt::format(
+              "segment_reader is stuck, segment ntp: {}, _cur_rp_offset: "
+              "{}, "
               "_bytes_consumed: {}, parser error state: {}",
               _seg->get_ntp(),
               _cur_rp_offset,
               _bytes_consumed,
               _parser->error());
+            if (_parser->error() == storage::parser_errc::end_of_stream) {
+                vlog(_ctxlog.info, "{}", msg);
+            } else {
+                vlog(_ctxlog.error, "{}", msg);
+            }
             _is_unexpected_eof = true;
             co_return ss::circular_buffer<model::record_batch>{};
         }
@@ -1403,7 +1385,7 @@ ss::future<> remote_segment_batch_reader::stop() {
 
 remote_segment_batch_reader::~remote_segment_batch_reader() noexcept {
     vassert(_stopped, "Destroyed without stopping");
-    _probe.segment_reader_destroyed();
+    _ts_probe.segment_reader_destroyed();
 }
 
 std::ostream& operator<<(std::ostream& os, hydration_request::kind kind) {

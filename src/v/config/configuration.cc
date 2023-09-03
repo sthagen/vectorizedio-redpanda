@@ -236,6 +236,12 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       512_KiB,
       {.min = 128, .max = 5_MiB})
+  , raft_enable_lw_heartbeat(
+      *this,
+      "raft_enable_lw_heartbeat",
+      "enables raft optimization of heartbeats",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , enable_usage(
       *this,
       "enable_usage",
@@ -474,6 +480,28 @@ configuration::configuration()
        .visibility = visibility::user},
       model::timestamp_type::create_time,
       {model::timestamp_type::create_time, model::timestamp_type::append_time})
+  , log_message_timestamp_alert_before_ms(
+      *this,
+      "log_message_timestamp_alert_before_ms",
+      "Threshold in milliseconds for alerting on messages with a timestamp "
+      "before the broker's time, meaning they are in the past relative to the "
+      "broker's clock. null to disable this check",
+      {.needs_restart = needs_restart::no,
+       .example = "604800000",
+       .visibility = visibility::tunable},
+      std::nullopt,
+      {.min = 5min})
+  , log_message_timestamp_alert_after_ms(
+      *this,
+      "log_message_timestamp_alert_after_ms",
+      "Threshold in milliseconds for alerting on messages with a timestamp "
+      "after the broker's time, meaning they are in the future relative to the "
+      "broker's clock.",
+      {.needs_restart = needs_restart::no,
+       .example = "3600000",
+       .visibility = visibility::tunable},
+      2h,
+      {.min = 5min})
   , log_compression_type(
       *this,
       "log_compression_type",
@@ -562,8 +590,21 @@ configuration::configuration()
   , max_concurrent_producer_ids(
       *this,
       "max_concurrent_producer_ids",
-      "Max cache size for pids which rm_stm stores inside internal state. In "
-      "overflow rm_stm will delete old pids and clear their status",
+      "Max number of the active sessions (producers). When the threshold "
+      "is passed Redpanda terminates old sessions. When an idle producer "
+      "corresponding to the terminated session wakes up and produces - it "
+      "leads to its batches being rejected with out of order sequence error.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::numeric_limits<uint64_t>::max(),
+      {.min = 1})
+  , max_transactions_per_coordinator(
+      *this,
+      "max_transactions_per_coordinator",
+      "Max number of the active txn sessions (producers). When the threshold "
+      "is passed Redpanda terminates old sessions. When an idle producer "
+      "corresponding to the terminated session wakes up and produces - it "
+      "leads to its batches being rejected with invalid producer epoch or "
+      "invalid_producer_id_mapping (it depends on the txn execution phase).",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::numeric_limits<uint64_t>::max(),
       {.min = 1})
@@ -1581,6 +1622,22 @@ configuration::configuration()
        .secret = is_secret::yes},
       std::nullopt,
       &validate_non_empty_string_opt)
+  , cloud_storage_azure_adls_endpoint(
+      *this,
+      "cloud_storage_azure_adls_endpoint",
+      "Azure Data Lake Storage v2 endpoint override. Use when Hierarchical "
+      "Namespaces are enabled on your storage account and you have set up a "
+      "custom endpoint.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      std::nullopt,
+      &validate_non_empty_string_opt)
+  , cloud_storage_azure_adls_port(
+      *this,
+      "cloud_storage_azure_adls_port",
+      "Azure Data Lake Storage v2 port override. Also see "
+      "cloud_storage_azure_adls_endpoint.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      std::nullopt)
   , cloud_storage_upload_ctrl_update_interval_ms(
       *this,
       "cloud_storage_upload_ctrl_update_interval_ms",
@@ -1704,6 +1761,24 @@ configuration::configuration()
       25.0,
       {.min = 0.0, .max = 100.0},
       legacy_default<double>(0.0, legacy_version{9}))
+  , space_management_max_log_concurrency(
+      *this,
+      "space_management_max_log_concurrency",
+      "Maximum parallel logs inspected during space management process.",
+      {.needs_restart = needs_restart::no,
+       .example = "20",
+       .visibility = visibility::tunable},
+      20,
+      {.min = 1})
+  , space_management_max_segment_concurrency(
+      *this,
+      "space_management_max_segment_concurrency",
+      "Maximum parallel segments inspected during space management process.",
+      {.needs_restart = needs_restart::no,
+       .example = "10",
+       .visibility = visibility::tunable},
+      10,
+      {.min = 1})
   , cloud_storage_cache_size(
       *this,
       "cloud_storage_cache_size",

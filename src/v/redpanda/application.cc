@@ -84,6 +84,7 @@
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/io_priority.h"
 #include "resource_mgmt/memory_sampling.h"
+#include "ssx/abort_source.h"
 #include "ssx/thread_worker.h"
 #include "storage/backlog_controller.h"
 #include "storage/chunk_cache.h"
@@ -1021,8 +1022,9 @@ make_upload_controller_config(ss::scheduling_group sg) {
 }
 
 // add additional services in here
-void application::wire_up_runtime_services(model::node_id node_id) {
-    wire_up_redpanda_services(node_id);
+void application::wire_up_runtime_services(
+  model::node_id node_id, ::stop_signal& app_signal) {
+    wire_up_redpanda_services(node_id, app_signal);
     if (_proxy_config) {
         construct_single_service(
           _proxy,
@@ -1051,7 +1053,8 @@ void application::wire_up_runtime_services(model::node_id node_id) {
     configure_admin_server();
 }
 
-void application::wire_up_redpanda_services(model::node_id node_id) {
+void application::wire_up_redpanda_services(
+  model::node_id node_id, ::stop_signal& app_signal) {
     ss::smp::invoke_on_all([] {
         resources::available_memory::local().register_metrics();
     }).get();
@@ -1091,7 +1094,10 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
               .heartbeat_timeout
               = config::shard_local_cfg().raft_heartbeat_timeout_ms.bind(),
               .raft_io_timeout_ms
-              = config::shard_local_cfg().raft_io_timeout_ms.bind()};
+              = config::shard_local_cfg().raft_io_timeout_ms.bind(),
+              .enable_lw_heartbeat
+              = config::shard_local_cfg().raft_enable_lw_heartbeat.bind(),
+            };
         },
         [] {
             return raft::recovery_memory_quota::configuration{
@@ -1137,7 +1143,18 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
           cloud_configs.local().connection_limit,
           ss::sharded_parameter(
             [&cloud_configs] { return cloud_configs.local().client_config; }),
-          cloud_storage_clients::client_pool_overdraft_policy::borrow_if_empty)
+          cloud_storage_clients::client_pool_overdraft_policy::borrow_if_empty,
+          ss::sharded_parameter(
+            [&app_signal]()
+              -> std::optional<std::reference_wrapper<::stop_signal>> {
+                if (
+                  ss::this_shard_id()
+                  == cloud_storage_clients::self_config_shard) {
+                    return std::ref(app_signal);
+                }
+
+                return std::nullopt;
+            }))
           .get();
         construct_service(
           cloud_storage_api,
@@ -1514,7 +1531,11 @@ void application::wire_up_redpanda_services(model::node_id node_id) {
       _rm_group_proxy.get(),
       std::ref(rm_partition_frontend),
       std::ref(feature_table),
-      std::ref(tm_stm_cache_manager))
+      std::ref(tm_stm_cache_manager),
+      ss::sharded_parameter([] {
+          return config::shard_local_cfg()
+            .max_transactions_per_coordinator.bind();
+      }))
       .get();
     _kafka_conn_quotas
       .start([]() {
@@ -1694,7 +1715,11 @@ application::set_proxy_client_config(ss::sstring name, std::any val) {
 }
 
 void application::trigger_abort_source() {
-    _as.invoke_on_all([](auto& local_as) { local_as.request_abort(); }).get();
+    _as
+      .invoke_on_all([](auto& local_as) {
+          local_as.request_abort_ex(ssx::shutdown_requested_exception{});
+      })
+      .get();
 }
 
 void application::wire_up_bootstrap_services() {
@@ -2041,7 +2066,7 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
       node_id,
       storage.local().get_cluster_uuid());
 
-    wire_up_runtime_services(node_id);
+    wire_up_runtime_services(node_id, app_signal);
 
     if (test_mode) {
         // When running inside a unit test fixture, we may fast-forward
@@ -2111,7 +2136,7 @@ void application::start_runtime_services(
             });
       });
 
-    thread_worker->start().get();
+    thread_worker->start({.name = "worker"}).get();
 
     // single instance
     node_status_backend.invoke_on_all(&cluster::node_status_backend::start)
@@ -2141,7 +2166,8 @@ void application::start_runtime_services(
                 smp_service_groups.raft_smp_sg(),
                 partition_manager,
                 shard_table.local(),
-                config::shard_local_cfg().raft_heartbeat_interval_ms()));
+                config::shard_local_cfg().raft_heartbeat_interval_ms(),
+                config::node().node_id().value()));
               s.add_services(std::move(runtime_services));
           })
           .get();
@@ -2182,7 +2208,8 @@ void application::start_runtime_services(
                 smp_service_groups.raft_smp_sg(),
                 partition_manager,
                 shard_table.local(),
-                config::shard_local_cfg().raft_heartbeat_interval_ms()));
+                config::shard_local_cfg().raft_heartbeat_interval_ms(),
+                config::node().node_id().value()));
           }
 
           runtime_services.push_back(std::make_unique<cluster::service>(

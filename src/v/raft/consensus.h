@@ -24,6 +24,7 @@
 #include "raft/event_manager.h"
 #include "raft/follower_stats.h"
 #include "raft/group_configuration.h"
+#include "raft/heartbeats.h"
 #include "raft/logger.h"
 #include "raft/mutex_buffer.h"
 #include "raft/offset_translator.h"
@@ -32,7 +33,6 @@
 #include "raft/recovery_memory_quota.h"
 #include "raft/replicate_batcher.h"
 #include "raft/timeout_jitter.h"
-#include "raft/types.h"
 #include "seastarx.h"
 #include "ssx/metrics.h"
 #include "ssx/semaphore.h"
@@ -217,6 +217,7 @@ public:
 
     // Open the current snapshot for reading (if present)
     ss::future<std::optional<opened_snapshot>> open_snapshot();
+    ss::future<std::optional<ss::file>> open_snapshot_file() const;
 
     std::filesystem::path get_snapshot_path() const {
         return _snapshot_mgr.snapshot_path();
@@ -404,10 +405,35 @@ public:
      * heartbeats when other append entries request or heartbeat request is in
      * flight.
      */
-    heartbeats_suppressed are_heartbeats_suppressed(vnode) const;
 
-    void update_suppress_heartbeats(
-      vnode, follower_req_seq, heartbeats_suppressed);
+    class suppress_heartbeats_guard {
+    public:
+        suppress_heartbeats_guard() noexcept = default;
+        explicit suppress_heartbeats_guard(
+          consensus& parent, vnode target) noexcept;
+
+        void unsuppress();
+
+        suppress_heartbeats_guard(suppress_heartbeats_guard&& other) noexcept
+          : _parent(other._parent)
+          , _target(other._target) {
+            other._parent = nullptr;
+        }
+        suppress_heartbeats_guard(const suppress_heartbeats_guard& other)
+          = delete;
+        suppress_heartbeats_guard& operator=(suppress_heartbeats_guard&& other)
+          = delete;
+        suppress_heartbeats_guard&
+        operator=(const suppress_heartbeats_guard& other)
+          = delete;
+        ~suppress_heartbeats_guard() noexcept { unsuppress(); }
+
+    private:
+        consensus* _parent = nullptr;
+        vnode _target;
+    };
+
+    suppress_heartbeats_guard suppress_heartbeats(vnode);
 
     void update_heartbeat_status(vnode, bool);
 
@@ -452,6 +478,17 @@ public:
     model::offset get_flushed_offset() const { return _flushed_offset; }
 
     bool stopped() const { return _bg.is_closed(); }
+
+    reply_result lightweight_heartbeat(
+      model::node_id source_node, model::node_id target_node);
+
+    ss::future<full_heartbeat_reply> full_heartbeat(
+      group_id group,
+      model::node_id source_node,
+      model::node_id target_node,
+      const heartbeat_request_data& hb_data);
+
+    void reset_last_sent_protocol_meta(const vnode&);
 
 private:
     friend replicate_entries_stm;
@@ -541,7 +578,6 @@ private:
 
     void arm_vote_timeout();
     void update_node_append_timestamp(vnode);
-    void update_node_reply_timestamp(vnode);
     void maybe_update_node_reply_timestamp(vnode);
 
     void update_follower_stats(const group_configuration&);

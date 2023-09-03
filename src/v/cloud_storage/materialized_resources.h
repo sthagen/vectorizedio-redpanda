@@ -11,6 +11,7 @@
 #pragma once
 
 #include "cloud_storage/materialized_manifest_cache.h"
+#include "cloud_storage/read_path_probes.h"
 #include "cloud_storage/remote_partition.h"
 #include "cloud_storage/segment_state.h"
 #include "config/property.h"
@@ -57,13 +58,15 @@ public:
 
     void register_segment(materialized_segment_state& s);
 
-    ssx::semaphore_units get_segment_reader_units();
+    ss::future<segment_reader_units> get_segment_reader_units();
 
     ss::future<ssx::semaphore_units> get_partition_reader_units(size_t);
 
-    ssx::semaphore_units get_segment_units();
+    ss::future<segment_units> get_segment_units();
 
     materialized_manifest_cache& get_materialized_manifest_cache();
+
+    ts_read_path_probe& get_read_path_probe();
 
 private:
     /// Timer use to periodically evict stale segment readers
@@ -93,6 +96,14 @@ private:
     uint64_t get_partition_readers_delayed() {
         return _partition_readers_delayed;
     }
+
+    /// Counts the number of times when get_segment_reader_units() was
+    /// called and had to sleep because no units were immediately available.
+    uint64_t get_segment_readers_delayed() { return _segment_readers_delayed; }
+
+    /// Counts the number of times when get_segment_units() was
+    /// called and had to sleep because no units were immediately available.
+    uint64_t get_segments_delayed() { return _segments_delayed; }
 
     /// Consume from _eviction_list
     ss::future<> run_eviction_loop();
@@ -152,6 +163,10 @@ private:
 
     /// Counter that is exposed via probe object.
     uint64_t _partition_readers_delayed{0};
+    uint64_t _segment_readers_delayed{0};
+    uint64_t _segments_delayed{0};
+
+    ts_read_path_probe _read_path_probe;
 };
 
 } // namespace cloud_storage

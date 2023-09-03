@@ -67,20 +67,20 @@
 #include "pandaproxy/schema_registry/api.h"
 #include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "raft/types.h"
-#include "redpanda/admin/api-doc/broker.json.h"
-#include "redpanda/admin/api-doc/cluster.json.h"
-#include "redpanda/admin/api-doc/cluster_config.json.h"
-#include "redpanda/admin/api-doc/config.json.h"
-#include "redpanda/admin/api-doc/debug.json.h"
-#include "redpanda/admin/api-doc/features.json.h"
-#include "redpanda/admin/api-doc/hbadger.json.h"
-#include "redpanda/admin/api-doc/partition.json.h"
-#include "redpanda/admin/api-doc/raft.json.h"
-#include "redpanda/admin/api-doc/security.json.h"
-#include "redpanda/admin/api-doc/shadow_indexing.json.h"
-#include "redpanda/admin/api-doc/status.json.h"
-#include "redpanda/admin/api-doc/transaction.json.h"
-#include "redpanda/admin/api-doc/usage.json.h"
+#include "redpanda/admin/api-doc/broker.json.hh"
+#include "redpanda/admin/api-doc/cluster.json.hh"
+#include "redpanda/admin/api-doc/cluster_config.json.hh"
+#include "redpanda/admin/api-doc/config.json.hh"
+#include "redpanda/admin/api-doc/debug.json.hh"
+#include "redpanda/admin/api-doc/features.json.hh"
+#include "redpanda/admin/api-doc/hbadger.json.hh"
+#include "redpanda/admin/api-doc/partition.json.hh"
+#include "redpanda/admin/api-doc/raft.json.hh"
+#include "redpanda/admin/api-doc/security.json.hh"
+#include "redpanda/admin/api-doc/shadow_indexing.json.hh"
+#include "redpanda/admin/api-doc/status.json.hh"
+#include "redpanda/admin/api-doc/transaction.json.hh"
+#include "redpanda/admin/api-doc/usage.json.hh"
 #include "resource_mgmt/memory_sampling.h"
 #include "rpc/errc.h"
 #include "security/acl.h"
@@ -464,7 +464,7 @@ bool get_boolean_query_param(
     }
 
     const ss::sstring& str_param = req.query_parameters.at(key);
-    return ss::http::request::case_insensitive_cmp()(str_param, "true")
+    return ss::internal::case_insensitive_cmp()(str_param, "true")
            || str_param == "1";
 }
 

@@ -11,12 +11,15 @@
 #include "archival/ntp_archiver_service.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/spillover_manifest.h"
+#include "cloud_storage/tests/manual_fixture.h"
 #include "cloud_storage/tests/produce_utils.h"
 #include "cloud_storage/tests/s3_imposter.h"
+#include "cluster/health_monitor_frontend.h"
 #include "config/configuration.h"
 #include "kafka/server/tests/produce_consume_utils.h"
 #include "model/fundamental.h"
 #include "redpanda/tests/fixture.h"
+#include "test_utils/scoped_config.h"
 
 #include <seastar/core/io_priority_class.hh>
 
@@ -43,11 +46,13 @@ public:
         set_expectations_and_listen({});
         wait_for_controller_leadership().get();
     }
+
+    scoped_config test_local_cfg;
 };
 
 FIXTURE_TEST(test_produce_consume_from_cloud, e2e_fixture) {
-    config::shard_local_cfg()
-      .cloud_storage_disable_upload_loop_for_tests.set_value(true);
+    test_local_cfg.get("cloud_storage_disable_upload_loop_for_tests")
+      .set_value(true);
     const model::topic topic_name("tapioca");
     model::ntp ntp(model::kafka_namespace, topic_name, 0);
     cluster::topic_properties props;
@@ -103,16 +108,15 @@ FIXTURE_TEST(test_produce_consume_from_cloud, e2e_fixture) {
 
 FIXTURE_TEST(test_produce_consume_from_cloud_with_spillover, e2e_fixture) {
 #ifndef _NDEBUG
-    config::shard_local_cfg()
-      .cloud_storage_disable_upload_loop_for_tests.set_value(true);
-    config::shard_local_cfg().cloud_storage_spillover_manifest_size.set_value(
-      std::make_optional((size_t)0x1000));
+    test_local_cfg.get("cloud_storage_disable_upload_loop_for_tests")
+      .set_value(true);
+    test_local_cfg.get("cloud_storage_spillover_manifest_size")
+      .set_value(std::make_optional((size_t)0x1000));
 
-    config::shard_local_cfg().cloud_storage_enable_segment_merging.set_value(
-      false);
+    test_local_cfg.get("cloud_storage_enable_segment_merging").set_value(false);
 
-    config::shard_local_cfg().enable_metrics_reporter.set_value(false);
-    config::shard_local_cfg().retention_local_strict.set_value(true);
+    test_local_cfg.get("enable_metrics_reporter").set_value(false);
+    test_local_cfg.get("retention_local_strict").set_value(true);
 
     const model::topic topic_name("tapioca");
     model::ntp ntp(model::kafka_namespace, topic_name, 0);
@@ -347,22 +351,20 @@ public:
         wait_for_controller_leadership().get();
 
         // Apply local retention frequently.
-        config::shard_local_cfg().log_compaction_interval_ms.set_value(
-          std::chrono::duration_cast<std::chrono::milliseconds>(1s));
+        test_local_cfg.get("log_compaction_interval_ms")
+          .set_value(std::chrono::duration_cast<std::chrono::milliseconds>(1s));
         // We'll control uploads ourselves.
-        config::shard_local_cfg()
-          .cloud_storage_enable_segment_merging.set_value(false);
-        config::shard_local_cfg()
-          .cloud_storage_disable_upload_loop_for_tests.set_value(true);
+        test_local_cfg.get("cloud_storage_enable_segment_merging")
+          .set_value(false);
+        test_local_cfg.get("cloud_storage_disable_upload_loop_for_tests")
+          .set_value(true);
         // Disable metrics to speed things up.
-        config::shard_local_cfg().enable_metrics_reporter.set_value(false);
+        test_local_cfg.get("enable_metrics_reporter").set_value(false);
         // Encourage spilling over.
-        config::shard_local_cfg()
-          .cloud_storage_spillover_manifest_max_segments.set_value(
-            std::make_optional<size_t>(segs_per_spill));
-        config::shard_local_cfg()
-          .cloud_storage_spillover_manifest_size.set_value(
-            std::optional<size_t>{});
+        test_local_cfg.get("cloud_storage_spillover_manifest_max_segments")
+          .set_value(std::make_optional<size_t>(segs_per_spill));
+        test_local_cfg.get("cloud_storage_spillover_manifest_size")
+          .set_value(std::optional<size_t>{});
 
         topic_name = model::topic("tapioca");
         ntp = model::ntp(model::kafka_namespace, topic_name, 0);
@@ -380,6 +382,7 @@ public:
         archiver = &partition->archiver()->get();
     }
 
+    scoped_config test_local_cfg;
     model::topic topic_name;
     model::ntp ntp;
     cluster::partition* partition;
@@ -420,7 +423,7 @@ ss::future<bool> check_consume_from_beginning(
 } // namespace
 
 FIXTURE_TEST(test_consume_during_spillover, cloud_storage_manual_e2e_test) {
-    config::shard_local_cfg().fetch_max_bytes.set_value(size_t{10});
+    test_local_cfg.get("fetch_max_bytes").set_value(size_t{10});
     const auto records_per_seg = 5;
     const auto num_segs = 40;
     tests::remote_segment_generator gen(make_kafka_client().get(), *partition);
@@ -463,4 +466,120 @@ FIXTURE_TEST(test_consume_during_spillover, cloud_storage_manual_e2e_test) {
         BOOST_CHECK(check.get());
     }
     cleanup.cancel();
+}
+
+FIXTURE_TEST(
+  reclaimable_reported_in_health_report,
+  cloud_storage_manual_multinode_test_base) {
+    test_local_cfg.get("retention_local_trim_interval")
+      .set_value(std::chrono::milliseconds(2000));
+
+    // start a second fixutre and wait for stable setup
+    auto fx2 = start_second_fixture();
+    tests::cooperative_spin_wait_with_timeout(3s, [this] {
+        return app.controller->get_members_table().local().node_ids().size()
+               == 2;
+    }).get();
+
+    // test topic
+    const model::topic topic_name("tapioca");
+    model::ntp ntp(model::kafka_namespace, topic_name, 0);
+    cluster::topic_properties props;
+    props.shadow_indexing = model::shadow_indexing_mode::full;
+    props.cleanup_policy_bitflags = model::cleanup_policy_bitflags::deletion;
+    props.segment_size = 64_KiB;
+    props.retention_local_target_bytes = tristate<size_t>(1);
+    add_topic({model::kafka_namespace, topic_name}, 1, props, 2).get();
+
+    // figuring out the leader is useful for constructing the producer. the
+    // follower is just the "other" node.
+    redpanda_thread_fixture* fx_l = nullptr;
+    RPTEST_REQUIRE_EVENTUALLY(10s, [&] {
+        cluster::partition* prt_a
+          = app.partition_manager.local().get(ntp).get();
+        cluster::partition* prt_b
+          = fx2->app.partition_manager.local().get(ntp).get();
+        if (!prt_a || !prt_b) {
+            return false;
+        }
+        if (prt_a->is_leader()) {
+            fx_l = this;
+            return true;
+        }
+        if (prt_b->is_leader()) {
+            fx_l = fx2.get();
+            return true;
+        }
+        return false;
+    });
+
+    auto prt_l = fx_l->app.partition_manager.local().get(ntp);
+
+    kafka_produce_transport producer(fx_l->make_kafka_client().get());
+    producer.start().get();
+
+    auto get_reclaimable = [&]() -> std::optional<std::vector<size_t>> {
+        auto report = app.controller->get_health_monitor()
+                        .local()
+                        .get_cluster_health(
+                          cluster::cluster_report_filter{},
+                          cluster::force_refresh::yes,
+                          model::timeout_clock::now() + std::chrono::seconds(2))
+                        .get();
+        if (report.has_value()) {
+            std::vector<size_t> sizes;
+            for (auto& node_report : report.value().node_reports) {
+                for (auto& topic : node_report.topics) {
+                    if (
+                      topic.tp_ns
+                      != model::topic_namespace_view(
+                        model::kafka_namespace, topic_name)) {
+                        continue;
+                    }
+                    for (auto partition : topic.partitions) {
+                        sizes.push_back(
+                          partition.reclaimable_size_bytes.value_or(0));
+                    }
+                }
+            }
+            if (!sizes.empty()) {
+                return sizes;
+            }
+        }
+        return std::nullopt;
+    };
+
+    for (int j = 0; j < 20; j++) {
+        for (int i = 0; i < 200; i++) {
+            producer
+              .produce_to_partition(
+                topic_name,
+                model::partition_id(0),
+                tests::kv_t::sequence(0, 200))
+              .get();
+        }
+
+        // drive the uploading
+        auto& archiver = prt_l->archiver()->get();
+        archiver.sync_for_tests().get();
+        archiver.upload_next_candidates().get();
+
+        // not for synchronization... just to give the system time to propogate
+        // all the state changes are are happening so that this overall loop
+        // doesn't spin to completion too fast.
+        ss::sleep(std::chrono::seconds(2)).get();
+
+        auto sizes = get_reclaimable();
+        if (sizes.has_value()) {
+            BOOST_REQUIRE(!sizes->empty());
+            if (std::all_of(sizes->begin(), sizes->end(), [](size_t s) {
+                    return s > 0;
+                })) {
+                return; // test success
+            }
+        }
+    }
+
+    // health report never reported non-zero reclaimable sizes. bummer!
+    BOOST_REQUIRE(false);
 }

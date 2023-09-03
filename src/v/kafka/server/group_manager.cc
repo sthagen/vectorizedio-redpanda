@@ -23,9 +23,11 @@
 #include "kafka/protocol/wire.h"
 #include "kafka/server/group_metadata.h"
 #include "kafka/server/group_recovery_consumer.h"
+#include "kafka/server/logger.h"
 #include "model/fundamental.h"
 #include "model/namespace.h"
 #include "model/record.h"
+#include "raft/errc.h"
 #include "raft/types.h"
 #include "resource_mgmt/io_priority.h"
 #include "ssx/future-util.h"
@@ -33,6 +35,8 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
+
+#include <system_error>
 
 namespace kafka {
 
@@ -541,17 +545,27 @@ void group_manager::handle_leader_change(
     });
 }
 
-ss::future<> group_manager::inject_noop(
+ss::future<std::error_code> group_manager::inject_noop(
   ss::lw_shared_ptr<cluster::partition> p,
-  [[maybe_unused]] ss::lowres_clock::time_point timeout) {
+  ss::lowres_clock::time_point timeout) {
     auto dirty_offset = p->dirty_offset();
     auto barrier_offset = co_await p->linearizable_barrier();
+    if (barrier_offset.has_error()) {
+        co_return barrier_offset.error();
+    }
     // synchronization provided by raft after future resolves is sufficient to
     // get an up-to-date commit offset as an upperbound for our reader.
     while (barrier_offset.has_value()
            && barrier_offset.value() < dirty_offset) {
         barrier_offset = co_await p->linearizable_barrier();
+        if (barrier_offset.has_error()) {
+            co_return barrier_offset.error();
+        }
+        if (ss::lowres_clock::now() > timeout) {
+            co_return raft::errc::timeout;
+        }
     }
+    co_return raft::errc::success;
 }
 
 ss::future<>
@@ -625,7 +639,17 @@ ss::future<> group_manager::handle_partition_leader_change(
     return p->catchup_lock->hold_write_lock().then(
       [this, term, timeout, p](ss::basic_rwlock<>::holder unit) {
           return inject_noop(p->partition, timeout)
-            .then([this, term, timeout, p] {
+            .then([this, term, timeout, p](std::error_code error) {
+                if (error) {
+                    vlog(
+                      klog.warn,
+                      "error injecting partition {} linearizable barrier - {}",
+                      p->partition->ntp(),
+                      error.message());
+                    return p->partition->raft()->step_down(
+                      "unable to recover group");
+                }
+
                 /*
                  * the full log is read and deduplicated. the dedupe
                  * processing is based on the record keys, so this code
@@ -1170,44 +1194,6 @@ group_manager::begin_tx(cluster::begin_group_tx_request&& r) {
           }
 
           return group->handle_begin_tx(std::move(r))
-            .finally([unit = std::move(unit), group] {});
-      });
-}
-
-ss::future<cluster::prepare_group_tx_reply>
-group_manager::prepare_tx(cluster::prepare_group_tx_request&& r) {
-    auto p = get_attached_partition(r.ntp);
-    if (!p || !p->catchup_lock->try_read_lock()) {
-        // transaction operations can't run in parallel with loading
-        // state from the log (happens once per term change)
-        vlog(
-          cluster::txlog.trace,
-          "can't process a tx: coordinator_load_in_progress");
-        return ss::make_ready_future<cluster::prepare_group_tx_reply>(
-          make_prepare_tx_reply(
-            cluster::tx_errc::coordinator_load_in_progress));
-    }
-    p->catchup_lock->read_unlock();
-
-    return p->catchup_lock->hold_read_lock().then(
-      [this, p, r = std::move(r)](ss::basic_rwlock<>::holder unit) mutable {
-          auto error = validate_group_status(
-            r.ntp, r.group_id, offset_commit_api::key);
-          if (error != error_code::none) {
-              auto ec = error == error_code::not_coordinator
-                          ? cluster::tx_errc::not_coordinator
-                          : cluster::tx_errc::timeout;
-              return ss::make_ready_future<cluster::prepare_group_tx_reply>(
-                make_prepare_tx_reply(ec));
-          }
-
-          auto group = get_group(r.group_id);
-          if (!group) {
-              return ss::make_ready_future<cluster::prepare_group_tx_reply>(
-                make_prepare_tx_reply(cluster::tx_errc::timeout));
-          }
-
-          return group->handle_prepare_tx(std::move(r))
             .finally([unit = std::move(unit), group] {});
       });
 }

@@ -84,6 +84,7 @@ struct configuration final : public config_store {
     deprecated_property max_version;
     bounded_property<std::optional<size_t>> raft_max_recovery_memory;
     bounded_property<size_t> raft_recovery_default_read_size;
+    property<bool> raft_enable_lw_heartbeat;
     // Kafka
     property<bool> enable_usage;
     bounded_property<size_t> usage_num_windows;
@@ -122,6 +123,10 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> alter_topic_cfg_timeout_ms;
     property<model::cleanup_policy_bitflags> log_cleanup_policy;
     enum_property<model::timestamp_type> log_message_timestamp_type;
+    bounded_property<std::optional<std::chrono::milliseconds>>
+      log_message_timestamp_alert_before_ms;
+    bounded_property<std::chrono::milliseconds>
+      log_message_timestamp_alert_after_ms;
     enum_property<model::compression> log_compression_type;
     property<size_t> fetch_max_bytes;
     property<bool> use_fetch_scheduler_group;
@@ -134,6 +139,7 @@ struct configuration final : public config_store {
     // same as transactional.id.expiration.ms in kafka
     property<std::chrono::milliseconds> transactional_id_expiration_ms;
     bounded_property<uint64_t> max_concurrent_producer_ids;
+    bounded_property<uint64_t> max_transactions_per_coordinator;
     property<bool> enable_idempotence;
     property<bool> enable_transactions;
     property<uint32_t> abort_index_segment_size;
@@ -309,6 +315,8 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
     property<std::optional<ss::sstring>> cloud_storage_azure_container;
     property<std::optional<ss::sstring>> cloud_storage_azure_shared_key;
+    property<std::optional<ss::sstring>> cloud_storage_azure_adls_endpoint;
+    property<std::optional<uint16_t>> cloud_storage_azure_adls_port;
 
     // Archival upload controller
     property<std::chrono::milliseconds>
@@ -330,6 +338,8 @@ struct configuration final : public config_store {
     property<double> retention_local_trim_overage_coeff;
     property<bool> space_management_enable;
     bounded_property<double, numeric_bounds> disk_reservation_percent;
+    bounded_property<uint16_t> space_management_max_log_concurrency;
+    bounded_property<uint16_t> space_management_max_segment_concurrency;
 
     // Archival cache
     property<uint64_t> cloud_storage_cache_size;
