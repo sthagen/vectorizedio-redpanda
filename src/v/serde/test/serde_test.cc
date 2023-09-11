@@ -11,7 +11,6 @@
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "random/generators.h"
-#include "serde/envelope.h"
 #include "serde/serde.h"
 #include "test_utils/randoms.h"
 #include "tristate.h"
@@ -239,6 +238,16 @@ SEASTAR_THREAD_TEST_CASE(vector_test) {
     auto parser = iobuf_parser{std::move(b)};
     auto const m = serde::read<std::vector<int>>(parser);
     BOOST_CHECK((m == std::vector{1, 2, 3}));
+}
+
+SEASTAR_THREAD_TEST_CASE(array_test) {
+    auto b = iobuf();
+
+    serde::write(b, std::array<int, 3>{1, 2, 3});
+
+    auto parser = iobuf_parser{std::move(b)};
+    auto const m = serde::read<std::array<int, 3>>(parser);
+    BOOST_CHECK((m == std::array<int, 3>{1, 2, 3}));
 }
 
 // struct with differing sizes:
@@ -966,17 +975,17 @@ struct no_default_ctor
     bool operator==(const no_default_ctor&) const = default;
 
     static no_default_ctor
-    serde_direct_read(iobuf_parser& in, size_t const bytes_left_limit) {
+    serde_direct_read(iobuf_parser& in, const serde::header& h) {
         using serde::read_nested;
         int x;
-        read_nested(in, x, bytes_left_limit);
+        read_nested(in, x, h._bytes_left_limit);
         return no_default_ctor(x);
     }
 
     int x;
 };
 
-static_assert(serde::has_serde_direct_read<no_default_ctor>);
+static_assert(serde::DirectReadable<no_default_ctor>);
 
 SEASTAR_THREAD_TEST_CASE(no_default_ctor_test) {
     BOOST_CHECK_EQUAL(serde_input(no_default_ctor(37)).x, 37);

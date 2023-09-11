@@ -17,6 +17,7 @@
 #include "raft/consensus_utils.h"
 #include "raft/errc.h"
 #include "raft/group_configuration.h"
+#include "raft/logger.h"
 #include "reflection/adl.h"
 #include "reflection/async_adl.h"
 #include "serde/serde.h"
@@ -159,7 +160,8 @@ std::ostream& operator<<(std::ostream& o, const append_entries_reply& r) {
              << ", last_dirty_log_index:" << r.last_dirty_log_index
              << ", last_flushed_log_index:" << r.last_flushed_log_index
              << ", last_term_base_offset:" << r.last_term_base_offset
-             << ", result: " << r.result << "}";
+             << ", result: " << r.result << ", may_recover:" << r.may_recover
+             << "}";
 }
 
 std::ostream& operator<<(std::ostream& o, const vote_request& r) {
@@ -216,7 +218,8 @@ std::ostream& operator<<(std::ostream& o, const protocol_metadata& m) {
     return o << "{raft_group:" << m.group << ", commit_index:" << m.commit_index
              << ", term:" << m.term << ", prev_log_index:" << m.prev_log_index
              << ", prev_log_term:" << m.prev_log_term
-             << ", last_visible_index:" << m.last_visible_index << "}";
+             << ", last_visible_index:" << m.last_visible_index
+             << ", dirty_offset:" << m.dirty_offset << "}";
 }
 std::ostream& operator<<(std::ostream& o, const vote_reply& r) {
     return o << "{term:" << r.term << ", target_node_id" << r.target_node_id
@@ -246,7 +249,7 @@ std::ostream& operator<<(std::ostream& o, const install_snapshot_request& r) {
       o,
       "{{term: {}, group: {}, target_node_id: {}, node_id: {}, "
       "last_included_index: {}, "
-      "file_offset: {}, chunk_size: {}, done: {}}}",
+      "file_offset: {}, chunk_size: {}, done: {}, dirty_offset: {}}}",
       r.term,
       r.group,
       r.target_node_id,
@@ -254,7 +257,8 @@ std::ostream& operator<<(std::ostream& o, const install_snapshot_request& r) {
       r.last_included_index,
       r.file_offset,
       r.chunk.size_bytes(),
-      r.done);
+      r.done,
+      r.dirty_offset);
     return o;
 }
 
@@ -418,6 +422,8 @@ void heartbeat_request::serde_read(
         hb.meta.commit_index = decode_signed(hb.meta.commit_index);
         hb.meta.prev_log_term = decode_signed(hb.meta.prev_log_term);
         hb.meta.last_visible_index = decode_signed(hb.meta.last_visible_index);
+        // for heartbeats dirty_offset and prev_log_index are always the same.
+        hb.meta.dirty_offset = hb.meta.prev_log_index;
         hb.node_id = raft::vnode(
           hb.node_id.id(), decode_signed(hb.node_id.revision()));
         hb.target_node_id = raft::vnode(
@@ -505,6 +511,8 @@ void heartbeat_reply::serde_write(iobuf& dst) {
     for (auto& m : reply.meta) {
         write(out, m.result);
     }
+    // Don't bother serializing m.may_recover because nodes that will have
+    // meaningful may_recover are expected to use lightweight heartbeats anyway.
 
     write(dst, std::move(out));
 }
@@ -628,11 +636,11 @@ ss::future<> append_entries_request::serde_async_write(iobuf& dst) {
 
 ss::future<append_entries_request>
 append_entries_request::serde_async_direct_read(
-  iobuf_parser& src, size_t bytes_left_limit) {
+  iobuf_parser& src, serde::header h) {
     using serde::read_async_nested;
     using serde::read_nested;
 
-    auto tmp = co_await read_async_nested<iobuf>(src, bytes_left_limit);
+    auto tmp = co_await read_async_nested<iobuf>(src, h._bytes_left_limit);
     iobuf_parser in(std::move(tmp));
 
     auto batch_count = read_nested<uint32_t>(in, 0U);
@@ -707,7 +715,7 @@ append_entries_request_serde_wrapper::serde_async_write(iobuf& dst) {
 
 ss::future<append_entries_request_serde_wrapper>
 append_entries_request_serde_wrapper::serde_async_direct_read(
-  iobuf_parser& src, size_t bytes_left_limit) {
+  iobuf_parser& src, serde::header h) {
     using serde::read_async_nested;
     using serde::read_nested;
 
@@ -721,7 +729,7 @@ append_entries_request_serde_wrapper::serde_async_direct_read(
 
     for (uint32_t i = 0; i < batch_count; ++i) {
         auto b = co_await serde::read_async_nested<model::record_batch>(
-          src, bytes_left_limit);
+          src, h._bytes_left_limit);
         batches.push_back(std::move(b));
         co_await ss::coroutine::maybe_yield();
     }
@@ -749,35 +757,6 @@ std::ostream& operator<<(std::ostream& o, const append_entries_request& r) {
 } // namespace raft
 
 namespace reflection {
-
-void adl<raft::protocol_metadata>::to(
-  iobuf& out, raft::protocol_metadata request) {
-    std::array<bytes::value_type, 6 * vint::max_length> staging{};
-    auto idx = vint::serialize(request.group(), staging.data());
-    idx += vint::serialize(request.commit_index(), staging.data() + idx);
-    idx += vint::serialize(request.term(), staging.data() + idx);
-
-    // varint the delta-encoded value
-    idx += vint::serialize(request.prev_log_index(), staging.data() + idx);
-    idx += vint::serialize(request.prev_log_term(), staging.data() + idx);
-    idx += vint::serialize(request.last_visible_index(), staging.data() + idx);
-
-    out.append(
-      // NOLINTNEXTLINE
-      reinterpret_cast<const char*>(staging.data()),
-      idx);
-}
-
-raft::protocol_metadata adl<raft::protocol_metadata>::from(iobuf_parser& in) {
-    raft::protocol_metadata ret;
-    ret.group = varlong_reader<raft::group_id>(in);
-    ret.commit_index = varlong_reader<model::offset>(in);
-    ret.term = varlong_reader<model::term_id>(in);
-    ret.prev_log_index = varlong_reader<model::offset>(in);
-    ret.prev_log_term = varlong_reader<model::term_id>(in);
-    ret.last_visible_index = varlong_reader<model::offset>(in);
-    return ret;
-}
 
 raft::snapshot_metadata adl<raft::snapshot_metadata>::from(iobuf_parser& in) {
     auto last_included_index = adl<model::offset>{}.from(in);

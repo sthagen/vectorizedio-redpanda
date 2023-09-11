@@ -54,11 +54,9 @@ from rptest.clients.rp_storage_tool import RpStorageTool
 from rptest.services import tls
 from rptest.services.admin import Admin
 from rptest.services.redpanda_installer import RedpandaInstaller, VERSION_RE as RI_VERSION_RE, int_tuple as ri_int_tuple
-from rptest.services.redpanda_cloud import CloudCluster
+from rptest.services.redpanda_cloud import CloudCluster, load_tier_profiles, tiers_config_filename, AdvertisedTierConfig, AdvertisedTierConfigs, CloudTierName
 from rptest.services.rolling_restarter import RollingRestarter
 from rptest.services.storage import ClusterStorage, NodeStorage, NodeCacheStorage
-from rptest.services.storage_tiers import AdvertisedTierConfig, AdvertisedTierConfigs, \
-    CloudTierName, load_tier_profiles, tiers_config_filename
 from rptest.services.storage_failure_injection import FailureInjectionConfig
 from rptest.services.utils import BadLogLines, NodeCrash
 from rptest.util import inject_remote_script, ssh_output_stderr, wait_until_result
@@ -666,8 +664,8 @@ class SecurityConfig:
     # sasl is required
     def sasl_enabled(self):
         return (self.kafka_enable_authorization is None and self.enable_sasl
-                and self.endpoint_authn_method is None
-                ) or self.endpoint_authn_method == "sasl"
+                and self.endpoint_authn_method
+                is None) or self.endpoint_authn_method == "sasl"
 
     # principal is extracted from mtls distinguished name
     def mtls_identity_enabled(self):
@@ -954,13 +952,18 @@ class RedpandaServiceBase(Service):
                    metric_name,
                    metrics_endpoint: MetricsEndpoint = MetricsEndpoint.METRICS,
                    ns=None,
-                   topic=None):
+                   topic=None,
+                   nodes=None):
         """
         Pings the 'metrics_endpoint' of each node and returns the summed values
         of the given metric, optionally filtering by namespace and topic.
         """
+
+        if nodes is None:
+            nodes = self.nodes
+
         count = 0
-        for n in self.nodes:
+        for n in nodes:
             metrics = self.metrics(n, metrics_endpoint=metrics_endpoint)
             for family in metrics:
                 for sample in family.samples:
@@ -1190,8 +1193,12 @@ class RedpandaServiceBase(Service):
 
             # List of regexes that will fail the test on if they appear in the log
             match_terms = [
-                "Segmentation fault", "[Aa]ssert",
-                "Exceptional future ignored", "UndefinedBehaviorSanitizer"
+                "Segmentation fault",
+                "[Aa]ssert",
+                "Exceptional future ignored",
+                "UndefinedBehaviorSanitizer",
+                "Aborting on shard",
+                "libc++abi: terminating due to uncaught exception",
             ]
             if self._raise_on_errors:
                 match_terms.append("^ERROR")
@@ -2352,8 +2359,10 @@ class RedpandaService(RedpandaServiceBase):
             admin_client = self._admin
 
         patch_result = admin_client.patch_cluster_config(
-            upsert={k: v
-                    for k, v in values.items() if v is not None},
+            upsert={
+                k: v
+                for k, v in values.items() if v is not None
+            },
             remove=[k for k, v in values.items() if v is None])
         new_version = patch_result['config_version']
 
@@ -2573,8 +2582,7 @@ class RedpandaService(RedpandaServiceBase):
                 if ".bin" in m:
                     try:
                         decoded = RpStorageTool(
-                            self.logger).decode_partition_manifest(
-                                body, self.logger)
+                            self.logger).decode_partition_manifest(body)
                     except Exception as e:
                         self.logger.warn(f"Failed to decode {m}: {e}")
                     else:

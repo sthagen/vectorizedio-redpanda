@@ -29,6 +29,7 @@
 #include "raft/recovery_stm.h"
 #include "raft/replicate_entries_stm.h"
 #include "raft/rpc_client_protocol.h"
+#include "raft/state_machine_manager.h"
 #include "raft/types.h"
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
@@ -266,6 +267,9 @@ ss::future<> consensus::stop() {
         idx.second.follower_state_change.broken();
     }
     co_await _event_manager.stop();
+    if (_stm_manager) {
+        co_await _stm_manager->stop();
+    }
     co_await _append_requests_buffer.stop();
     co_await _batcher.stop();
 
@@ -620,9 +624,19 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     if (_vstate != vote_state::leader) {
         co_return result<model::offset>(make_error_code(errc::not_leader));
     }
-    // store current commit index
-    auto cfg = config();
-    auto dirty_offset = _log->offsets().dirty_offset;
+    /**
+     * Flush log on leader, to make sure the _commited_index will be updated
+     */
+    co_await flush_log();
+    const auto cfg = config();
+    const auto offsets = _log->offsets();
+
+    vlog(
+      _ctxlog.trace,
+      "Linearizable barrier requested. Log state: {}, flushed offset: {}",
+      offsets,
+      _flushed_offset);
+
     /**
      * Dispatch round of heartbeats
      */
@@ -630,8 +644,10 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     absl::flat_hash_map<vnode, follower_req_seq> sequences;
     std::vector<ss::future<>> send_futures;
     send_futures.reserve(cfg.unique_voter_count());
-    cfg.for_each_voter([this, dirty_offset, &sequences, &send_futures](
-                         vnode target) {
+    cfg.for_each_voter([this,
+                        dirty_offset = offsets.dirty_offset,
+                        &sequences,
+                        &send_futures](vnode target) {
         // do not send request to self
         if (target == _self) {
             return;
@@ -696,7 +712,9 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     } catch (const ss::broken_condition_variable& e) {
         co_return ret_t(make_error_code(errc::shutting_down));
     }
-
+    // grab an oplock to serialize state updates i.e. wait for all updates in
+    // the state that were caused by follower replies
+    auto units = co_await _op_lock.get_units();
     // term have changed, not longer a leader
     if (term != _term) {
         co_return ret_t(make_error_code(errc::not_leader));
@@ -1286,7 +1304,11 @@ ss::future<std::error_code> consensus::force_replace_configuration_locally(
     co_return errc::success;
 }
 
-ss::future<> consensus::start() {
+ss::future<> consensus::start(
+  std::optional<state_machine_manager_builder> stm_manager_builder) {
+    if (stm_manager_builder) {
+        _stm_manager = std::move(stm_manager_builder.value()).build(this);
+    }
     return ss::try_with_gate(_bg, [this] { return do_start(); });
 }
 
@@ -1483,6 +1505,9 @@ ss::future<> consensus::do_start() {
 
         co_await _event_manager.start();
         _append_requests_buffer.start();
+        if (_stm_manager) {
+            co_await _stm_manager->start();
+        }
 
         vlog(
           _ctxlog.info,
@@ -2633,7 +2658,8 @@ protocol_metadata consensus::meta() const {
       .term = _term,
       .prev_log_index = lstats.dirty_offset,
       .prev_log_term = prev_log_term,
-      .last_visible_index = last_visible_index()};
+      .last_visible_index = last_visible_index(),
+      .dirty_offset = lstats.dirty_offset};
 }
 
 void consensus::update_node_append_timestamp(vnode id) {
@@ -2649,7 +2675,7 @@ void consensus::maybe_update_node_reply_timestamp(vnode id) {
 
 follower_req_seq consensus::next_follower_sequence(vnode id) {
     if (auto it = _fstats.find(id); it != _fstats.end()) {
-        return it->second.last_sent_seq++;
+        return it->second.next_follower_sequence();
     }
 
     return follower_req_seq{};
@@ -3633,6 +3659,7 @@ ss::future<full_heartbeat_reply> consensus::full_heartbeat(
         .prev_log_index = hb_data.prev_log_index,
         .prev_log_term = hb_data.prev_log_term,
         .last_visible_index = hb_data.last_visible_index,
+        .dirty_offset = hb_data.prev_log_index,
       },
       model::make_memory_record_batch_reader(
         ss::circular_buffer<model::record_batch>{}),
@@ -3646,6 +3673,7 @@ ss::future<full_heartbeat_reply> consensus::full_heartbeat(
       .last_flushed_log_index = r.last_flushed_log_index,
       .last_dirty_log_index = r.last_dirty_log_index,
       .last_term_base_offset = r.last_term_base_offset,
+      .may_recover = r.may_recover,
     };
     co_return reply;
 }

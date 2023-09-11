@@ -163,8 +163,8 @@ class CloudStorageCompactionTest(EndToEndTest):
                    backoff_sec=5)
 
     @cluster(num_nodes=9)
-    @matrix(
-        cloud_storage_type=get_cloud_storage_type(docker_use_arbitrary=True))
+    @matrix(cloud_storage_type=get_cloud_storage_type(
+        docker_use_arbitrary=True))
     def test_read_from_replica(self, cloud_storage_type):
         self.start_workload()
         self.start_consumer(num_nodes=2,
@@ -184,22 +184,22 @@ class CloudStorageCompactionTest(EndToEndTest):
 
         upload_sucess = sum([
             sample.value for sample in self.redpanda.metrics_sample(
-                "successful_uploads",
+                "cloud_storage_successful_uploads",
                 metrics_endpoint=MetricsEndpoint.METRICS).samples
         ])
         upload_fails = sum([
             sample.value for sample in self.redpanda.metrics_sample(
-                "failed_uploads",
+                "cloud_storage_failed_uploads",
                 metrics_endpoint=MetricsEndpoint.METRICS).samples
         ])
         download_sucess = sum([
             sample.value for sample in self.rr_cluster.metrics_sample(
-                "successful_downloads",
+                "cloud_storage_successful_downloads",
                 metrics_endpoint=MetricsEndpoint.METRICS).samples
         ])
         download_fails = sum([
             sample.value for sample in self.rr_cluster.metrics_sample(
-                "failed_downloads",
+                "cloud_storage_failed_downloads",
                 metrics_endpoint=MetricsEndpoint.METRICS).samples
         ])
 

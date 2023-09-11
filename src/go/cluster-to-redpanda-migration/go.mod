@@ -7,7 +7,7 @@ require (
 	github.com/r3labs/diff/v3 v3.0.1
 	github.com/redpanda-data/redpanda/src/go/k8s v0.0.0-20230711000139-412f31a082ac
 	github.com/spf13/cobra v1.6.1
-	github.com/stretchr/testify v1.8.2
+	github.com/stretchr/testify v1.8.4
 	k8s.io/api v0.26.2
 	k8s.io/apimachinery v0.26.2
 	k8s.io/kubectl v0.26.0
@@ -18,7 +18,7 @@ require (
 require (
 	emperror.dev/errors v0.8.1 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
-	github.com/Masterminds/semver/v3 v3.2.0 // indirect
+	github.com/Masterminds/semver/v3 v3.2.1 // indirect
 	github.com/Masterminds/sprig/v3 v3.2.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cert-manager/cert-manager v1.11.0 // indirect
