@@ -12,10 +12,10 @@ v_cc_library(
     schema_registry_module.cc
     transform_module.cc
     wasi.cc
-    wasmedge.cc
+    wasmtime.cc
     work_queue.cc
   DEPS
-    wasmedge
+    wasmtime
     v::storage
     v::model
     v::pandaproxy_schema_registry

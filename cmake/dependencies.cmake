@@ -85,24 +85,23 @@ FetchContent_Declare(tinygo
   DOWNLOAD_EXTRACT_TIMESTAMP ON)
 FetchContent_GetProperties(tinygo)
 
-set(WASMEDGE_BUILD_TOOLS OFF)
-set(WASMEDGE_BUILD_AOT_RUNTIME OFF)
-set(WASMEDGE_BUILD_PLUGINS OFF)
-set(WASMEDGE_BUILD_SHARED_LIB OFF)
-set(WASMEDGE_BUILD_STATIC_LIB OFF)
-if(BUILD_SHARED_LIBS)
-  set(WASMEDGE_BUILD_SHARED_LIB ON)
-else()
-  set(WASMEDGE_BUILD_STATIC_LIB ON)
-endif()
-fetch_dep(wasmedge
-  REPO https://github.com/WasmEdge/WasmEdge
-  TAG 0.13.2
-  PATCH_COMMAND sed -i "s/set\(CMAKE_JOB_POOL_LINK/#set\(CMAKE_JOB_POOL_LINK/g" cmake/Helper.cmake)
-
 fetch_dep(hdrhistogram
   REPO https://github.com/HdrHistogram/HdrHistogram_c
   TAG 0.11.5)
+
+# We need submodules for wasmtime to compile
+FetchContent_Declare(
+  wasmtime
+  GIT_REPOSITORY https://github.com/bytecodealliance/wasmtime
+  GIT_TAG f433e783147f1ec0fd2959752004a248b6139b3a
+  # Remove all default features we don't use any of them.
+  PATCH_COMMAND
+    sed -i "s/default \\\\= \\\\['jitdump', 'wat', 'wasi', 'cache', 'parallel\\\\-compilation'\\\\]/default = []/g" crates/c-api/Cargo.toml
+  GIT_PROGRESS TRUE
+  USES_TERMINAL_DOWNLOAD TRUE
+  OVERRIDE_FIND_PACKAGE
+  SYSTEM
+  SOURCE_SUBDIR crates/c-api)
 
 FetchContent_MakeAvailable(
     fmt
@@ -114,7 +113,7 @@ FetchContent_MakeAvailable(
     roaring
     avro
     tinygo
-    wasmedge
+    wasmtime
     hdrhistogram)
 
 add_library(Crc32c::crc32c ALIAS crc32c)
@@ -122,9 +121,3 @@ add_library(aklomp::base64 ALIAS base64)
 add_library(Hdrhistogram::hdr_histogram ALIAS hdr_histogram)
 
 list(APPEND CMAKE_PROGRAM_PATH ${tinygo_SOURCE_DIR}/bin)
-
-if(BUILD_SHARED_LIBS)
-  add_library(wasmedge ALIAS wasmedge_shared)
-else()
-  add_library(wasmedge ALIAS wasmedge_static)
-endif()

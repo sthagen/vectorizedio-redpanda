@@ -1539,6 +1539,36 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
     def all_up(self):
         return self._cloud_cluster.isAlive
 
+    def metrics(
+            self,
+            node,
+            metrics_endpoint: MetricsEndpoint = MetricsEndpoint.PUBLIC_METRICS
+    ):
+        text = self._cloud_cluster.get_public_metrics()
+        return text_string_to_metric_families(text)
+
+    def metric_sum(
+            self,
+            metric_name,
+            metrics_endpoint: MetricsEndpoint = MetricsEndpoint.PUBLIC_METRICS,
+            ns=None,
+            topic=None,
+            nodes=None):
+        """Returns sum of metrics values of a given metric name.
+        """
+
+        count = 0
+        metrics = self.metrics(None, metrics_endpoint=metrics_endpoint)
+        for family in metrics:
+            for sample in family.samples:
+                if ns and sample.labels["namespace"] != ns:
+                    continue
+                if topic and sample.labels["topic"] != topic:
+                    continue
+                if sample.name == metric_name:
+                    count += int(sample.value)
+        return count
+
 
 class RedpandaService(RedpandaServiceBase):
     def __init__(self,
@@ -2990,7 +3020,7 @@ class RedpandaService(RedpandaServiceBase):
                            memory_allocation_warning_threshold=
                            memory_allocation_warning_threshold_bytes)
 
-        if override_cfg_params or self._extra_node_conf[node]:
+        if override_cfg_params or node in self._extra_node_conf:
             doc = yaml.full_load(conf)
             doc["redpanda"].update(self._extra_node_conf[node])
             self.logger.debug(

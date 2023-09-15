@@ -159,6 +159,12 @@ struct raft_node {
             }))
           .get();
 
+        recovery_scheduler
+          .start(
+            config::mock_binding<size_t>(64),
+            config::mock_binding<std::chrono::milliseconds>(10ms))
+          .get();
+
         // setup consensus
         auto self_id = this->broker.id();
         consensus = ss::make_lw_shared<raft::consensus>(
@@ -176,6 +182,7 @@ struct raft_node {
           storage.local(),
           recovery_throttle.local(),
           recovery_mem_quota,
+          recovery_scheduler.local(),
           feature_table.local(),
           std::nullopt);
     }
@@ -273,8 +280,18 @@ struct raft_node {
                 "consensus destroyed at node {} {}",
                 broker.id(),
                 consensus.use_count());
+
+              // Forbid anyone keeping a consensus object alive after
+              // node shutdown: it may hold references to storage
+              // layer we are about to destroy.
+              assert(consensus.owned());
               consensus = nullptr;
               return ss::now();
+          })
+          .then([this] {
+              tstlog.info(
+                "Stopping recovery_scheduler at node {}", broker.id());
+              return recovery_scheduler.stop();
           })
           .then([this] {
               tstlog.info("Stopping cache at node {}", broker.id());
@@ -320,32 +337,22 @@ struct raft_node {
 
     void
     create_connection_to(model::node_id self, const model::broker& broker) {
-        for (ss::shard_id i = 0; i < ss::smp::count; ++i) {
-            auto sh = rpc::connection_cache::shard_for(self, i, broker.id());
-            cache
-              .invoke_on(
-                sh,
-                [&broker](rpc::connection_cache& c) {
-                    if (c.contains(broker.id())) {
-                        return seastar::make_ready_future<>();
-                    }
-
-                    return c.emplace(
-                      broker.id(),
-                      {.server_addr = broker.rpc_address(),
-                       .disable_metrics = net::metrics_disabled::yes},
-                      rpc::make_exponential_backoff_policy<rpc::clock_type>(
-                        std::chrono::milliseconds(1),
-                        std::chrono::milliseconds(1)));
-                })
-              .get0();
-        }
+        cache.local()
+          .update_broker_client(
+            self,
+            broker.id(),
+            broker.rpc_address(),
+            config::tls_config{},
+            rpc::make_exponential_backoff_policy<rpc::clock_type>(
+              std::chrono::milliseconds(1), std::chrono::milliseconds(1)))
+          .get();
     }
 
     bool started = false;
     model::broker broker;
     ss::sharded<storage::api> storage;
     ss::sharded<raft::coordinated_recovery_throttle> recovery_throttle;
+    ss::sharded<raft::recovery_scheduler> recovery_scheduler;
     ss::shared_ptr<storage::log> log;
     ss::sharded<ss::abort_source> as_service;
     ss::sharded<rpc::connection_cache> cache;

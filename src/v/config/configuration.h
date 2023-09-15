@@ -59,6 +59,7 @@ struct configuration final : public config_store {
     bounded_property<std::optional<int>> rpc_server_listen_backlog;
     bounded_property<std::optional<int>> rpc_server_tcp_recv_buf;
     bounded_property<std::optional<int>> rpc_server_tcp_send_buf;
+    bounded_property<int> rpc_client_connections_per_peer;
     // Coproc
     deprecated_property enable_coproc;
     deprecated_property coproc_max_inflight_bytes;
@@ -85,6 +86,7 @@ struct configuration final : public config_store {
     bounded_property<std::optional<size_t>> raft_max_recovery_memory;
     bounded_property<size_t> raft_recovery_default_read_size;
     property<bool> raft_enable_lw_heartbeat;
+    bounded_property<size_t> raft_recovery_concurrency_per_shard;
     // Kafka
     property<bool> enable_usage;
     bounded_property<size_t> usage_num_windows;
@@ -113,6 +115,7 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> metadata_dissemination_retry_delay_ms;
     property<int16_t> metadata_dissemination_retries;
     property<std::chrono::milliseconds> tm_sync_timeout_ms;
+    property<std::chrono::milliseconds> tx_registry_sync_timeout_ms;
     deprecated_property tm_violation_recovery_policy;
     property<std::chrono::milliseconds> rm_sync_timeout_ms;
     property<std::chrono::milliseconds> find_coordinator_timeout_ms;
@@ -144,7 +147,7 @@ struct configuration final : public config_store {
     property<bool> enable_transactions;
     property<uint32_t> abort_index_segment_size;
     // same as log.retention.ms in kafka
-    retention_duration_property delete_retention_ms;
+    retention_duration_property log_retention_ms;
     property<std::chrono::milliseconds> log_compaction_interval_ms;
     property<bool> log_disable_housekeeping_for_tests;
     // same as retention.size in kafka - TODO: size not implemented
@@ -208,6 +211,7 @@ struct configuration final : public config_store {
     property<bool> storage_ignore_cstore_hints;
     bounded_property<int16_t> storage_reserve_min_segments;
 
+    property<int16_t> tx_registry_log_capacity;
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
     property<bool> enable_sasl;

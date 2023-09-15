@@ -84,6 +84,7 @@
 #include "redpanda/admin_server.h"
 #include "resource_mgmt/io_priority.h"
 #include "resource_mgmt/memory_sampling.h"
+#include "rpc/rpc_utils.h"
 #include "ssx/abort_source.h"
 #include "ssx/thread_worker.h"
 #include "storage/backlog_controller.h"
@@ -862,6 +863,7 @@ void application::configure_admin_server() {
       admin_server_cfg_from_global_cfg(sched_groups),
       std::ref(stress_fiber_manager),
       std::ref(partition_manager),
+      std::ref(raft_group_manager),
       controller.get(),
       std::ref(shard_table),
       std::ref(metadata_cache),
@@ -927,7 +929,7 @@ static storage::log_config manager_config_from_global_config(
       priority_manager::local().compaction_priority(),
       config::shard_local_cfg().retention_bytes.bind(),
       config::shard_local_cfg().log_compaction_interval_ms.bind(),
-      config::shard_local_cfg().delete_retention_ms.bind(),
+      config::shard_local_cfg().log_retention_ms.bind(),
       storage::with_cache(!config::shard_local_cfg().disable_batch_cache()),
       storage::batch_cache::reclaim_options{
         .growth_window = config::shard_local_cfg().reclaim_growth_window(),
@@ -1063,7 +1065,11 @@ void application::wire_up_redpanda_services(
 
     // cluster
     syschecks::systemd_message("Initializing connection cache").get();
-    construct_service(_connection_cache, std::ref(_as)).get();
+    construct_service(
+      _connection_cache, std::ref(_as), std::nullopt, ss::sharded_parameter([] {
+          return config::shard_local_cfg().rpc_client_connections_per_peer();
+      }))
+      .get();
     syschecks::systemd_message("Building shard-lookup tables").get();
     construct_service(shard_table).get();
 
@@ -1097,6 +1103,9 @@ void application::wire_up_redpanda_services(
               = config::shard_local_cfg().raft_io_timeout_ms.bind(),
               .enable_lw_heartbeat
               = config::shard_local_cfg().raft_enable_lw_heartbeat.bind(),
+              .recovery_concurrency_per_shard
+              = config::shard_local_cfg()
+                  .raft_recovery_concurrency_per_shard.bind(),
             };
         },
         [] {
@@ -1446,8 +1455,7 @@ void application::wire_up_redpanda_services(
       .get();
 
     syschecks::systemd_message("Creating tx coordinator mapper").get();
-    construct_service(
-      tx_coordinator_ntp_mapper, std::ref(metadata_cache), model::tx_manager_nt)
+    construct_service(tx_coordinator_ntp_mapper, std::ref(metadata_cache))
       .get();
 
     syschecks::systemd_message("Creating id allocator frontend").get();
@@ -1609,7 +1617,7 @@ void application::wire_up_redpanda_services(
                                     const std::unordered_set<ss::sstring>&
                                       updated,
                                     const std::exception_ptr& eptr) {
-                                      cluster::log_certificate_reload_event(
+                                      rpc::log_certificate_reload_event(
                                         _log, "Kafka RPC TLS", updated, eptr);
                                   })
                                 .get0()
@@ -1813,7 +1821,7 @@ void application::wire_up_bootstrap_services() {
                           [this](
                             const std::unordered_set<ss::sstring>& updated,
                             const std::exception_ptr& eptr) {
-                              cluster::log_certificate_reload_event(
+                              rpc::log_certificate_reload_event(
                                 _log, "Internal RPC TLS", updated, eptr);
                           })
                         .get0()
@@ -2215,6 +2223,7 @@ void application::start_runtime_services(
           runtime_services.push_back(std::make_unique<cluster::service>(
             sched_groups.cluster_sg(),
             smp_service_groups.cluster_smp_sg(),
+            controller.get(),
             std::ref(controller->get_topics_frontend()),
             std::ref(controller->get_plugin_frontend()),
             std::ref(controller->get_members_manager()),

@@ -1,3 +1,4 @@
+import base64
 import collections
 import json
 import os
@@ -9,6 +10,7 @@ from enum import Enum
 from typing import Optional
 from ducktape.utils.util import wait_until
 from rptest.services.provider_clients import make_provider_client
+from rptest.services.provider_clients.ec2_client import RTBS_LABEL
 
 rp_profiles_path = os.path.join(os.path.dirname(__file__),
                                 "rp_config_profiles")
@@ -36,6 +38,7 @@ TIER_DEFAULTS = {PROVIDER_AWS: "tier-1-aws", PROVIDER_GCP: "tier-1-gcp"}
 
 
 class CloudTierName(Enum):
+    DOCKER = 'docker-local'
     AWS_1 = 'tier-1-aws'
     AWS_2 = 'tier-2-aws'
     AWS_3 = 'tier-3-aws'
@@ -67,6 +70,20 @@ class AdvertisedTierConfig:
         self.partitions_max = partitions_max
         self.connections_limit = connections_limit
         self.memory_per_broker = memory_per_broker
+
+    @property
+    def partitions_upper_limit(self):
+        """
+        This value represents a rough value for the estimated maximum number
+        of partitions that can be made on a new cluster via 1st create topics req.
+
+        When attempting to issue create_topics request for the actual advertised
+        maximum, the request may fail because per shard partition limits are
+        exhausted. This may occur because other system topics may exist and the
+        fact that the partition allocator isn't guaranteed to perfectly distribute
+        the partitions across all shards evenly.
+        """
+        return int(self.partitions_max * 0.8)
 
 
 kiB = 1024
@@ -114,6 +131,9 @@ AdvertisedTierConfigs = {
     ),
     CloudTierName.GCP_5: AdvertisedTierConfig(
         400*MiB, 600*MiB, 12,    1*GiB,  750*GiB,  100, 7500, 22500, 32*GiB
+    ),
+    CloudTierName.DOCKER: AdvertisedTierConfig(
+        3*MiB,   9*MiB,   3,   128*MiB,  20*GiB,   1,   25,   100,   2*GiB
     ),
 }
 # yapf: enable
@@ -163,15 +183,24 @@ class RpCloudApiClient(object):
             self._token = j['access_token']
         return self._token
 
-    def _http_get(self, endpoint='', base_url=None, **kwargs):
-        token = self._get_token()
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Accept': 'application/json'
-        }
+    def _http_get(self,
+                  endpoint='',
+                  base_url=None,
+                  override_headers=None,
+                  text_response=False,
+                  **kwargs):
+        headers = override_headers
+        if headers is None:
+            token = self._get_token()
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            }
         _base = base_url if base_url else self._config.api_url
         resp = requests.get(f'{_base}{endpoint}', headers=headers, **kwargs)
         _r = self._handle_error(resp)
+        if text_response:
+            return _r if _r is None else _r.text
         return _r if _r is None else _r.json()
 
     def _http_post(self, base_url=None, endpoint='', **kwargs):
@@ -222,7 +251,12 @@ class CloudClusterConfig:
     provider: str = "AWS"
     type: str = "FMC"
     network: str = "public"
+    config_profile_name: str = "default"
+
     install_pack_ver: str = "latest"
+    install_pack_url_template: str = ""
+    install_pack_auth_type: str = ""
+    install_pack_auth: str = ""
 
 
 @dataclass
@@ -322,29 +356,31 @@ class CloudCluster():
                                                  self.config.region,
                                                  self.provider_key,
                                                  self.provider_secret)
-        self._ducktape_meta = self.get_ducktape_meta()
-        if self.config.provider == PROVIDER_AWS:
-            # We should have only 1 interface on ducktape client
-            self.current.peer_vpc_id = self._ducktape_meta[
-                'network-interfaces-macs-0-vpc-id']
-            self.current.peer_owner_id = self._ducktape_meta[
-                'network-interfaces-macs-0-owner-id']
-        elif self.config.provider == PROVIDER_GCP:
-            # In case of GCP, we should have full URL not just id
-            _net = self.provider_cli.get_vpc_by_network_id(
-                self._ducktape_meta['network-interfaces-0-network'].split(
-                    '/')[-1],
-                prefix="")
-            self.current.peer_vpc_id = _net[self.provider_cli.VPC_ID_LABEL]
-            self.current.peer_owner_id = self.provider_cli.project_id
+        if self.config.network != 'public':
+            self._ducktape_meta = self.get_ducktape_meta()
+            if self.config.provider == PROVIDER_AWS:
+                # We should have only 1 interface on ducktape client
+                self.current.peer_vpc_id = self._ducktape_meta[
+                    'network-interfaces-macs-0-vpc-id']
+                self.current.peer_owner_id = self._ducktape_meta[
+                    'network-interfaces-macs-0-owner-id']
+            elif self.config.provider == PROVIDER_GCP:
+                # In case of GCP, we should have full URL not just id
+                _net = self.provider_cli.get_vpc_by_network_id(
+                    self._ducktape_meta['network-interfaces-0-network'].split(
+                        '/')[-1],
+                    prefix="")
+                self.current.peer_vpc_id = _net[self.provider_cli.VPC_ID_LABEL]
+                self.current.peer_owner_id = self.provider_cli.project_id
 
-        # Currently we need provider client only for VCP in private networking
-        # Raise exception is client in not implemented yet
-        if self.provider_cli is None and self.config.network != 'public':
-            self._logger.error(
-                f"Current provider is not yet supports private networking ")
-            raise RuntimeError("Private networking is not implemented "
-                               f"for '{self.config.provider}'")
+            # Currently we need provider client only for VCP in private networking
+            # Raise exception is client in not implemented yet
+            if self.provider_cli is None and self.config.network != 'public':
+                self._logger.error(
+                    f"Current provider is not yet supports private networking "
+                )
+                raise RuntimeError("Private networking is not implemented "
+                                   f"for '{self.config.provider}'")
 
     @property
     def cluster_id(self):
@@ -590,6 +626,26 @@ class CloudCluster():
 
         return
 
+    def get_public_metrics(self):
+        """Public metrics endpoint for prometheus text format.
+
+        :return: string or None if failure
+        """
+
+        cluster = self._get_cluster(self.config.id)
+        base_url = cluster['status']['listeners']['redpandaConsole'][
+            'default']['urls'][0]
+        username = cluster['spec']['consolePrometheusCredentials']['username']
+        password = cluster['spec']['consolePrometheusCredentials']['password']
+        b64 = base64.b64encode(bytes(f'{username}:{password}', 'utf-8'))
+        token = b64.decode('utf-8')
+        headers = {'Authorization': f'Basic {token}'}
+        return self.cloudv2._http_get(
+            endpoint=f'/api/cloud/prometheus/public_metrics',
+            base_url=base_url,
+            override_headers=headers,
+            text_response=True)
+
     def update_cluster_acls(self, superuser):
         if superuser is not None and not self.clusterUserExists(
                 superuser.username):
@@ -600,9 +656,7 @@ class CloudCluster():
 
         return
 
-    def create(self,
-               config_profile_name: str = 'default',
-               superuser: Optional[SaslCredentials] = None) -> str:
+    def create(self, superuser: Optional[SaslCredentials] = None) -> str:
         """Create a cloud cluster and a new namespace; block until cluster is finished creating.
 
         :param config_profile_name: config profile name, default 'tier-1-aws'
@@ -612,8 +666,9 @@ class CloudCluster():
         if not self.isPublicNetwork:
             self.current.connection_type = 'private'
         # Handle default values
-        if config_profile_name == 'default':
-            config_profile_name = TIER_DEFAULTS[self.config.provider]
+        if self.config.config_profile_name == 'default':
+            self.config.config_profile_name = TIER_DEFAULTS[
+                self.config.provider]
 
         if self.config.id != '':
             # Cluster already exist
@@ -623,7 +678,8 @@ class CloudCluster():
             # Populate self.current from cluster info
             self._update_live_cluster_info()
             # Fill in additional info based on collected from cluster
-            self.current.product_id = self._get_product_id(config_profile_name)
+            self.current.product_id = self._get_product_id(
+                self.config.config_profile_name)
         else:
             # In order not to have long list of arguments in each internal
             # functions, use self.current as a data store
@@ -643,7 +699,8 @@ class CloudCluster():
             self.current.zones = self.provider_cli.get_single_zone(
                 self.current.region)
             # Call CloudV2 API to determine Product ID
-            self.current.product_id = self._get_product_id(config_profile_name)
+            self.current.product_id = self._get_product_id(
+                self.config.config_profile_name)
             if self.current.product_id is None:
                 raise RuntimeError("ProductID failed to be determined for "
                                    f"'{self.config.provider}', "
@@ -884,32 +941,51 @@ class CloudCluster():
 
         return
 
+    def _ensure_routes(self, rtables, cidr, vpc_id):
+        def _route_exists(routes, _cidr):
+            # Lookup CIDR and VpcId in table
+            for _route in routes:
+                if _route['DestinationCidrBlock'] == _cidr and \
+                    'VpcPeeringConnectionId' in _route and \
+                    _route['VpcPeeringConnectionId'] == self.current.vpc_peering_id:
+                    return True
+            return False
+
+        # Iterate through table and create if not exists
+        for _tbl in rtables:
+            # Check if this route is already exists in this table
+            if _route_exists(_tbl['Routes'], cidr):
+                self._logger.debug(f"Route to '{cidr}' already exists "
+                                   f"in table with id '{_tbl}'")
+                continue
+            else:
+                # Create it if not
+                self.provider_cli.create_route(_tbl['RouteTableId'], cidr,
+                                               vpc_id)
+        return
+
     def _create_routes_to_ducktape(self):
         # Create routes from CloudV2 to Ducktape (10.10.xxx -> 172...)
         # aws ec2 describe-route-tables --filter "Name=tag:Name,Values=network-cjah1ecce8edpeoj0li0" "Name=tag:purpose,Values=private" | jq -r '.RouteTables[].RouteTableId' | while read -r route_table_id; do aws ec2 create-route --route-table-id $route_table_id --destination-cidr-block 172.31.0.0/16 --vpc-peering-connection-id pcx-0581b037d9e93593e; done;
         # FMC: handled by CloudV2 and ID count get_rtb results in zero
         # BYOC: Should create routes
-        _rtbs = self.provider_cli.get_route_table_ids_for_cluster(
+        _rtbs = self.provider_cli.get_route_tables_for_cluster(
             self.current.network_id)
-        for _rtb_id in _rtbs:
-            self.provider_cli.create_route(
-                _rtb_id,
-                self.current.aws_vpc_peering['AccepterVpcInfo']['CidrBlock'],
-                self.current.vpc_peering_id)
-
+        self._ensure_routes(
+            _rtbs[RTBS_LABEL],
+            self.current.aws_vpc_peering['AccepterVpcInfo']['CidrBlock'],
+            self.current.vpc_peering_id)
         return
 
     def _create_routes_to_cluster(self):
         # Create routes from Ducktape to CloudV2
         # aws ec2 --region us-west-2 create-route --route-table-id rtb-02e89e44cb4da000d --destination-cidr-block 10.10.0.0/16 --vpc-peering-connection-id pcx-0581b037d9e93593e
-        _rtbs = self.provider_cli.get_route_table_ids_for_vpc(
+        _rtbs = self.provider_cli.get_route_tables_for_vpc(
             self.current.peer_vpc_id)
-        for _rtb_id in _rtbs:
-            self.provider_cli.create_route(
-                _rtb_id,
-                self.current.aws_vpc_peering['RequesterVpcInfo']['CidrBlock'],
-                self.current.vpc_peering_id)
-
+        self._ensure_routes(
+            _rtbs[RTBS_LABEL],
+            self.current.aws_vpc_peering['RequesterVpcInfo']['CidrBlock'],
+            self.current.vpc_peering_id)
         return
 
     def _create_vpc_peering_fmc(self):
@@ -936,34 +1012,43 @@ class CloudCluster():
                 endpoint=self.current.network_endpoint, json=_body)
             if resp is None:
                 # Check if such peering exists
-                self._logger.warning(self.cloudv2.lasterror)
+                # self._logger.warning(self.cloudv2.lasterror)
                 if "network peering already exists" in self.cloudv2.lasterror:
                     self.vpc_peering = self.cloudv2._http_get(
                         endpoint=self.current.network_endpoint)[0]
-                    self.current.vpc_peering_id = self.vpc_peering
                     # State should be ready at this point
                     self._logger.warning(
-                        "Found VPC peering connection "
+                        "Found Cloud VPC peering connection "
                         f"'{self.vpc_peering['displayName']}', "
                         f"state '{self.vpc_peering['state']}'")
-                    return
+                    # Search for AWS peering
+                    self.current.vpc_peering_id = \
+                        self.provider_cli.find_vpc_peering_connection(
+                            "active", self.current)
+                    if self.current.vpc_peering_id is None:
+                        raise RuntimeError("AWS VPC Peering connection "
+                                           f"not found: {self.current}")
+                    else:
+                        self.current.aws_vpc_peering = \
+                            self.provider_cli.get_vpc_peering_connection(
+                                self.current.vpc_peering_id)
                 else:
                     raise RuntimeError(self.cloudv2.lasterror)
             else:
                 self._logger.debug(f"Created VPC peering: '{resp}'")
                 self.vpc_peering = resp
 
-            # 3.
-            # Wait for "pending acceptance"
-            self._wait_peering_status_cluster("pending acceptance")
+                # 3.
+                # Wait for "pending acceptance"
+                self._wait_peering_status_cluster("pending acceptance")
 
-            # Find id of the correct peering VPC
-            self.current.vpc_peering_id = self.provider_cli.find_vpc_peering_connection(
-                "pending-acceptance", self.current)
+                # Find id of the correct peering VPC
+                self.current.vpc_peering_id = self.provider_cli.find_vpc_peering_connection(
+                    "pending-acceptance", self.current)
 
-            # 4. Accept it on AWS
-            self.current.aws_vpc_peering = self.provider_cli.accept_vpc_peering(
-                self.current.vpc_peering_id)
+                # 4. Accept it on AWS
+                self.current.aws_vpc_peering = self.provider_cli.accept_vpc_peering(
+                    self.current.vpc_peering_id)
 
             # 5.
             self._create_routes_to_ducktape()

@@ -672,6 +672,24 @@ class Admin:
         path = f"transaction/{tid}/find_coordinator"
         return self._request('get', path, node=node).json()
 
+    def describe_tx_registry(self, node=None):
+        """
+        describe_tx_registry
+        """
+        path = f"tx_registry"
+        info = self._request('get', path, node=node).json()
+        mapping = {
+            x["partition_id"]: x["hosted_txs"]
+            for x in info["tx_mapping"]
+        }
+        for key in mapping:
+            if "excluded_transactions" not in mapping[key]:
+                mapping[key]["excluded_transactions"] = []
+            if "included_transactions" not in mapping[key]:
+                mapping[key]["included_transactions"] = []
+        info["tx_mapping"] = mapping
+        return info
+
     def set_partition_replicas(self,
                                topic,
                                partition,
@@ -1081,3 +1099,10 @@ class Admin:
             "PUT",
             f"debug/set_storage_failure_injection_enabled?value={str_value}",
             node=node)
+
+    def get_raft_recovery_status(self, *, node: ClusterNode):
+        """
+        Node must be specified because this API reports on node-local state:
+        it would not make sense to send it to just any node.
+        """
+        return self._request("GET", "raft/recovery/status", node=node).json()

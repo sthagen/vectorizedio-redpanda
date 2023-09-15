@@ -131,6 +131,14 @@ configuration::configuration()
       {.example = "65536"},
       std::nullopt,
       {.min = 32_KiB, .align = 4_KiB})
+  , rpc_client_connections_per_peer(
+      *this,
+      "rpc_client_connections_per_peer",
+      "The maximum number of connections a broker will open to each of its "
+      "peers",
+      {.example = "8"},
+      1,
+      {.min = 1})
   , enable_coproc(*this, "enable_coproc")
   , coproc_max_inflight_bytes(*this, "coproc_max_inflight_bytes")
   , coproc_max_ingest_bytes(*this, "coproc_max_ingest_bytes")
@@ -242,6 +250,15 @@ configuration::configuration()
       "enables raft optimization of heartbeats",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       true)
+  , raft_recovery_concurrency_per_shard(
+      *this,
+      "raft_recovery_concurrency_per_shard",
+      "How many partitions may simultaneously recover data to a particular "
+      "shard. This is limited to avoid overwhelming nodes when they come back "
+      "online after an outage.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      64,
+      {.min = 1, .max = 16384})
   , enable_usage(
       *this,
       "enable_usage",
@@ -427,6 +444,12 @@ configuration::configuration()
       "tm_sync_timeout_ms",
       "Time to wait state catch up before rejecting a request",
       {.visibility = visibility::user},
+      10s)
+  , tx_registry_sync_timeout_ms(
+      *this,
+      "tx_registry_sync_timeout_ms",
+      "Time to wait state catch up before rejecting a request",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
   , tm_violation_recovery_policy(*this, "tm_violation_recovery_policy")
   , rm_sync_timeout_ms(
@@ -626,12 +649,14 @@ configuration::configuration()
       "Capacity (in number of txns) of an abort index segment",
       {.visibility = visibility::tunable},
       50000)
-  , delete_retention_ms(
+  , log_retention_ms(
       *this,
-      "delete_retention_ms",
+      "log_retention_ms",
       "delete segments older than this - default 1 week",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      10080min)
+      {.needs_restart = needs_restart::no,
+       .visibility = visibility::user,
+       .aliases = {"delete_retention_ms"}},
+      7 * 24h)
   , log_compaction_interval_ms(
       *this,
       "log_compaction_interval_ms",
@@ -1001,11 +1026,18 @@ configuration::configuration()
        .visibility = visibility::tunable},
       2,
       {.min = 1})
+  , tx_registry_log_capacity(
+      *this,
+      "tx_registry_log_capacity",
+      "Capacity of the tx_registry log in number of batches. "
+      "Once it reached tx_registry_stm truncates log's prefix.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      100)
   , id_allocator_log_capacity(
       *this,
       "id_allocator_log_capacity",
-      "Capacity of the id_allocator log in number of messages. "
-      "Once it reached id_allocator_stm should compact the log.",
+      "Capacity of the id_allocator log in number of batches. "
+      "Once it reached id_allocator_stm truncates log's prefix.",
       {.visibility = visibility::tunable},
       100)
   , id_allocator_batch_size(

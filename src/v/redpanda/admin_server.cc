@@ -80,9 +80,11 @@
 #include "redpanda/admin/api-doc/shadow_indexing.json.hh"
 #include "redpanda/admin/api-doc/status.json.hh"
 #include "redpanda/admin/api-doc/transaction.json.hh"
+#include "redpanda/admin/api-doc/transform.json.hh"
 #include "redpanda/admin/api-doc/usage.json.hh"
 #include "resource_mgmt/memory_sampling.h"
 #include "rpc/errc.h"
+#include "rpc/rpc_utils.h"
 #include "security/acl.h"
 #include "security/credential_store.h"
 #include "security/scram_algorithm.h"
@@ -220,6 +222,7 @@ admin_server::admin_server(
   admin_server_cfg cfg,
   ss::sharded<stress_fiber_manager>& looper,
   ss::sharded<cluster::partition_manager>& pm,
+  ss::sharded<raft::group_manager>& rgm,
   cluster::controller* controller,
   ss::sharded<cluster::shard_table>& st,
   ss::sharded<cluster::metadata_cache>& metadata_cache,
@@ -242,6 +245,7 @@ admin_server::admin_server(
   , _cfg(std::move(cfg))
   , _stress_fiber_manager(looper)
   , _partition_manager(pm)
+  , _raft_group_manager(rgm)
   , _controller(controller)
   , _shard_table(st)
   , _metadata_cache(metadata_cache)
@@ -323,6 +327,8 @@ void admin_server::configure_admin_routes() {
     rb->register_api_file(_server._routes, "debug");
     rb->register_function(_server._routes, insert_comma);
     rb->register_api_file(_server._routes, "cluster");
+    rb->register_function(_server._routes, insert_comma);
+    rb->register_api_file(_server._routes, "transform");
     register_config_routes();
     register_cluster_config_routes();
     register_raft_routes();
@@ -339,6 +345,7 @@ void admin_server::configure_admin_routes() {
     register_self_test_routes();
     register_cluster_routes();
     register_shadow_indexing_routes();
+    register_wasm_transform_routes();
 }
 
 namespace {
@@ -537,7 +544,7 @@ ss::future<> admin_server::configure_listeners() {
                   [](
                     const std::unordered_set<ss::sstring>& updated,
                     const std::exception_ptr& eptr) {
-                      cluster::log_certificate_reload_event(
+                      rpc::log_certificate_reload_event(
                         logger, "API TLS", updated, eptr);
                   });
             }
@@ -1762,15 +1769,44 @@ admin_server::raft_transfer_leadership_handler(
       });
 }
 
+ss::future<ss::json::json_return_type>
+admin_server::get_raft_recovery_status_handler(
+  std::unique_ptr<ss::http::request>) {
+    ss::httpd::raft_json::recovery_status result;
+
+    // Aggregate recovery status from all shards
+    auto s = co_await _raft_group_manager.map_reduce0(
+      [](auto& rgm) -> raft::recovery_status {
+          return rgm.get_recovery_status();
+      },
+      raft::recovery_status{},
+      [](raft::recovery_status acc, raft::recovery_status update) {
+          acc.merge(update);
+          return acc;
+      });
+
+    result.partitions_to_recover = s.partitions_to_recover;
+    result.partitions_active = s.partitions_active;
+    result.offsets_pending = s.offsets_pending;
+    co_return result;
+}
+
 void admin_server::register_raft_routes() {
     register_route<superuser>(
       ss::httpd::raft_json::raft_transfer_leadership,
       [this](std::unique_ptr<ss::http::request> req) {
           return raft_transfer_leadership_handler(std::move(req));
       });
+
+    register_route<auth_level::user>(
+      ss::httpd::raft_json::get_raft_recovery_status,
+      [this](std::unique_ptr<ss::http::request> req) {
+          return get_raft_recovery_status_handler(std::move(req));
+      });
 }
 
 namespace {
+
 // TODO: factor out generic serialization from seastar http exceptions
 security::scram_credential parse_scram_credential(const json::Document& doc) {
     if (!doc.IsObject()) {
@@ -3604,6 +3640,47 @@ admin_server::find_tx_coordinator_handler(
 }
 
 ss::future<ss::json::json_return_type>
+admin_server::describe_tx_registry_handler(
+  std::unique_ptr<ss::http::request> req) {
+    if (need_redirect_to_leader(model::tx_registry_ntp, _metadata_cache)) {
+        throw co_await redirect_to_leader(*req, model::tx_registry_ntp);
+    }
+
+    ss::httpd::transaction_json::describe_tx_registry_reply reply;
+    auto r = co_await _tx_registry_frontend.local().route_locally(
+      cluster::describe_tx_registry_request());
+    if (r.ec != cluster::tx_errc::none) {
+        reply.ec = static_cast<int>(r.ec);
+        co_return ss::json::json_return_type(std::move(reply));
+    }
+    reply.ec = 0;
+
+    reply.version = r.id();
+    for (auto& [partition, hosted] : r.mapping) {
+        ss::httpd::transaction_json::tx_mapping_entry entry;
+        entry.partition_id = partition();
+
+        ss::httpd::transaction_json::hosted_txs hosted_txs;
+        for (auto tx_id : hosted.excluded_transactions) {
+            hosted_txs.excluded_transactions.push(tx_id());
+        }
+        for (auto tx_id : hosted.included_transactions) {
+            hosted_txs.included_transactions.push(tx_id());
+        }
+        for (auto range : hosted.hash_ranges.ranges) {
+            ss::httpd::transaction_json::hash_range hash_range;
+            hash_range.first = range.first;
+            hash_range.last = range.last;
+            hosted_txs.hash_ranges.push(hash_range);
+        }
+        entry.hosted_txs = hosted_txs;
+        reply.tx_mapping.push(entry);
+    }
+
+    co_return ss::json::json_return_type(std::move(reply));
+}
+
+ss::future<ss::json::json_return_type>
 admin_server::delete_partition_handler(std::unique_ptr<ss::http::request> req) {
     auto& tx_frontend = _partition_manager.local().get_tx_frontend();
     if (!tx_frontend.local_is_initialized()) {
@@ -3674,6 +3751,12 @@ void admin_server::register_transaction_routes() {
       ss::httpd::transaction_json::find_coordinator,
       [this](std::unique_ptr<ss::http::request> req) {
           return find_tx_coordinator_handler(std::move(req));
+      });
+
+    register_route<user>(
+      ss::httpd::transaction_json::describe_tx_registry,
+      [this](std::unique_ptr<ss::http::request> req) {
+          return describe_tx_registry_handler(std::move(req));
       });
 }
 
@@ -4756,6 +4839,10 @@ void admin_server::register_cluster_routes() {
                 ret.all_nodes = health_overview.all_nodes;
                 ret.nodes_down = health_overview.nodes_down;
 
+                ret.leaderless_count = health_overview.leaderless_count;
+                ret.under_replicated_count
+                  = health_overview.under_replicated_count;
+
                 for (auto& ntp : health_overview.leaderless_partitions) {
                     ret.leaderless_partitions.push(fmt::format(
                       "{}/{}/{}", ntp.ns(), ntp.tp.topic(), ntp.tp.partition));
@@ -5444,4 +5531,35 @@ admin_server::sampled_memory_profile_handler(
 
     co_return co_await ss::make_ready_future<ss::json::json_return_type>(
       std::move(resp));
+}
+
+void admin_server::register_wasm_transform_routes() {
+    register_route_raw_async<superuser>(
+      ss::httpd::transform_json::deploy_transform,
+      [this](
+        std::unique_ptr<ss::http::request> req,
+        std::unique_ptr<ss::http::reply> rep) {
+          return deploy_transform(std::move(req), std::move(rep));
+      });
+    register_route<user>(
+      ss::httpd::transform_json::list_transforms,
+      [this](auto req) { return list_transforms(std::move(req)); });
+    register_route<superuser>(
+      ss::httpd::transform_json::delete_transform,
+      [this](auto req) { return delete_transform(std::move(req)); });
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::delete_transform(std::unique_ptr<ss::http::request>) {
+    throw ss::httpd::bad_request_exception("data transforms not enabled");
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::list_transforms(std::unique_ptr<ss::http::request>) {
+    throw ss::httpd::bad_request_exception("data transforms not enabled");
+}
+
+ss::future<std::unique_ptr<ss::http::reply>> admin_server::deploy_transform(
+  std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>) {
+    throw ss::httpd::bad_request_exception("data transforms not enabled");
 }
