@@ -11,7 +11,7 @@
 
 #include "archival/fwd.h"
 #include "archival/ntp_archiver_service.h"
-#include "archival/scrubber.h"
+#include "archival/purger.h"
 #include "archival/upload_controller.h"
 #include "archival/upload_housekeeping_service.h"
 #include "cli_parser.h"
@@ -747,6 +747,11 @@ void application::check_environment() {
 /// tracker file. This is to prevent on disk state from piling up in
 /// each unclean run and creating more state to recover for the next run.
 void application::check_for_crash_loop() {
+    if (config::node().developer_mode()) {
+        // crash loop tracking has value only in long running clusters
+        // that can potentially accumulate state across restarts.
+        return;
+    }
     auto file_path = config::node().data_directory().path
                      / crash_loop_tracker_file;
     std::optional<crash_tracker_metadata> maybe_crash_md;
@@ -835,11 +840,15 @@ void application::schedule_crash_tracker_file_cleanup() {
     // next run.
     // We emplace it in the front to make it the last task to run.
     _deferred.emplace_front([&] {
-        auto file = config::node().data_directory().path
-                    / crash_loop_tracker_file;
-        ss::remove_file(file.string()).get();
-        ss::sync_directory(config::node().data_directory().as_sstring()).get();
-        vlog(_log.debug, "Deleted crash loop tracker file: {}", file);
+        auto file = (config::node().data_directory().path
+                     / crash_loop_tracker_file)
+                      .string();
+        if (ss::file_exists(file).get()) {
+            ss::remove_file(file).get();
+            ss::sync_directory(config::node().data_directory().as_sstring())
+              .get();
+            vlog(_log.debug, "Deleted crash loop tracker file: {}", file);
+        }
     });
 }
 
@@ -1247,7 +1256,7 @@ void application::wire_up_redpanda_services(
 
     if (archival_storage_enabled()) {
         construct_service(
-          _archival_scrubber,
+          _archival_purger,
           ss::sharded_parameter(
             [&api = cloud_storage_api]() { return std::ref(api.local()); }),
           ss::sharded_parameter([&t = controller->get_topics_state()]() {
@@ -1257,18 +1266,17 @@ void application::wire_up_redpanda_services(
           std::ref(controller->get_members_table()))
           .get();
 
-        _archival_scrubber
-          .invoke_on_all([&housekeeping = _archival_upload_housekeeping](
-                           archival::scrubber& s) {
-              housekeeping.local().register_jobs({s});
-          })
+        _archival_purger
+          .invoke_on_all(
+            [&housekeeping = _archival_upload_housekeeping](
+              archival::purger& s) { housekeeping.local().register_jobs({s}); })
           .get();
 
         _deferred.emplace_back([this] {
-            _archival_scrubber
+            _archival_purger
               .invoke_on_all([&housekeeping = _archival_upload_housekeeping,
-                              this](archival::scrubber& s) {
-                  vlog(_log.debug, "Deregistering scrubber housekeeping jobs");
+                              this](archival::purger& s) {
+                  vlog(_log.debug, "Deregistering purger housekeeping jobs");
                   housekeeping.local().deregister_jobs({s});
               })
               .get();
