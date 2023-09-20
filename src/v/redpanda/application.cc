@@ -188,6 +188,7 @@ application::application(ss::sstring logger_name)
 application::~application() = default;
 
 void application::shutdown() {
+    storage.invoke_on_all(&storage::api::stop_cluster_uuid_waiters).get();
     // Stop accepting new requests.
     if (_kafka_server.local_is_initialized()) {
         _kafka_server.invoke_on_all(&net::server::shutdown_input).get();
@@ -1115,6 +1116,8 @@ void application::wire_up_redpanda_services(
               .recovery_concurrency_per_shard
               = config::shard_local_cfg()
                   .raft_recovery_concurrency_per_shard.bind(),
+              .election_timeout_ms
+              = config::shard_local_cfg().raft_election_timeout_ms.bind(),
             };
         },
         [] {
@@ -1475,6 +1478,7 @@ void application::wire_up_redpanda_services(
       std::ref(metadata_cache),
       std::ref(_connection_cache),
       std::ref(controller->get_partition_leaders()),
+      node_id,
       std::ref(controller))
       .get();
 
