@@ -99,7 +99,7 @@ type RedpandaConsole struct {
 	Deployment *ConsoleCreateObj `json:"deployment,omitempty"`
 
 	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *runtime.RawExtension `json:"config,omitempty"`
+	Console *runtime.RawExtension `json:"console,omitempty"`
 }
 
 type ConsoleCreateObj struct {
@@ -494,7 +494,7 @@ type SetTieredStorageCacheDirOwnership struct {
 type Monitoring struct {
 	Enabled        bool              `json:"enabled"`
 	Labels         map[string]string `json:"commonLabels,omitempty"`
-	ScrapeInterval string            `json:"scrapeInterval"`
+	ScrapeInterval *string           `json:"scrapeInterval,omitempty"`
 }
 
 type ExternalDNS struct {

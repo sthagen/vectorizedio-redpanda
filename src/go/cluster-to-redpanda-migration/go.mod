@@ -5,7 +5,7 @@ go 1.20
 require (
 	github.com/json-iterator/go v1.1.12
 	github.com/r3labs/diff/v3 v3.0.1
-	github.com/redpanda-data/redpanda/src/go/k8s v0.0.0-20230711000139-412f31a082ac
+	github.com/redpanda-data/redpanda/src/go/k8s v0.0.0-20230920233823-0b32bc8b6e41
 	github.com/spf13/cobra v1.6.1
 	github.com/stretchr/testify v1.8.4
 	k8s.io/api v0.26.2
@@ -66,6 +66,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.5 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
+	go.uber.org/goleak v1.2.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.12.0 // indirect
 	golang.org/x/net v0.14.0 // indirect
@@ -90,4 +91,4 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.2.3 // indirect
 )
 
-replace github.com/redpanda-data/redpanda/src/go/k8s v0.0.0-20230711000139-412f31a082ac => ../k8s
+replace github.com/opencontainers/go-digest => github.com/opencontainers/go-digest v1.0.1-0.20220411205349-bde1400a84be
