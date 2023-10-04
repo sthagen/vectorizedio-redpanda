@@ -87,6 +87,8 @@ struct configuration final : public config_store {
     bounded_property<size_t> raft_recovery_default_read_size;
     property<bool> raft_enable_lw_heartbeat;
     bounded_property<size_t> raft_recovery_concurrency_per_shard;
+    property<std::optional<size_t>> raft_replica_max_pending_flush_bytes;
+    property<std::chrono::milliseconds> raft_flush_timer_interval_ms;
     // Kafka
     property<bool> enable_usage;
     bounded_property<size_t> usage_num_windows;
@@ -279,6 +281,8 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_segment_upload_timeout_ms;
     property<std::chrono::milliseconds>
       cloud_storage_manifest_upload_timeout_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_garbage_collect_timeout_ms;
     property<std::chrono::milliseconds>
       cloud_storage_max_connection_idle_time_ms;
     property<std::optional<std::chrono::seconds>>
