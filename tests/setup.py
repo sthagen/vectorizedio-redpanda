@@ -13,8 +13,8 @@ setup(
     package_data={'': ['*.md']},
     include_package_data=True,
     install_requires=[
-        'ducktape@git+https://github.com/redpanda-data/ducktape.git@62e0285f6b3a2f22fd4a43b5fdbc13be8d4290d9',
-        'prometheus-client==0.9.0', 'pyyaml==6.0', 'kafka-python==2.0.2',
+        'ducktape@git+https://github.com/redpanda-data/ducktape.git@979fe00585e616ce23b1f0afadaeb0268ca327a8',
+        'prometheus-client==0.9.0', 'pyyaml==6.0.1', 'kafka-python==2.0.2',
         'crc32c==2.2', 'confluent-kafka==2.0.2', 'zstandard==0.15.2',
         'xxhash==2.0.2', 'protobuf==4.21.8', 'fastavro==1.4.9',
         'psutil==5.9.0', 'numpy==1.22.3', 'pygal==3.0', 'pytest==7.1.2',
@@ -23,7 +23,7 @@ setup(
         'grpcio==1.57.0', 'grpcio-tools==1.57', 'grpcio-status==1.57.0',
         'cachetools==5.3.1', 'google-api-core==2.11.1', 'google-auth==2.22.0',
         'googleapis-common-protos==1.60.0', 'google.cloud.compute==1.14.0',
-        'proto-plus==1.22.3', 'rsa==4.9',
+        'google-cloud-storage==2.11.0', 'proto-plus==1.22.3', 'rsa==4.9',
         'python-keycloak@git+https://github.com/redpanda-data/python-keycloak.git@10b822cb0320c54dbf5bf4fd00435afb1487415d',
         'z3-solver==4.12.2', 'hypothesis==6.82'
     ],
