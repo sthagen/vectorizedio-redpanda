@@ -95,7 +95,12 @@ DEFAULT_LOG_ALLOW_LIST = [
     # value for type, overflow, alignment, etc...
     re.compile(
         r"SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior aead.c:(182|214)"
-    )
+    ),
+
+    # Sometines we're getting 'Internal Server Error' from S3 on CDT and it doesn't
+    # lead to any test failure because the error is transient (AWS weather).
+    re.compile(r"unexpected REST API error \"Internal Server Error\" detected"
+               ),
 ]
 
 # Log errors that are expected in tests that restart nodes mid-test
@@ -389,7 +394,8 @@ class SISettings:
                  cloud_storage_spillover_manifest_max_segments: Optional[
                      int] = None,
                  fast_uploads=False,
-                 retention_local_strict=True):
+                 retention_local_strict=True,
+                 cloud_storage_max_throughput_per_shard: Optional[int] = None):
         """
         :param fast_uploads: if true, set low upload intervals to help tests run
                              quickly when they wait for uploads to complete.
@@ -439,6 +445,7 @@ class SISettings:
         self.cloud_storage_housekeeping_interval_ms = cloud_storage_housekeeping_interval_ms
         self.cloud_storage_spillover_manifest_max_segments = cloud_storage_spillover_manifest_max_segments
         self.retention_local_strict = retention_local_strict
+        self.cloud_storage_max_throughput_per_shard = cloud_storage_max_throughput_per_shard
 
         if fast_uploads:
             self.cloud_storage_segment_max_upload_interval_sec = 10
@@ -579,6 +586,10 @@ class SISettings:
                 'cloud_storage_spillover_manifest_max_segments'] = self.cloud_storage_spillover_manifest_max_segments
 
         conf['retention_local_strict'] = self.retention_local_strict
+
+        if self.cloud_storage_max_throughput_per_shard:
+            conf[
+                'cloud_storage_max_throughput_per_shard'] = self.cloud_storage_max_throughput_per_shard
 
         return conf
 

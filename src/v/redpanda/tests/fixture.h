@@ -45,6 +45,8 @@
 #include "pandaproxy/schema_registry/configuration.h"
 #include "redpanda/application.h"
 #include "resource_mgmt/cpu_scheduling.h"
+#include "security/acl.h"
+#include "security/sasl_authentication.h"
 #include "ssx/thread_worker.h"
 #include "storage/directories.h"
 #include "storage/tests/utils/disk_log_builder.h"
@@ -121,6 +123,7 @@ public:
           proxy_client_config(kafka_port),
           schema_reg_config(schema_reg_port),
           proxy_client_config(kafka_port),
+          audit_log_client_config(kafka_port),
           sch_groups);
         app.check_environment();
         app.wire_up_and_start(*app_signal, true);
@@ -145,6 +148,7 @@ public:
             std::ref(app.snc_quota_mgr),
             std::ref(app.group_router),
             std::ref(app.usage_manager),
+            std::ref(app.audit_mgr),
             std::ref(app.shard_table),
             std::ref(app.partition_manager),
             std::ref(app.id_allocator_frontend),
@@ -434,6 +438,16 @@ public:
         return to_yaml(cfg, config::redact_secrets::no);
     }
 
+    YAML::Node audit_log_client_config(
+      uint16_t kafka_api_port = config::node().kafka_api()[0].address.port()) {
+        kafka::client::configuration cfg;
+        net::unresolved_address kafka_api{
+          config::node().kafka_api()[0].address.host(), kafka_api_port};
+        cfg.brokers.set_value(
+          std::vector<net::unresolved_address>({kafka_api}));
+        return to_yaml(cfg, config::redact_secrets::no);
+    }
+
     ss::future<> wait_for_controller_leadership() {
         auto tout = ss::lowres_clock::now() + std::chrono::seconds(10);
         auto id = co_await app.controller->get_partition_leaders()
@@ -720,8 +734,22 @@ public:
 
     using conn_ptr = ss::lw_shared_ptr<kafka::connection_context>;
 
+    struct fake_sasl_mech : public security::sasl_mechanism {
+        bool complete() const final { return true; }
+        bool failed() const final { return false; }
+        const security::acl_principal& principal() const final {
+            static const security::acl_principal fake_principal{
+              security::principal_type::user, "fake-user"};
+            return fake_principal;
+        }
+        ss::future<result<bytes>> authenticate(bytes) final {
+            vassert(false, "Don't call this");
+        }
+    };
+
     conn_ptr make_connection_context() {
         security::sasl_server sasl(security::sasl_server::sasl_state::complete);
+        sasl.set_mechanism(std::make_unique<fake_sasl_mech>());
         return ss::make_lw_shared<kafka::connection_context>(
           proto.local(),
           nullptr,

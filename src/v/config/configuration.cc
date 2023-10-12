@@ -1303,6 +1303,65 @@ configuration::configuration()
        .example = "false",
        .visibility = visibility::user},
       true)
+  , audit_enabled(
+      *this,
+      "audit_enabled",
+      "Enable/Disable audit logging.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      false)
+  , audit_log_num_partitions(
+      *this,
+      "audit_log_num_partitions",
+      "Number of partitions for the internal audit log topic. Attempt to "
+      "create topic is only performed if it doesn't already exist, disable and "
+      "re-enable auditing for changes to take affect",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      12)
+  , audit_log_replication_factor(
+      *this,
+      "audit_log_replication_factor",
+      "Replication factor of the internal audit log topic. Attempt to create "
+      "topic is only performed if it doesn't already exist, disable and "
+      "re-enable auditing for changes to take affect",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      3)
+  , audit_client_max_buffer_size(
+      *this,
+      "audit_client_max_buffer_size",
+      "Maximum number of bytes the internal audit client will allocate for "
+      "audit log records. Disable and re-enable auditing for changes to take "
+      "affect",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      1_MiB)
+  , audit_queue_drain_interval_ms(
+      *this,
+      "audit_queue_drain_interval_ms",
+      "Frequency in which per shard audit logs are batched to client for write "
+      "to audit log. Longer intervals allow for greater change for coalescing "
+      "duplicates (great for high throughput auditing scenarios) but increase "
+      "the risk of data loss during hard shutdowns.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      500ms)
+  , audit_max_queue_elements_per_shard(
+      *this,
+      "audit_max_queue_elements_per_shard",
+      "Maximum number of allowed elements in the audit buffers, per shard. "
+      "Once this value is reached, any request handlers that cannot enqueue "
+      "audit messages will return a non retryable error to the client. Note "
+      "that this only will occur when handling requests that are currently "
+      "enabled for auditing.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      100000)
+  , audit_enabled_event_types(
+      *this,
+      "audit_enabled_event_types",
+      "List of event classes that will be audited, options are: "
+      "[management, produce, consume, describe, heartbeat, authenticate]. "
+      "Please refer to the documentation to know exactly which request(s) map "
+      "to a particular audit event type.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      {"management"},
+      validate_audit_event_types)
   , cloud_storage_enabled(
       *this,
       "cloud_storage_enabled",
@@ -1588,6 +1647,34 @@ configuration::configuration()
       "cloud_storage_segment_size_target/2",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt)
+  , cloud_storage_max_throughput_per_shard(
+      *this,
+      "cloud_storage_max_throughput_per_shard",
+      "Max throughput used by tiered-storage per shard in bytes per second. "
+      "This value is an upper bound of the throughput available to the "
+      "tiered-storage subsystem. This parameter is intended to be used as a "
+      "safeguard and in tests when "
+      "we need to set precise throughput value independent of actual storage "
+      "media. "
+      "Please use 'cloud_storage_throughput_limit_percent' instead of this "
+      "parameter in the production environment.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1_GiB)
+  , cloud_storage_throughput_limit_percent(
+      *this,
+      "cloud_storage_throughput_limit_percent",
+      "Max throughput used by tiered-storage per node expressed as a "
+      "percentage of the disk bandwidth. If the server has several disks "
+      "Redpanda will take into account only the one which is used to store "
+      "tiered-storage cache. Note that even if the tiered-storage is allowed "
+      "to use full bandwidth of the disk (100%) it won't necessary use it in "
+      "full. The actual usage depend on your workload and the state of the "
+      "tiered-storage cache. This parameter is a safeguard that prevents "
+      "tiered-storage from using too many system resources and not a "
+      "performance tuning knob.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      50,
+      {.min = 0, .max = 100})
   , cloud_storage_graceful_transfer_timeout_ms(
       *this,
       "cloud_storage_graceful_transfer_timeout_ms",
