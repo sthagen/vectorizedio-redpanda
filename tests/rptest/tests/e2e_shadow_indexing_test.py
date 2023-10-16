@@ -273,7 +273,8 @@ class EndToEndShadowIndexingTest(EndToEndShadowIndexingBase):
                     self.test_instance.topic, 0)
                 self.spillover_manifests = s3_snapshot.get_spillover_manifests(
                     NTP("kafka", self.test_instance.topic, 0))
-                if not self.spillover_manifests:
+                if not self.spillover_manifests or len(
+                        self.spillover_manifests) < 2:
                     return False
                 manifest_keys = set(self.manifest['segments'].keys())
                 spillover_keys = set()
@@ -591,6 +592,15 @@ class EndToEndShadowIndexingTest(EndToEndShadowIndexingBase):
         assert response[0].error_msg == '', f"Err msg: {response[0].error_msg}"
         assert new_lwm == response[0].new_start_offset, response[
             0].new_start_offset
+
+        def topic_info_populated():
+            return len(list(rpk.describe_topic(self.topic))) == 1
+
+        wait_until(topic_info_populated,
+                   timeout_sec=60,
+                   backoff_sec=1,
+                   err_msg=f"topic info not available for {self.topic}")
+
         topics_info = list(rpk.describe_topic(self.topic))
         assert len(topics_info) == 1
         assert topics_info[0].start_offset == new_lwm, topics_info
@@ -618,6 +628,11 @@ class EndToEndShadowIndexingTest(EndToEndShadowIndexingBase):
         wait_until(lambda: len(set(rpk.list_topics())) == 1,
                    timeout_sec=30,
                    backoff_sec=1)
+
+        wait_until(topic_info_populated,
+                   timeout_sec=60,
+                   backoff_sec=1,
+                   err_msg=f"topic info not available for {self.topic}")
         topics_info = list(rpk.describe_topic(self.topic))
         assert len(topics_info) == 1
         assert topics_info[0].start_offset == new_lwm, topics_info
