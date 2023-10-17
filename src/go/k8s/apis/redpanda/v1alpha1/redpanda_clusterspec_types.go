@@ -167,10 +167,11 @@ type Auth struct {
 
 // SASL is a top-level field of the values file
 type SASL struct {
-	Enabled   bool         `json:"enabled"`
-	Mechanism *string      `json:"mechanism,omitempty"`
-	SecretRef *string      `json:"secretRef,omitempty"`
-	Users     []UsersItems `json:"users,omitempty"`
+	Enabled   bool    `json:"enabled"`
+	Mechanism *string `json:"mechanism,omitempty"`
+	SecretRef *string `json:"secretRef,omitempty"`
+	// DO NOT SET Omitempty, as empty list is a valid entry.
+	Users []UsersItems `json:"users"`
 }
 
 // UsersItems is a top-level field of the values file
@@ -216,14 +217,15 @@ type ExternalService struct {
 
 // External is a top-level field of the values file
 type External struct {
-	Addresses    []string          `json:"addresses,omitempty"`
-	Annotations  map[string]string `json:"annotations,omitempty"`
-	Domain       *string           `json:"domain,omitempty"`
-	Enabled      *bool             `json:"enabled,omitempty"`
-	Service      *ExternalService  `json:"service,omitempty"`
-	SourceRanges []string          `json:"sourceRanges,omitempty"`
-	Type         *string           `json:"type,omitempty"`
-	ExternalDNS  *ExternalDNS      `json:"externalDns,omitempty"`
+	Addresses      []string          `json:"addresses,omitempty"`
+	Annotations    map[string]string `json:"annotations,omitempty"`
+	Domain         *string           `json:"domain,omitempty"`
+	Enabled        *bool             `json:"enabled,omitempty"`
+	Service        *ExternalService  `json:"service,omitempty"`
+	SourceRanges   []string          `json:"sourceRanges,omitempty"`
+	Type           *string           `json:"type,omitempty"`
+	ExternalDNS    *ExternalDNS      `json:"externalDns,omitempty"`
+	PrefixTemplate *string           `json:"prefixTemplate,omitempty"`
 }
 
 // Logging is a top-level field of the values file
@@ -450,6 +452,7 @@ type HTTP struct {
 	KafkaEndpoint        *string                      `json:"kafkaEndpoint,omitempty"`
 	Port                 *int                         `json:"port,omitempty"`
 	TLS                  *ListenerTLS                 `json:"tls,omitempty"`
+	PrefixTemplate       *string                      `json:"prefixTemplate,omitempty"`
 }
 
 // Kafka is a top-level field of the values file
@@ -458,6 +461,7 @@ type Kafka struct {
 	External             map[string]*ExternalListener `json:"external,omitempty"`
 	Port                 *int                         `json:"port,omitempty"`
 	TLS                  *ListenerTLS                 `json:"tls,omitempty"`
+	PrefixTemplate       *string                      `json:"prefixTemplate,omitempty"`
 }
 
 // RPC is a top-level field of the values file
