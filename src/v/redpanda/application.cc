@@ -1114,6 +1114,9 @@ void application::wire_up_runtime_services(
           ss::sharded_parameter([this] {
               return transform::rpc::partition_manager::make_default(
                 &shard_table, &partition_manager);
+          }),
+          ss::sharded_parameter([this] {
+              return transform::service::create_reporter(&_transform_service);
           }))
           .get();
         construct_service(
@@ -1130,6 +1133,10 @@ void application::wire_up_runtime_services(
           ss::sharded_parameter([this] {
               return transform::rpc::topic_creator::make_default(
                 controller.get());
+          }),
+          ss::sharded_parameter([this] {
+              return transform::rpc::cluster_members_cache::make_default(
+                &controller->get_members_table());
           }),
           &_connection_cache,
           &_transform_rpc_service)
@@ -2246,6 +2253,9 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
           .heap_memory = {
             .per_core_pool_size_bytes = cluster.wasm_per_core_memory_reservation.value(),
             .per_engine_memory_limit = cluster.wasm_per_function_memory_limit.value(),
+          },
+          .stack_memory = {
+            .debug_host_stack_usage = false,
           },
         };
         _wasm_runtime->start(config).get();
