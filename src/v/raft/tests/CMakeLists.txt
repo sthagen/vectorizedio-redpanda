@@ -42,7 +42,7 @@ rp_test(
   UNIT_TEST
   BINARY_NAME test_raft
   SOURCES ${srcs}
-  LIBRARIES v::seastar_testing_main v::raft v::storage_test_utils v::model_test_utils v::features
+  LIBRARIES v::seastar_testing_main v::raft v::storage_test_utils v::model_test_utils v::features v::cluster
   LABELS raft
   ARGS "-- -c 8"
 )
@@ -51,6 +51,7 @@ set(gsrcs
     raft_fixture.cc
     basic_raft_fixture_test.cc
     stm_manager_test.cc
+    raft_reconfiguration_test.cc
 )
 
 rp_test(

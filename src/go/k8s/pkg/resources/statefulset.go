@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -319,6 +319,20 @@ func (r *StatefulSetResource) obj(
 
 	tlsVolumes, tlsVolumeMounts := r.volumeProvider.Volumes()
 
+	rpkFlags := []string{}
+	u := fmt.Sprintf("%s://${POD_NAME}.%s:%d", r.pandaCluster.AdminAPIInternal().GetHTTPScheme(), r.serviceFQDN, r.pandaCluster.AdminAPIInternal().GetPort())
+	rpkFlags = append(rpkFlags, fmt.Sprintf("--api-urls %q", u))
+	if r.pandaCluster.AdminAPIInternal().GetTLS().Enabled {
+		rpkFlags = append(rpkFlags,
+			"--admin-api-tls-enabled",
+			fmt.Sprintf("--admin-api-tls-truststore %q", path.Join(resourcetypes.GetTLSMountPoints().AdminAPI.NodeCertMountDir, "ca.crt")))
+	}
+	if r.pandaCluster.AdminAPIInternal().GetTLS().RequireClientAuth {
+		rpkFlags = append(rpkFlags,
+			fmt.Sprintf("--admin-api-tls-cert %q", path.Join(resourcetypes.GetTLSMountPoints().AdminAPI.ClientCAMountDir, "tls.crt")),
+			fmt.Sprintf("--admin-api-tls-key %q", path.Join(resourcetypes.GetTLSMountPoints().AdminAPI.ClientCAMountDir, "tls.key")))
+	}
+
 	// We set statefulset replicas via status.currentReplicas in order to control it from the handleScaling function
 	replicas := r.pandaCluster.GetCurrentReplicas()
 
@@ -350,7 +364,7 @@ func (r *StatefulSetResource) obj(
 				Spec: corev1.PodSpec{
 					ServiceAccountName: r.getServiceAccountName(),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup: pointer.Int64(fsGroup),
+						FSGroup: ptr.To(int64(fsGroup)),
 					},
 					Volumes: append([]corev1.Volume{
 						{
@@ -374,7 +388,7 @@ func (r *StatefulSetResource) obj(
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
 									SecretName:  SecretKey(r.pandaCluster).Name,
-									DefaultMode: pointer.Int32(0o555),
+									DefaultMode: ptr.To(int32(0o555)),
 								},
 							},
 						},
@@ -454,8 +468,8 @@ func (r *StatefulSetResource) obj(
 								},
 							}, r.pandaproxyEnvVars()...),
 							SecurityContext: &corev1.SecurityContext{
-								RunAsUser:  pointer.Int64(userID),
-								RunAsGroup: pointer.Int64(groupID),
+								RunAsUser:  ptr.To(int64(userID)),
+								RunAsGroup: ptr.To(int64(groupID)),
 							},
 							Resources: corev1.ResourceRequirements{
 								Limits:   r.pandaCluster.Spec.Resources.Limits,
@@ -526,9 +540,16 @@ func (r *StatefulSetResource) obj(
 									ContainerPort: int32(r.pandaCluster.Spec.Configuration.RPCServer.Port),
 								},
 							}, r.getPorts()...),
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"bash", "-xc", fmt.Sprintf("rpk cluster health %s| grep 'Healthy:.*true'", strings.Join(rpkFlags, " "))},
+									},
+								},
+							},
 							SecurityContext: &corev1.SecurityContext{
-								RunAsUser:  pointer.Int64(userID),
-								RunAsGroup: pointer.Int64(groupID),
+								RunAsUser:  ptr.To(int64(userID)),
+								RunAsGroup: ptr.To(int64(groupID)),
 							},
 							Resources: corev1.ResourceRequirements{
 								Limits:   r.pandaCluster.Spec.Resources.Limits,
