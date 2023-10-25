@@ -571,7 +571,6 @@ class HighThroughputTest(RedpandaTest):
                    timeout_sec=restart_timeout,
                    backoff_sec=1)
 
-    @ok_to_fail
     @cluster(num_nodes=2, log_allow_list=NOS3_LOG_ALLOW_LIST)
     def test_disrupt_cloud_storage(self):
         """
@@ -823,11 +822,14 @@ class HighThroughputTest(RedpandaTest):
             producer.wait(timeout_sec=600)
             self.free_preallocated_nodes()
 
-    # The test is ignored because it can hardly achieve 1 GiB/s
-    # in the regular CDT environment, the test is designed for 3*is4gen.4xlarge
-    @ignore
+    @ok_to_fail
     @cluster(num_nodes=10, log_allow_list=RESTART_LOG_ALLOW_LIST)
     def test_ts_resource_utilization(self):
+        """
+        In the AWS EC2 CDT testing env, this test is designed for
+        at least three is4gen.4xlarge or it will not achieve the
+        desired throughput to drive resource utilization.
+        """
         self._create_topic_spec()
         self.stage_tiered_storage_consuming()
 
