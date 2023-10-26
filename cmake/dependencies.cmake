@@ -73,14 +73,14 @@ fetch_dep(GTest
 
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
   set(TINYGO_TARBALL "tinygo-linux-amd64.tar.gz")
-  set(TINYGO_MD5 "b7738cce3c44a7d17a4fed4ef150f45c")
+  set(TINYGO_MD5 "5b4ba9d8dd8ce10f7939de441ad46a80")
 elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
   set(TINYGO_TARBALL "tinygo-linux-arm64.tar.gz")
-  set(TINYGO_MD5 "f4a23e599dc2bb1543f5261f19aabb12")
+  set(TINYGO_MD5 "a0b397306665a9634a6b9c716f60f0a6")
 endif()
 
 FetchContent_Declare(tinygo
-  URL https://github.com/redpanda-data/tinygo/releases/download/v0.29.0-rpk1/${TINYGO_TARBALL}
+  URL https://github.com/redpanda-data/tinygo/releases/download/v0.30.0-rpk1/${TINYGO_TARBALL}
   URL_HASH MD5=${TINYGO_MD5}
   DOWNLOAD_EXTRACT_TIMESTAMP ON)
 FetchContent_GetProperties(tinygo)
@@ -91,12 +91,13 @@ fetch_dep(hdrhistogram
 
 list(APPEND WASMTIME_USER_CARGO_BUILD_OPTIONS --no-default-features)
 list(APPEND WASMTIME_USER_CARGO_BUILD_OPTIONS --features=async)
+list(APPEND WASMTIME_USER_CARGO_BUILD_OPTIONS --features=addr2line)
 
 # We need submodules for wasmtime to compile
 FetchContent_Declare(
   wasmtime
   GIT_REPOSITORY https://github.com/bytecodealliance/wasmtime
-  GIT_TAG 81b14a50431104631023fb5723041667fd141efb
+  GIT_TAG 282edac149c0883a7d064132f93ce0a20a50d0d7
   GIT_PROGRESS TRUE
   USES_TERMINAL_DOWNLOAD TRUE
   OVERRIDE_FIND_PACKAGE

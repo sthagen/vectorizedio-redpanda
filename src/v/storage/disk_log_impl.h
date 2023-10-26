@@ -144,6 +144,27 @@ public:
 
     std::optional<model::offset> retention_offset(gc_config) const final;
 
+    // Collects an iterable list of segments over which to perform sliding
+    // window compaction.
+    segment_set find_sliding_range(
+      const compaction_config& cfg,
+      std::optional<model::offset> new_start_offset = std::nullopt);
+
+    void set_last_compaction_window_start_offset(model::offset o) {
+        _last_compaction_window_start_offset = o;
+    }
+
+    readers_cache& readers() { return *_readers_cache; }
+
+    storage_resources& resources();
+
+    ss::future<> adjacent_merge_compact(
+      compaction_config, std::optional<model::offset> = std::nullopt);
+
+    ss::future<> sliding_window_compact(
+      const compaction_config& cfg,
+      std::optional<model::offset> new_start_offset = std::nullopt);
+
 private:
     friend class disk_log_appender; // for multi-term appends
     friend class disk_log_builder;  // for tests
@@ -161,13 +182,12 @@ private:
     // Returns if the update actually took place.
     ss::future<bool> update_start_offset(model::offset o);
 
-    ss::future<> do_compact(
-      compaction_config, std::optional<model::offset> = std::nullopt);
     ss::future<compaction_result> compact_adjacent_segments(
       std::pair<segment_set::iterator, segment_set::iterator>,
       storage::compaction_config cfg);
     std::optional<std::pair<segment_set::iterator, segment_set::iterator>>
     find_compaction_range(const compaction_config&);
+
     ss::future<std::optional<model::offset>> do_gc(gc_config);
 
     ss::future<> remove_empty_segments();
@@ -209,8 +229,6 @@ private:
 
     gc_config apply_overrides(gc_config) const;
     gc_config apply_base_overrides(gc_config) const;
-
-    storage_resources& resources();
 
     void wrote_stm_bytes(size_t);
 
@@ -291,6 +309,7 @@ private:
     mutex _segments_rolling_lock;
 
     std::optional<model::offset> _cloud_gc_offset;
+    std::optional<model::offset> _last_compaction_window_start_offset;
     size_t _reclaimable_local_size_bytes{0};
 };
 
