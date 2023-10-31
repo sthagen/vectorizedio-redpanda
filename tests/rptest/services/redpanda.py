@@ -670,6 +670,7 @@ class SecurityConfig:
         self.enable_sasl = False
         self.kafka_enable_authorization: Optional[bool] = None
         self.sasl_mechanisms: Optional[list[str]] = None
+        self.http_authentication: Optional[list[str]] = None
         self.endpoint_authn_method: Optional[str] = None
         self.tls_provider: Optional[TLSProvider] = None
         self.require_client_auth: bool = True
@@ -725,6 +726,7 @@ class TlsConfig(AuthConfig):
         self.client_key: Optional[str] = None
         self.client_crt: Optional[str] = None
         self.require_client_auth: bool = True
+        self.enable_broker_tls: bool = True
 
     def maybe_write_client_certs(self, node, logger, tls_client_key_file: str,
                                  tls_client_crt_file: str):
@@ -758,6 +760,18 @@ class SchemaRegistryConfig(TlsConfig):
 
     def __init__(self):
         super(SchemaRegistryConfig, self).__init__()
+
+
+class AuditLogConfig(TlsConfig):
+    AUDIT_LOG_TLS_CLIENT_KEY_FILE = "/etc/redpanda/audit_log_client.key"
+    AUDIT_LOG_TLS_CLIENT_CRT_FILE = "/etc/redpanda/audit_log_client.crt"
+
+    def __init__(self,
+                 listener_port: Optional[int] = None,
+                 listener_authn_method: Optional[str] = None):
+        super(AuditLogConfig, self).__init__()
+        self.listener_port = listener_port
+        self.listener_authn_method = listener_authn_method
 
 
 class RedpandaServiceBase(Service):
@@ -954,9 +968,10 @@ class RedpandaServiceBase(Service):
     def lsof_node(self, node: ClusterNode, filter: Optional[str] = None):
         pass
 
-    def metrics(self,
-                node,
-                metrics_endpoint: MetricsEndpoint = MetricsEndpoint.METRICS):
+    def raw_metrics(
+            self,
+            node,
+            metrics_endpoint: MetricsEndpoint = MetricsEndpoint.METRICS):
         assert node in self._started, f"Node {node.account.hostname} is not started"
 
         metrics_endpoint = ("/metrics" if metrics_endpoint
@@ -964,7 +979,13 @@ class RedpandaServiceBase(Service):
         url = f"http://{node.account.hostname}:9644{metrics_endpoint}"
         resp = requests.get(url, timeout=10)
         assert resp.status_code == 200
-        return text_string_to_metric_families(resp.text)
+        return resp.text
+
+    def metrics(self,
+                node,
+                metrics_endpoint: MetricsEndpoint = MetricsEndpoint.METRICS):
+        text = self.raw_metrics(node, metrics_endpoint)
+        return text_string_to_metric_families(text)
 
     def metric_sum(self,
                    metric_name,
@@ -1608,6 +1629,7 @@ class RedpandaService(RedpandaServiceBase):
                  skip_if_no_redpanda_log: bool = False,
                  pandaproxy_config: Optional[PandaproxyConfig] = None,
                  schema_registry_config: Optional[SchemaRegistryConfig] = None,
+                 audit_log_config: Optional[AuditLogConfig] = None,
                  disable_cloud_storage_diagnostics=False,
                  cloud_storage_scrub_timeout_s=None):
         super(RedpandaService, self).__init__(
@@ -1624,6 +1646,7 @@ class RedpandaService(RedpandaServiceBase):
         self._installer: RedpandaInstaller = RedpandaInstaller(self)
         self._pandaproxy_config = pandaproxy_config
         self._schema_registry_config = schema_registry_config
+        self._audit_log_config = audit_log_config
         self._failure_injection_enabled = False
         self._tolerate_crashes = False
 
@@ -1718,6 +1741,9 @@ class RedpandaService(RedpandaServiceBase):
 
     def set_schema_registry_settings(self, settings: SchemaRegistryConfig):
         self._schema_registry_config = settings
+
+    def set_audit_log_settings(self, settings: AuditLogConfig):
+        self._audit_log_config = settings
 
     def _init_tls(self):
         """
@@ -2045,6 +2071,15 @@ class RedpandaService(RedpandaServiceBase):
                 self._schema_registry_config.server_key = RedpandaService.TLS_SERVER_KEY_FILE
                 self._schema_registry_config.server_crt = RedpandaService.TLS_SERVER_CRT_FILE
                 self._schema_registry_config.truststore_file = RedpandaService.TLS_CA_CRT_FILE
+
+            if self._audit_log_config is not None:
+                self._audit_log_config.maybe_write_client_certs(
+                    node, self.logger,
+                    AuditLogConfig.AUDIT_LOG_TLS_CLIENT_KEY_FILE,
+                    AuditLogConfig.AUDIT_LOG_TLS_CLIENT_CRT_FILE)
+                self._audit_log_config.server_key = RedpandaService.TLS_SERVER_KEY_FILE
+                self._audit_log_config.server_crt = RedpandaService.TLS_SERVER_CRT_FILE
+                self._audit_log_config.truststore_file = RedpandaService.TLS_CA_CRT_FILE
 
     def start_redpanda(self, node):
         preamble, res_args = self._resource_settings.to_cli(
@@ -3037,6 +3072,7 @@ class RedpandaService(RedpandaServiceBase):
                            admin_alternate_port=self.ADMIN_ALTERNATE_PORT,
                            pandaproxy_config=self._pandaproxy_config,
                            schema_registry_config=self._schema_registry_config,
+                           audit_log_config=self._audit_log_config,
                            superuser=self._superuser,
                            sasl_enabled=self.sasl_enabled(),
                            endpoint_authn_method=self.endpoint_authn_method(),
@@ -3118,6 +3154,13 @@ class RedpandaService(RedpandaServiceBase):
                 f"Setting sasl_mechanisms: {self._security.sasl_mechanisms} in cluster configuration"
             )
             conf.update(dict(sasl_mechanisms=self._security.sasl_mechanisms))
+
+        if self._security.http_authentication is not None:
+            self.logger.debug(
+                f"Setting http_authentication: {self._security.http_authentication} in cluster configuration"
+            )
+            conf.update(
+                dict(http_authentication=self._security.http_authentication))
 
         conf_yaml = yaml.dump(conf)
         for node in self.nodes:

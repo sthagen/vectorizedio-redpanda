@@ -22,14 +22,15 @@
 #include "kafka/server/handlers/fetch/replica_selector.h"
 #include "kafka/server/handlers/handler_probe.h"
 #include "kafka/server/queue_depth_monitor.h"
+#include "metrics/metrics.h"
 #include "net/server.h"
 #include "pandaproxy/schema_registry/fwd.h"
+#include "security/audit/audit_log_manager.h"
 #include "security/fwd.h"
 #include "security/gssapi_principal_mapper.h"
 #include "security/krb5_configurator.h"
 #include "security/mtls.h"
 #include "ssx/fwd.h"
-#include "ssx/metrics.h"
 #include "utils/ema.h"
 
 #include <seastar/core/future.hh>
@@ -61,6 +62,7 @@ public:
       ss::sharded<security::credential_store>&,
       ss::sharded<security::authorizer>&,
       ss::sharded<security::audit::audit_log_manager>&,
+      ss::sharded<security::oidc::service>&,
       ss::sharded<cluster::security_frontend>&,
       ss::sharded<cluster::controller_api>&,
       ss::sharded<cluster::tx_gateway_frontend>&,
@@ -133,6 +135,10 @@ public:
 
     security::audit::audit_log_manager& audit_mgr() {
         return _audit_mgr.local();
+    }
+
+    ss::sharded<security::oidc::service>& oidc_service() {
+        return _oidc_service;
     }
 
     cluster::security_frontend& security_frontend() {
@@ -215,6 +221,7 @@ private:
     ss::sharded<security::credential_store>& _credentials;
     ss::sharded<security::authorizer>& _authorizer;
     ss::sharded<security::audit::audit_log_manager>& _audit_mgr;
+    ss::sharded<security::oidc::service>& _oidc_service;
     ss::sharded<cluster::security_frontend>& _security_frontend;
     ss::sharded<cluster::controller_api>& _controller_api;
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
@@ -227,8 +234,7 @@ private:
     ssx::semaphore _memory_fetch_sem;
 
     handler_probe_manager _handler_probes;
-    ssx::metrics::metric_groups _metrics
-      = ssx::metrics::metric_groups::make_internal();
+    metrics::internal_metric_groups _metrics;
     std::unique_ptr<class latency_probe> _probe;
     ssx::singleton_thread_worker& _thread_worker;
     std::unique_ptr<replica_selector> _replica_selector;

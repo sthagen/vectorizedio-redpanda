@@ -60,6 +60,7 @@
 #include "json/writer.h"
 #include "kafka/server/usage_manager.h"
 #include "kafka/types.h"
+#include "metrics/metrics.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
@@ -100,7 +101,6 @@
 #include "security/scram_authenticator.h"
 #include "security/scram_credential.h"
 #include "ssx/future-util.h"
-#include "ssx/metrics.h"
 #include "ssx/sformat.h"
 #include "transform/api.h"
 #include "utils/fragmented_vector.h"
@@ -155,6 +155,8 @@
 using namespace std::chrono_literals;
 
 static ss::logger logger{"admin_api_server"};
+
+static constexpr auto audit_svc_name = "Redpanda Admin HTTP Server";
 
 // Helpers for partition routes
 namespace {
@@ -527,7 +529,7 @@ void admin_server::configure_metrics_route() {
       _server,
       {.metric_help = "redpanda metrics",
        .prefix = "redpanda",
-       .handle = ssx::metrics::public_metrics_handle,
+       .handle = metrics::public_metrics_handle,
        .route = "/public_metrics"})
       .get();
 }
@@ -600,7 +602,7 @@ void admin_server::audit_authz(
   std::optional<std::string_view> reason) {
     vlog(logger.trace, "Attempting to audit authz for {}", req.format_url());
     auto api_event = security::audit::make_api_activity_event(
-      req, auth_result, bool(authorized), reason);
+      req, auth_result, audit_svc_name, bool(authorized), reason);
     auto success = _audit_mgr.local().enqueue_audit_event(
       security::audit::event_type::management, std::move(api_event));
     if (!success) {
@@ -643,7 +645,7 @@ void admin_server::audit_authz(
 void admin_server::audit_authn(
   ss::httpd::const_req req, const request_auth_result& auth_result) {
     auto authentication_event = security::audit::make_authentication_event(
-      req, auth_result);
+      req, auth_result, audit_svc_name);
 
     do_audit_authn(req, std::move(authentication_event));
 }
@@ -654,7 +656,7 @@ void admin_server::audit_authn_failure(
   const ss::sstring& reason) {
     auto authentication_event
       = security::audit::make_authentication_failure_event(
-        req, username, reason);
+        req, username, audit_svc_name, reason);
 
     do_audit_authn(req, std::move(authentication_event));
 }

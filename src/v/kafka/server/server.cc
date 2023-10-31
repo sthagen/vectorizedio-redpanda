@@ -52,6 +52,7 @@
 #include "security/exceptions.h"
 #include "security/gssapi_authenticator.h"
 #include "security/mtls.h"
+#include "security/oidc_authenticator.h"
 #include "security/scram_algorithm.h"
 #include "security/scram_authenticator.h"
 #include "ssx/future-util.h"
@@ -97,6 +98,7 @@ server::server(
   ss::sharded<security::credential_store>& credentials,
   ss::sharded<security::authorizer>& authorizer,
   ss::sharded<security::audit::audit_log_manager>& audit_mgr,
+  ss::sharded<security::oidc::service>& oidc_service,
   ss::sharded<cluster::security_frontend>& sec_fe,
   ss::sharded<cluster::controller_api>& controller_api,
   ss::sharded<cluster::tx_gateway_frontend>& tx_gateway_frontend,
@@ -128,6 +130,7 @@ server::server(
   , _credentials(credentials)
   , _authorizer(authorizer)
   , _audit_mgr(audit_mgr)
+  , _oidc_service(oidc_service)
   , _security_frontend(sec_fe)
   , _controller_api(controller_api)
   , _tx_gateway_frontend(tx_gateway_frontend)
@@ -372,7 +375,15 @@ ss::future<response_ptr> heartbeat_handler::handle(
           heartbeat_response(error_code::policy_violation));
     }
 
-    if (!ctx.authorized(security::acl_operation::read, request.data.group_id)) {
+    auto authz = ctx.authorized(
+      security::acl_operation::read, request.data.group_id);
+
+    if (!ctx.audit()) {
+        co_return co_await ctx.respond(
+          heartbeat_response(error_code::broker_not_available));
+    }
+
+    if (!authz) {
         co_return co_await ctx.respond(
           heartbeat_response(error_code::group_authorization_failed));
     }
@@ -437,7 +448,15 @@ process_result_stages sync_group_handler::handle(
           ctx.respond(sync_group_response(error_code::policy_violation)));
     }
 
-    if (!ctx.authorized(security::acl_operation::read, request.data.group_id)) {
+    auto authz = ctx.authorized(
+      security::acl_operation::read, request.data.group_id);
+
+    if (!ctx.audit()) {
+        return process_result_stages::single_stage(
+          ctx.respond(sync_group_response(error_code::broker_not_available)));
+    }
+
+    if (!authz) {
         return process_result_stages::single_stage(ctx.respond(
           sync_group_response(error_code::group_authorization_failed)));
     }
@@ -467,7 +486,15 @@ ss::future<response_ptr> leave_group_handler::handle(
           leave_group_response(error_code::policy_violation));
     }
 
-    if (!ctx.authorized(security::acl_operation::read, request.data.group_id)) {
+    auto authz = ctx.authorized(
+      security::acl_operation::read, request.data.group_id);
+
+    if (!ctx.audit()) {
+        co_return co_await ctx.respond(
+          leave_group_response(error_code::broker_not_available));
+    }
+
+    if (!authz) {
         co_return co_await ctx.respond(
           leave_group_response(error_code::group_authorization_failed));
     }
@@ -562,6 +589,18 @@ ss::future<response_ptr> sasl_handshake_handler::handle(
                 ctx.connection()->server().gssapi_principal_mapper().rules(),
                 config::shard_local_cfg().sasl_kerberos_principal(),
                 config::shard_local_cfg().sasl_kerberos_keytab()));
+        }
+    }
+
+    if (supports(security::oidc::sasl_authenticator::name)) {
+        supported_sasl_mechanisms.emplace_back(
+          security::oidc::sasl_authenticator::name);
+
+        if (
+          request.data.mechanism == security::oidc::sasl_authenticator::name) {
+            ctx.sasl()->set_mechanism(
+              std::make_unique<security::oidc::sasl_authenticator>(
+                ctx.connection()->server().oidc_service().local()));
         }
     }
 
@@ -1271,14 +1310,8 @@ ss::future<response_ptr> create_acls_handler::handle(
     request.decode(ctx.reader(), ctx.header().version);
     log_request(ctx.header(), request);
 
-    if (!ctx.authorized(
-          security::acl_operation::alter, security::default_cluster_name)) {
-        creatable_acl_result result;
-        result.error_code = error_code::cluster_authorization_failed;
-        create_acls_response resp;
-        resp.data.results.assign(request.data.creations.size(), result);
-        co_return co_await ctx.respond(std::move(resp));
-    }
+    bool authz = ctx.authorized(
+      security::acl_operation::alter, security::default_cluster_name);
 
     // <bindings index> | error
     std::vector<std::variant<size_t, creatable_acl_result>> result_index;
@@ -1300,6 +1333,29 @@ ss::future<response_ptr> create_acls_handler::handle(
               .error_message = e.what(),
             });
         }
+    }
+
+    // We allow for the conversion to happen before we check for audit and authz
+    // so we have access to the parsed data for auditing.  May result in
+    // unecessary cycles if auditing fails or if the operation isn't authorized.
+
+    auto get_bindings = [&bindings] { return bindings; };
+
+    if (!ctx.audit(std::move(get_bindings))) {
+        creatable_acl_result result;
+        result.error_code = error_code::broker_not_available;
+        result.error_message = "Broker not available - audit system failure";
+        create_acls_response resp;
+        resp.data.results.assign(request.data.creations.size(), result);
+        co_return co_await ctx.respond(std::move(resp));
+    }
+
+    if (!authz) {
+        creatable_acl_result result;
+        result.error_code = error_code::cluster_authorization_failed;
+        create_acls_response resp;
+        resp.data.results.assign(request.data.creations.size(), result);
+        co_return co_await ctx.respond(std::move(resp));
     }
 
     const auto num_bindings = bindings.size();
