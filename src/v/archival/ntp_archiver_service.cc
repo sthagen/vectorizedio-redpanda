@@ -159,17 +159,13 @@ ntp_archiver_upload_result::operator()(cloud_storage::upload_result) const {
 
 static std::unique_ptr<adjacent_segment_merger>
 maybe_make_adjacent_segment_merger(
-  ntp_archiver& self,
-  retry_chain_logger& log,
-  const storage::ntp_config& cfg,
-  bool am_leader) {
+  ntp_archiver& self, const storage::ntp_config& cfg, bool am_leader) {
     std::unique_ptr<adjacent_segment_merger> result = nullptr;
     if (
       cfg.is_archival_enabled() && !cfg.is_compacted()
       && !cfg.is_read_replica_mode_enabled()) {
         result = std::make_unique<adjacent_segment_merger>(
           self,
-          log,
           true,
           config::shard_local_cfg()
             .cloud_storage_enable_segment_merging.bind());
@@ -181,7 +177,6 @@ maybe_make_adjacent_segment_merger(
 static std::unique_ptr<scrubber> maybe_make_scrubber(
   ntp_archiver& self,
   cloud_storage::remote& remote,
-  retry_chain_logger& logger,
   features::feature_table& feature_table,
   const storage::ntp_config& cfg,
   bool am_leader) {
@@ -190,7 +185,6 @@ static std::unique_ptr<scrubber> maybe_make_scrubber(
         result = std::make_unique<scrubber>(
           self,
           remote,
-          logger,
           feature_table,
           config::shard_local_cfg().cloud_storage_enable_scrubbing.bind(),
           config::shard_local_cfg().cloud_storage_scrubbing_interval_ms.bind(),
@@ -230,11 +224,10 @@ ntp_archiver::ntp_archiver(
   , _next_housekeeping(_housekeeping_jitter())
   , _feature_table(parent.feature_table())
   , _local_segment_merger(maybe_make_adjacent_segment_merger(
-      *this, _rtclog, parent.log()->config(), parent.is_leader()))
+      *this, parent.log()->config(), parent.is_leader()))
   , _scrubber(maybe_make_scrubber(
       *this,
       _remote,
-      _rtclog,
       _feature_table.local(),
       parent.log()->config(),
       parent.is_leader()))
@@ -1783,18 +1776,33 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
                        - (total.num_succeeded + total.num_cancelled);
 
     std::vector<cloud_storage::segment_meta> mdiff;
-    std::optional<model::offset_delta> delta_offset_end;
-    std::optional<model::offset> last_offset;
-    auto last_segment = manifest().last_segment();
-    if (
-      last_segment.has_value()
-      && last_segment->delta_offset_end != model::offset_delta{}) {
-        delta_offset_end = last_segment->delta_offset_end;
-        last_offset = last_segment->committed_offset;
-    }
     const bool checks_disabled
       = config::shard_local_cfg()
           .cloud_storage_disable_upload_consistency_checks.value();
+    if (!checks_disabled) {
+        std::vector<cloud_storage::segment_meta> meta;
+        for (size_t i = 0; i < segment_results.size(); i++) {
+            meta.push_back(scheduled[ixupload[i]].meta.value());
+        }
+        size_t num_accepted = manifest().safe_segment_meta_to_add(
+          std::move(meta));
+        if (num_accepted < segment_results.size()) {
+            vlog(
+              _rtclog.warn,
+              "Metadata inconsistency detected, {} segments uploaded but only "
+              "{} can be added",
+              segment_results.size(),
+              num_accepted);
+            _probe->gap_detected(model::offset(
+              static_cast<int64_t>(segment_results.size() - num_accepted)));
+        }
+        vassert(
+          num_accepted <= segment_results.size(),
+          "Accepted {} segments but only {} segments are uploaded",
+          num_accepted,
+          segment_results.size());
+        segment_results.resize(num_accepted);
+    }
     for (size_t i = 0; i < segment_results.size(); i++) {
         if (
           segment_results[i].result()
@@ -1819,43 +1827,6 @@ ss::future<ntp_archiver::upload_group_result> ntp_archiver::wait_uploads(
                 if (!segment_meta_matches_stats(*upload.meta, stats, _rtclog)) {
                     break;
                 }
-            }
-        }
-        if (
-          !checks_disabled && segment_kind == segment_upload_kind::non_compacted
-          && upload.meta.has_value() && last_offset.has_value()
-          && upload.meta->base_offset > last_offset.value()) {
-            // This code block is executed only for non-compacted uploads
-            // which are adding new segments and not replacing existing
-            // ones.
-            if (
-              delta_offset_end.has_value() && upload.meta.has_value()
-              && upload.meta->delta_offset != delta_offset_end) {
-                vlog(
-                  _rtclog.error,
-                  "Delta offset of the uploaded segment {} doesn't match "
-                  "with expected value of {}",
-                  upload.meta->delta_offset,
-                  delta_offset_end);
-                _probe->gap_detected(last_offset.value());
-                break;
-            } else {
-                delta_offset_end = upload.meta->delta_offset_end;
-            }
-            if (
-              last_offset.has_value() && upload.meta.has_value()
-              && upload.meta->base_offset
-                   != model::next_offset(last_offset.value())) {
-                vlog(
-                  _rtclog.error,
-                  "Base offset of the uploaded segment {} doesn't align "
-                  "with previous segment with committed offset {}",
-                  upload.meta->base_offset,
-                  model::next_offset(last_offset.value()));
-                _probe->gap_detected(last_offset.value());
-                break;
-            } else {
-                last_offset = upload.meta->committed_offset;
             }
         }
 
