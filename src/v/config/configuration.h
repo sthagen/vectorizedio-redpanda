@@ -318,7 +318,8 @@ struct configuration final : public config_store {
     property<int32_t> cloud_storage_background_jobs_quota;
     property<bool> cloud_storage_enable_segment_merging;
     property<bool> cloud_storage_enable_scrubbing;
-    property<std::chrono::milliseconds> cloud_storage_scrubbing_interval_ms;
+    property<std::chrono::milliseconds> cloud_storage_partial_scrub_interval_ms;
+    property<std::chrono::milliseconds> cloud_storage_full_scrub_interval_ms;
     property<std::chrono::milliseconds>
       cloud_storage_scrubbing_interval_jitter_ms;
     property<bool> cloud_storage_disable_upload_loop_for_tests;
@@ -378,7 +379,7 @@ struct configuration final : public config_store {
     bounded_property<uint16_t> space_management_max_segment_concurrency;
     property<std::optional<size_t>>
       initial_retention_local_target_bytes_default;
-    property<std::chrono::milliseconds>
+    property<std::optional<std::chrono::milliseconds>>
       initial_retention_local_target_ms_default;
 
     // Archival cache

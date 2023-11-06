@@ -1637,10 +1637,16 @@ configuration::configuration()
       "the integrity of data and metadata uploaded to cloud storage",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       true)
-  , cloud_storage_scrubbing_interval_ms(
+  , cloud_storage_partial_scrub_interval_ms(
       *this,
-      "cloud_storage_scrubbing_interval_ms",
-      "Time interval between scrubs of the same partition",
+      "cloud_storage_partial_scrub_interval_ms",
+      "Time interval between two partial scrubs of the same partition",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1h)
+  , cloud_storage_full_scrub_interval_ms(
+      *this,
+      "cloud_storage_full_scrub_interval_ms",
+      "Time interval between a final scrub and thte next scrub",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1h)
   , cloud_storage_scrubbing_interval_jitter_ms(
@@ -2023,18 +2029,20 @@ configuration::configuration()
       *this,
       "initial_retention_local_target_bytes_default",
       "Initial local retention size target for partitions of topics with cloud "
-      "storage "
-      "write enabled",
+      "storage write enabled. If no initial local target retention is "
+      "configured all locally retained data will be delivered to learner when "
+      "joining partition replica set",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       std::nullopt)
   , initial_retention_local_target_ms_default(
       *this,
       "initial_retention_local_target_ms_default",
       "Initial local retention time target for partitions of topics with cloud "
-      "storage "
-      "write enabled",
+      "storage write enabled. If no initial local target retention is "
+      "configured all locally retained data will be delivered to learner when "
+      "joining partition replica set",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      24h)
+      std::nullopt)
   , cloud_storage_cache_size(
       *this,
       "cloud_storage_cache_size",
