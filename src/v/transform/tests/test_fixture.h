@@ -39,13 +39,21 @@ static const model::transform_metadata my_metadata{
 
 class fake_wasm_engine : public wasm::engine {
 public:
+    enum class mode {
+        noop,
+        filter,
+    };
+
     ss::future<model::record_batch>
-    transform(model::record_batch batch, wasm::transform_probe*) override {
-        co_return batch;
-    }
+    transform(model::record_batch batch, wasm::transform_probe*) override;
+
+    void set_mode(mode m);
 
     ss::future<> start() override;
     ss::future<> stop() override;
+
+private:
+    mode _mode = mode::noop;
 };
 
 class fake_source : public source {
@@ -78,6 +86,10 @@ private:
 
 class fake_offset_tracker : public offset_tracker {
 public:
+    ss::future<> start() override;
+    ss::future<> stop() override;
+    ss::future<> wait_for_previous_flushes(ss::abort_source*) override;
+
     ss::future<std::optional<kafka::offset>> load_committed_offset() override;
 
     ss::future<> commit_offset(kafka::offset o) override;

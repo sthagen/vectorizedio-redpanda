@@ -199,6 +199,9 @@ client::client(
 
 ss::future<cluster::errc> client::produce(
   model::topic_partition tp, ss::chunked_fifo<model::record_batch> batches) {
+    if (batches.empty()) {
+        co_return cluster::errc::success;
+    }
     produce_request req;
     req.topic_data.emplace_back(std::move(tp), std::move(batches));
     req.timeout = timeout;
@@ -580,26 +583,30 @@ ss::future<find_coordinator_response> client::do_remote_find_coordinator(
     co_return response.value();
 }
 
-ss::future<cluster::errc> client::offset_commit(
-  model::transform_offsets_key key, model::transform_offsets_value value) {
-    return retry([key, value, this] { return offset_commit_once(key, value); });
+ss::future<cluster::errc> client::batch_offset_commit(
+  model::partition_id coordinator,
+  absl::btree_map<model::transform_offsets_key, model::transform_offsets_value>
+    kvs) {
+    return retry([coordinator, kvs = std::move(kvs), this] {
+        return batch_offset_commit_once(coordinator, kvs);
+    });
 }
 
-ss::future<cluster::errc> client::offset_commit_once(
-  model::transform_offsets_key key, model::transform_offsets_value value) {
-    auto coordinator = co_await find_coordinator(key);
-    if (!coordinator) {
-        co_return coordinator.error();
+ss::future<cluster::errc> client::batch_offset_commit_once(
+  model::partition_id coordinator,
+  absl::btree_map<model::transform_offsets_key, model::transform_offsets_value>
+    kvs) {
+    if (kvs.empty()) {
+        co_return cluster::errc::success;
     }
 
-    auto ntp = offsets_ntp(coordinator.value());
+    auto ntp = offsets_ntp(coordinator);
     auto leader = _leaders->get_leader_node(ntp);
     if (!leader) {
         co_return cluster::errc::not_leader;
     }
 
-    offset_commit_request request{coordinator.value()};
-    request.add(key, value);
+    offset_commit_request request{coordinator, std::move(kvs)};
 
     vlog(
       log.trace, "offset_commit_once_request(node={}): {}", *leader, request);

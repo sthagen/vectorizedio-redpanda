@@ -42,6 +42,7 @@ public:
       ss::sharded<cluster::plugin_frontend>* plugin_frontend,
       ss::sharded<features::feature_table>* feature_table,
       ss::sharded<raft::group_manager>* group_manager,
+      ss::sharded<cluster::topic_table>* topic_table,
       ss::sharded<cluster::partition_manager>* partition_manager,
       ss::sharded<rpc::client>* rpc_client);
     service(const service&) = delete;
@@ -98,9 +99,11 @@ private:
     ss::sharded<cluster::plugin_frontend>* _plugin_frontend;
     ss::sharded<features::feature_table>* _feature_table;
     ss::sharded<raft::group_manager>* _group_manager;
+    ss::sharded<cluster::topic_table>* _topic_table;
     ss::sharded<cluster::partition_manager>* _partition_manager;
     ss::sharded<rpc::client>* _rpc_client;
     std::unique_ptr<manager<ss::lowres_clock>> _manager;
+    std::unique_ptr<commit_batcher<ss::lowres_clock>> _batcher;
     std::vector<ss::deferred_action<ss::noncopyable_function<void()>>>
       _notification_cleanups;
 };

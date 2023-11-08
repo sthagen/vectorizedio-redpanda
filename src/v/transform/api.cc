@@ -14,14 +14,18 @@
 #include "cluster/errc.h"
 #include "cluster/partition_manager.h"
 #include "cluster/plugin_frontend.h"
+#include "cluster/topic_table.h"
 #include "cluster/types.h"
+#include "config/configuration.h"
 #include "features/feature_table.h"
 #include "kafka/server/partition_proxy.h"
 #include "kafka/server/replicated_partition.h"
 #include "model/fundamental.h"
+#include "model/namespace.h"
 #include "model/timeout_clock.h"
 #include "model/transform.h"
 #include "resource_mgmt/io_priority.h"
+#include "transform/commit_batcher.h"
 #include "transform/io.h"
 #include "transform/logger.h"
 #include "transform/rpc/client.h"
@@ -31,6 +35,7 @@
 #include "wasm/api.h"
 #include "wasm/cache.h"
 
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/smp.hh>
@@ -38,6 +43,7 @@
 #include <seastar/util/optimized_optional.hh>
 
 #include <memory>
+#include <stdexcept>
 
 namespace transform {
 
@@ -47,12 +53,20 @@ constexpr auto metadata_timeout = std::chrono::seconds(1);
 
 class rpc_client_sink final : public sink {
 public:
-    rpc_client_sink(model::ntp ntp, rpc::client* c)
-      : _ntp(std::move(ntp))
-      , _client(c) {}
+    rpc_client_sink(
+      model::topic topic,
+      model::partition_id input_partition_id,
+      cluster::topic_table* topic_table,
+      rpc::client* client)
+      : _topic(std::move(topic))
+      , _input_partition_id(input_partition_id)
+      , _topic_table(topic_table)
+      , _client(client) {}
 
     ss::future<> write(ss::chunked_fifo<model::record_batch> batches) override {
-        auto ec = co_await _client->produce(_ntp.tp, std::move(batches));
+        model::partition_id partition = compute_output_partition();
+        auto ec = co_await _client->produce(
+          {_topic, partition}, std::move(batches));
         if (ec != cluster::errc::success) {
             throw std::runtime_error(ss::format(
               "failure to produce transform data: {}",
@@ -61,7 +75,22 @@ public:
     }
 
 private:
-    model::ntp _ntp;
+    model::partition_id compute_output_partition() {
+        const auto& config = _topic_table->get_topic_cfg({
+          model::kafka_namespace,
+          _topic,
+        });
+        if (!config) {
+            throw std::runtime_error(ss::format(
+              "unable to compute output partition for topic: {}", _topic));
+        }
+        return model::partition_id(
+          _input_partition_id % config->partition_count);
+    }
+
+    model::topic _topic;
+    model::partition_id _input_partition_id;
+    cluster::topic_table* _topic_table;
     rpc::client* _client;
 };
 
@@ -135,14 +164,27 @@ private:
 class offset_tracker_impl : public offset_tracker {
 public:
     offset_tracker_impl(
-      model::transform_id tid, model::partition_id pid, rpc::client* client)
-      : _tid(tid)
-      , _pid(pid)
-      , _client(client) {}
+      model::transform_id tid,
+      model::partition_id pid,
+      rpc::client* client,
+      commit_batcher<>* batcher)
+      : _key({.id = tid, .partition = pid})
+      , _client(client)
+      , _batcher(batcher) {}
+
+    ss::future<> start() override { return ss::now(); }
+
+    ss::future<> stop() override {
+        _batcher->unload(_key);
+        return ss::now();
+    }
+
+    ss::future<> wait_for_previous_flushes(ss::abort_source* as) override {
+        return _batcher->wait_for_previous_flushes(_key, as);
+    }
 
     ss::future<std::optional<kafka::offset>> load_committed_offset() override {
-        auto result = co_await _client->offset_fetch(
-          {.id = _tid, .partition = _pid});
+        auto result = co_await _client->offset_fetch(_key);
         if (result.has_error()) {
             cluster::errc ec = result.error();
             throw std::runtime_error(ss::format(
@@ -157,21 +199,13 @@ public:
     }
 
     ss::future<> commit_offset(kafka::offset offset) override {
-        // TODO(rockwood): We should be batching commits so commiting scales
-        // with the number of cores, not the number of partitions.
-        cluster::errc ec = co_await _client->offset_commit(
-          {.id = _tid, .partition = _pid}, {.offset = offset});
-        if (ec != cluster::errc::success) {
-            throw std::runtime_error(ss::format(
-              "error committing offset: {}",
-              cluster::error_category().message(int(ec))));
-        }
+        return _batcher->commit_offset(_key, {.offset = offset});
     }
 
 private:
-    model::transform_id _tid;
-    model::partition_id _pid;
+    model::transform_offsets_key _key;
     rpc::client* _client;
+    commit_batcher<>* _batcher;
 };
 
 using wasm_engine_factory = ss::noncopyable_function<
@@ -182,11 +216,15 @@ class proc_factory : public processor_factory {
 public:
     proc_factory(
       wasm_engine_factory factory,
+      cluster::topic_table* topic_table,
       cluster::partition_manager* partition_manager,
-      rpc::client* client)
+      rpc::client* client,
+      commit_batcher<>* batcher)
       : _wasm_engine_factory(std::move(factory))
       , _partition_manager(partition_manager)
-      , _client(client) {}
+      , _client(client)
+      , _batcher(batcher)
+      , _topic_table(topic_table) {}
 
     ss::future<std::unique_ptr<processor>> create_processor(
       model::transform_id id,
@@ -209,12 +247,11 @@ public:
         const auto& output_topic = meta.output_topics[0];
         std::vector<std::unique_ptr<sink>> sinks;
         auto sink = std::make_unique<rpc_client_sink>(
-          model::ntp(output_topic.ns, output_topic.tp, ntp.tp.partition),
-          _client);
+          output_topic.tp, ntp.tp.partition, _topic_table, _client);
         sinks.push_back(std::move(sink));
 
         auto offset_tracker = std::make_unique<offset_tracker_impl>(
-          id, ntp.tp.partition, _client);
+          id, ntp.tp.partition, _client, _batcher);
 
         co_return std::make_unique<processor>(
           id,
@@ -234,6 +271,30 @@ private:
     cluster::partition_manager* _partition_manager;
     rpc::client* _client;
     absl::flat_hash_map<model::offset, std::unique_ptr<wasm::engine>> _cache;
+    commit_batcher<>* _batcher;
+    cluster::topic_table* _topic_table;
+};
+
+class rpc_offset_committer : public offset_committer {
+public:
+    explicit rpc_offset_committer(rpc::client* client)
+      : _client(client) {}
+
+    ss::future<result<model::partition_id, cluster::errc>>
+    find_coordinator(model::transform_offsets_key key) override {
+        return _client->find_coordinator(key);
+    }
+
+    ss::future<cluster::errc> batch_commit(
+      model::partition_id coordinator,
+      absl::btree_map<
+        model::transform_offsets_key,
+        model::transform_offsets_value> batch) override {
+        return _client->batch_offset_commit(coordinator, std::move(batch));
+    }
+
+private:
+    rpc::client* _client;
 };
 
 } // namespace
@@ -265,6 +326,7 @@ service::service(
   ss::sharded<cluster::plugin_frontend>* plugin_frontend,
   ss::sharded<features::feature_table>* feature_table,
   ss::sharded<raft::group_manager>* group_manager,
+  ss::sharded<cluster::topic_table>* topic_table,
   ss::sharded<cluster::partition_manager>* partition_manager,
   ss::sharded<rpc::client>* rpc_client)
   : _runtime(runtime)
@@ -272,12 +334,17 @@ service::service(
   , _plugin_frontend(plugin_frontend)
   , _feature_table(feature_table)
   , _group_manager(group_manager)
+  , _topic_table(topic_table)
   , _partition_manager(partition_manager)
   , _rpc_client(rpc_client) {}
 
 service::~service() = default;
 
 ss::future<> service::start() {
+    _batcher = std::make_unique<commit_batcher<ss::lowres_clock>>(
+      config::shard_local_cfg().data_transforms_commit_interval_ms.bind(),
+      std::make_unique<rpc_offset_committer>(&_rpc_client->local()));
+
     _manager = std::make_unique<manager<ss::lowres_clock>>(
       _self,
       std::make_unique<registry_adapter>(
@@ -286,8 +353,11 @@ ss::future<> service::start() {
         [this](model::transform_metadata meta) {
             return create_engine(std::move(meta));
         },
+        &_topic_table->local(),
         &_partition_manager->local(),
-        &_rpc_client->local()));
+        &_rpc_client->local(),
+        _batcher.get()));
+    co_await _batcher->start();
     co_await _manager->start();
     register_notifications();
 }
@@ -367,6 +437,9 @@ ss::future<> service::stop() {
     // manager.
     if (_manager) {
         co_await _manager->stop();
+    }
+    if (_batcher) {
+        co_await _batcher->stop();
     }
 }
 

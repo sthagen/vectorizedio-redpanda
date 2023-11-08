@@ -816,6 +816,7 @@ ss::future<std::error_code> topics_frontend::move_partition_replicas(
               "Trying to move partition {} to {} with reconfiguration policy "
               "of {} but fast partition movement feature is not yet active",
               ntp,
+              new_replica_set,
               policy);
         }
         move_partition_replicas_cmd cmd(
@@ -1011,6 +1012,54 @@ ss::future<std::vector<topic_result>> topics_frontend::create_partitions(
     co_return result;
 }
 
+ss::future<std::error_code> topics_frontend::set_topic_partitions_disabled(
+  model::topic_namespace_view ns_tp,
+  std::optional<model::partition_id> p_id,
+  bool disabled,
+  model::timeout_clock::time_point timeout) {
+    if (!_features.local().is_active(features::feature::disabling_partitions)) {
+        co_return errc::feature_disabled;
+    }
+
+    auto r = co_await stm_linearizable_barrier(timeout);
+    if (!r) {
+        co_return r.error();
+    }
+
+    // pre-replicate checks
+
+    if (p_id) {
+        if (!_topics.local().contains(ns_tp, *p_id)) {
+            co_return errc::partition_not_exists;
+        }
+        if (_topics.local().is_disabled(ns_tp, *p_id) == disabled) {
+            // no-op
+            co_return errc::success;
+        }
+    } else {
+        if (!_topics.local().contains(ns_tp)) {
+            co_return errc::topic_not_exists;
+        }
+        if (_topics.local().is_disabled(ns_tp) == disabled) {
+            // no-op
+            co_return errc::success;
+        }
+    }
+
+    // replicate the command
+
+    set_topic_partitions_disabled_cmd cmd(
+      0, // unused
+      set_topic_partitions_disabled_cmd_data{
+        .ns_tp = model::topic_namespace{ns_tp},
+        .partition_id = p_id,
+        .disabled = disabled,
+      });
+
+    co_return co_await replicate_and_wait(
+      _stm, _features, _as, std::move(cmd), timeout);
+}
+
 ss::future<bool>
 topics_frontend::validate_shard(model::node_id node, uint32_t shard) const {
     return _allocator.invoke_on(
@@ -1046,34 +1095,6 @@ ss::future<topic_result> topics_frontend::do_create_partition(
     if (p_cfg.new_total_partition_count <= tp_cfg->partition_count) {
         co_return make_error_result(
           p_cfg.tp_ns, errc::topic_invalid_partitions);
-    }
-
-    // NOTE: This is best effort validation, it's possible for a plugin creation
-    // racing in a suspension point and there being extra partitions on an input
-    // topic that were added.
-    auto transforms = _plugin_table.find_by_input_topic(p_cfg.tp_ns);
-    // Check that all the topics are copartitioned
-    for (const auto& entry : transforms) {
-        for (const auto& output_topic : entry.second.output_topics) {
-            auto output_tp_cfg = _topics.local().get_topic_cfg(output_topic);
-            if (!output_tp_cfg) {
-                vlog(
-                  clusterlog.error,
-                  "invalid transform (id={}) output topic {} doesn't exist",
-                  entry.first,
-                  output_topic);
-                co_return make_error_result(
-                  p_cfg.tp_ns, errc::topic_invalid_config);
-            }
-            // We enforce the input topic has as many partitions as the
-            // output topic (copartitioning).
-            if (
-              p_cfg.new_total_partition_count
-              < output_tp_cfg->partition_count) {
-                co_return make_error_result(
-                  p_cfg.tp_ns, errc::topic_invalid_partitions);
-            }
-        }
     }
 
     auto units = co_await _allocator.invoke_on(

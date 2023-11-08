@@ -77,7 +77,9 @@ drain_queue(ss::queue<transformed_batch>* queue, probe* p) {
         p->increment_write_bytes(batch_size);
         auto transformed = queue->pop();
         result.latest_offset = transformed.input_offset;
-        result.batches.push_back(std::move(transformed.batch));
+        if (transformed.batch.record_count() > 0) {
+            result.batches.push_back(std::move(transformed.batch));
+        }
     }
     co_return result;
 }
@@ -126,6 +128,7 @@ processor::processor(
 ss::future<> processor::start() {
     try {
         co_await _engine->start();
+        co_await _offset_tracker->start();
     } catch (const std::exception& ex) {
         vlog(_logger.warn, "error starting processor engine: {}", ex);
         _error_callback(_id, _ntp, _meta);
@@ -144,6 +147,7 @@ ss::future<> processor::stop() {
     _transform_producer_pipe.abort(ex);
     co_await std::exchange(_task, ss::now());
     co_await _engine->stop();
+    co_await _offset_tracker->stop();
 }
 
 ss::future<> processor::poll_sleep() {
@@ -158,6 +162,7 @@ ss::future<> processor::poll_sleep() {
 }
 
 ss::future<kafka::offset> processor::load_start_offset() {
+    co_await _offset_tracker->wait_for_previous_flushes(&_as);
     auto latest_committed = co_await _offset_tracker->load_committed_offset();
     if (latest_committed) {
         co_return kafka::next_offset(latest_committed.value());
