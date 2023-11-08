@@ -14,6 +14,7 @@
 #include "model/record.h"
 #include "model/record_batch_reader.h"
 #include "model/timeout_clock.h"
+#include "prometheus/prometheus_sanitize.h"
 #include "random/simple_time_jitter.h"
 #include "transform/logger.h"
 #include "units.h"
@@ -128,6 +129,7 @@ processor::processor(
 ss::future<> processor::start() {
     try {
         co_await _engine->start();
+        co_await _source->start();
         co_await _offset_tracker->start();
     } catch (const std::exception& ex) {
         vlog(_logger.warn, "error starting processor engine: {}", ex);
@@ -146,8 +148,11 @@ ss::future<> processor::stop() {
     _consumer_transform_pipe.abort(ex);
     _transform_producer_pipe.abort(ex);
     co_await std::exchange(_task, ss::now());
-    co_await _engine->stop();
+    co_await _source->stop();
     co_await _offset_tracker->stop();
+    co_await _engine->stop();
+    // reset lag now that we've stopped
+    report_lag(0);
 }
 
 ss::future<> processor::poll_sleep() {
@@ -164,10 +169,12 @@ ss::future<> processor::poll_sleep() {
 ss::future<kafka::offset> processor::load_start_offset() {
     co_await _offset_tracker->wait_for_previous_flushes(&_as);
     auto latest_committed = co_await _offset_tracker->load_committed_offset();
-    if (latest_committed) {
-        co_return kafka::next_offset(latest_committed.value());
-    }
     auto latest = _source->latest_offset();
+    if (latest_committed) {
+        auto start_offset = kafka::next_offset(latest_committed.value());
+        report_lag(latest - start_offset);
+        co_return start_offset;
+    }
     // We "commit" at the previous offset so that we resume at the latest.
     co_await _offset_tracker->commit_offset(kafka::prev_offset(latest));
     co_return latest;
@@ -177,9 +184,6 @@ ss::future<> processor::run_consumer_loop() {
     auto offset = co_await load_start_offset();
     vlog(_logger.trace, "starting at offset {}", offset);
     while (!_as.abort_requested()) {
-        // TODO(rockwood): It's possible that the stored is deleted due to
-        // retention policy since the last successful commit. We should handle
-        // this by restarting from the low watermark.
         auto reader = co_await _source->read_batch(offset, &_as);
         auto last_offset = co_await std::move(reader).consume(
           queue_output_consumer(&_consumer_transform_pipe, _probe),
@@ -212,6 +216,7 @@ ss::future<> processor::run_producer_loop() {
         auto drained = co_await drain_queue(&_transform_producer_pipe, _probe);
         co_await _sinks[0]->write(std::move(drained.batches));
         co_await _offset_tracker->commit_offset(drained.latest_offset);
+        report_lag(_source->latest_offset() - drained.latest_offset);
     }
 }
 
@@ -232,8 +237,15 @@ ss::future<> processor::handle_run_loop(ss::future<> fut) {
     }
 }
 
+void processor::report_lag(int64_t lag) {
+    int64_t delta = lag - _last_reported_lag;
+    _probe->report_lag(delta);
+    _last_reported_lag = lag;
+}
+
 model::transform_id processor::id() const { return _id; }
 const model::ntp& processor::ntp() const { return _ntp; }
 const model::transform_metadata& processor::meta() const { return _meta; }
 bool processor::is_running() const { return !_task.available(); }
+int64_t processor::current_lag() const { return _last_reported_lag; }
 } // namespace transform
