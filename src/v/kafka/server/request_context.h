@@ -29,9 +29,11 @@
 #include "pandaproxy/schema_registry/fwd.h"
 #include "seastarx.h"
 #include "security/audit/schemas/application_activity.h"
+#include "security/audit/schemas/iam.h"
 #include "security/audit/schemas/types.h"
 #include "security/audit/schemas/utils.h"
 #include "security/audit/types.h"
+#include "security/authorizer.h"
 #include "security/fwd.h"
 #include "ssx/abort_source.h"
 #include "vlog.h"
@@ -255,70 +257,59 @@ public:
         return _conn->server().credentials();
     }
 
-    template<security::audit::returns_auditable_resource_vector Func>
-    bool audit(Func&& f) {
-        auto key = _header.key;
-        auto operation_name = handler_for_key(key).value()->name();
+    bool audit() { return _audit_successful; }
 
-        auto& audit_mgr = _conn->server().audit_mgr();
-        _authz_results.erase(
-          std::remove_if(
-            _authz_results.begin(),
-            _authz_results.end(),
-            [this, operation_name, &audit_mgr, key, f = std::forward<Func>(f)](
-              const auto& val) -> bool {
-                return audit_mgr.enqueue_authz_audit_event(
-                  key,
-                  f,
-                  operation_name,
-                  val,
-                  _conn->local_address(),
-                  _conn->server().name(),
-                  _conn->client_host(),
-                  _conn->client_port(),
-                  _header.client_id);
-            }),
-          _authz_results.end());
-
-        if (!_authz_results.empty()) {
-            vlog(
-              klog.error,
-              "Failed to append to audit log - Unable to audit all messages: "
-              "{}",
-              _authz_results);
-            return false;
-        }
-        return true;
+    bool audit_authn_failure(const ss::sstring& reason) {
+        return audit_authn_failure(reason, "");
     }
 
-    bool audit() {
-        auto key = _header.key;
-        auto operation_name = handler_for_key(key).value()->name();
+    bool audit_authn_failure(
+      const ss::sstring& reason, const ss::sstring& auth_protocol) {
+        return audit_authn_failure(
+          reason,
+          auth_protocol,
+          {.type_id = security::audit::user::type::unknown});
+    }
 
-        auto& audit_mgr = _conn->server().audit_mgr();
-        _authz_results.erase(
-          std::remove_if(
-            _authz_results.begin(),
-            _authz_results.end(),
-            [this, operation_name, &audit_mgr, key](const auto& val) -> bool {
-                return audit_mgr.enqueue_authz_audit_event(
-                  key,
-                  operation_name,
-                  val,
-                  _conn->local_address(),
-                  _conn->server().name(),
-                  _conn->client_host(),
-                  _conn->client_port(),
-                  _header.client_id);
-            }),
-          _authz_results.end());
+    bool audit_authn_failure(
+      const ss::sstring& reason,
+      const ss::sstring& auth_protocol,
+      security::audit::user user) {
+        return audit(security::audit::make_authentication_failure_event(
+          auth_protocol,
+          connection()->local_address(),
+          connection()->server().name(),
+          connection()->client_host(),
+          connection()->client_port(),
+          header().client_id,
+          connection()->tls_enabled()
+            ? security::audit::authentication::used_cleartext::no
+            : security::audit::authentication::used_cleartext::yes,
+          reason,
+          std::move(user)));
+    }
 
-        if (!_authz_results.empty()) {
+    bool audit_authn_success(
+      const ss::sstring& auth_protocol, security::audit::user user) {
+        return audit(security::audit::make_authentication_event(
+          auth_protocol,
+          connection()->local_address(),
+          connection()->server().name(),
+          connection()->client_host(),
+          connection()->client_port(),
+          header().client_id,
+          connection()->tls_enabled()
+            ? security::audit::authentication::used_cleartext::no
+            : security::audit::authentication::used_cleartext::yes,
+          std::move(user)));
+    }
+
+    bool audit(security::audit::authentication authn_event) {
+        if (!_conn->server().audit_mgr().enqueue_audit_event(
+              security::audit::event_type::authenticate,
+              std::move(authn_event))) {
             vlog(
-              klog.error,
-              "Failed to append to audit log - Unable to audit all messages: "
-              "{}",
-              _authz_results);
+              klog.error, "Failed to append authentication event to audit log");
             return false;
         }
         return true;
@@ -329,14 +320,59 @@ public:
       security::acl_operation operation,
       const T& name,
       authz_quiet quiet = authz_quiet{false}) {
-        if constexpr (std::is_same_v<T, model::topic>) {
-            if (name == model::kafka_audit_logging_topic) [[unlikely]] {
-                _request_contains_audit_topic = true;
-            }
-        }
-        auto result = _conn->authorized(operation, name, quiet);
+        auto result = do_authorized(operation, name, quiet);
         auto resp = bool(result);
-        _authz_results.emplace_back(std::move(result));
+
+        auto key = _header.key;
+        // If we have reached this point, handler_for_key should already be
+        // returning a value.  The only situations where it won't would be
+        // in unit tests, so this is a "smoke test" to ensure that unit tests
+        // correctly set up the `_header` member of `request_context`
+        auto operation_name = handler_for_key(key).value()->name();
+
+        if (!_conn->server().audit_mgr().enqueue_authz_audit_event(
+              key,
+              operation_name,
+              std::move(result),
+              _conn->local_address(),
+              _conn->server().name(),
+              _conn->client_host(),
+              _conn->client_port(),
+              _header.client_id)) {
+            _audit_successful = false;
+            vlog(klog.error, "Failed to append authz event to audit log");
+        }
+
+        return resp;
+    }
+
+    template<
+      typename T,
+      security::audit::returns_auditable_resource_vector Func>
+    bool authorized(
+      security::acl_operation operation,
+      const T& name,
+      Func&& f,
+      authz_quiet quiet = authz_quiet{false}) {
+        auto result = do_authorized(operation, name, quiet);
+        auto resp = bool(result);
+
+        auto key = _header.key;
+        auto operation_name = handler_for_key(key).value()->name();
+        if (!_conn->server().audit_mgr().enqueue_authz_audit_event(
+              key,
+              std::forward<Func>(f),
+              operation_name,
+              std::move(result),
+              _conn->local_address(),
+              _conn->server().name(),
+              _conn->client_host(),
+              _conn->client_port(),
+              _header.client_id)) {
+            _audit_successful = false;
+            vlog(klog.error, "Failed to append authz event to audit log");
+        }
+
         return resp;
     }
 
@@ -357,6 +393,18 @@ public:
     ss::sharded<server>& server() { return _conn->server().container(); }
 
 private:
+    template<typename T>
+    security::auth_result do_authorized(
+      security::acl_operation operation,
+      const T& name,
+      authz_quiet quiet = authz_quiet{false}) {
+        if constexpr (std::is_same_v<T, model::topic>) {
+            if (name == model::kafka_audit_logging_topic) [[unlikely]] {
+                _request_contains_audit_topic = true;
+            }
+        }
+        return _conn->authorized(operation, name, quiet);
+    }
     template<typename ResponseType>
     void update_usage_stats(const ResponseType& r, size_t response_size) {
         size_t internal_bytes_recv = 0;
@@ -386,7 +434,7 @@ private:
     request_header _header;
     protocol::decoder _reader;
     ss::lowres_clock::duration _throttle_delay;
-    std::vector<security::auth_result> _authz_results;
+    bool _audit_successful{true};
     bool _request_contains_audit_topic{false};
 };
 

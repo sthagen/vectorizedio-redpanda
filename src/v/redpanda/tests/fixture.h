@@ -752,6 +752,12 @@ public:
         ss::future<result<bytes>> authenticate(bytes) final {
             vassert(false, "Don't call this");
         }
+        const security::audit::user& audit_user() const override {
+            static const security::audit::user user{
+              .type_id = security::audit::user::type::unknown};
+            return user;
+        }
+        const char* mechanism_name() const override { return "fake-mechanism"; }
     };
 
     conn_ptr make_connection_context() {
@@ -776,6 +782,7 @@ public:
         }
 
         kafka::request_header header{
+          .key = kafka::fetch_handler::api::key,
           .version = kafka::fetch_handler::max_supported};
 
         iobuf buf;
