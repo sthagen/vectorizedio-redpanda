@@ -163,6 +163,12 @@ PREV_VERSION_LOG_ALLOW_LIST = [
     "abs - .*FeatureNotYetSupportedForHierarchicalNamespaceAccounts"
 ]
 
+AUDIT_LOG_ALLOW_LIST = RESTART_LOG_ALLOW_LIST + [
+    re.compile(".*Failed to audit authentication.*"),
+    re.compile(".*Failed to append authz event to audit log.*"),
+    re.compile(".*Failed to append authentication event to audit log.*")
+]
+
 # Path to the LSAN suppressions file
 LSAN_SUPPRESSIONS_FILE = "/opt/lsan_suppressions.txt"
 
@@ -2984,7 +2990,7 @@ class RedpandaService(RedpandaServiceBase):
     def remove_local_data(self, node):
         node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
 
-    def redpanda_pid(self, node, timeout=None, silent=True):
+    def redpanda_pid(self, node):
         try:
             cmd = "pgrep --list-full --exact redpanda"
             for line in node.account.ssh_capture(cmd, timeout_sec=10):
@@ -2993,14 +2999,17 @@ class RedpandaService(RedpandaServiceBase):
                 if "--version" in line:
                     continue
 
-                if silent == False:
-                    self.logger.debug(f"pgrep output: {line}")
+                self.logger.debug(f"pgrep output: {line}")
 
                 # The pid is listed first, that's all we need
                 return int(line.split()[0])
             return None
-        except (RemoteCommandError, ValueError):
-            return None
+        except RemoteCommandError as e:
+            # 1 - No processes matched or none of them could be signalled.
+            if e.exit_status == 1:
+                return None
+
+            raise e
 
     def started_nodes(self):
         return self._started

@@ -33,18 +33,18 @@
 namespace sa = security::audit;
 
 static const sa::user default_user{
-  .credential_uid = "none",
   .domain = "redpanda.com",
   .name = "redpanda-user",
-  .type_id = sa::user::type::user};
+  .type_id = sa::user::type::user,
+  .uid = "none"};
 
 static const ss::sstring default_user_ser{
   R"(
 {
-"credential_uid": "none",
 "domain": "redpanda.com",
 "name": "redpanda-user",
-"type_id": 1
+"type_id": 1,
+"uid": "none"
 }
 )"};
 
@@ -210,11 +210,15 @@ static const ss::sstring test_http_request_ser{
 static const sa::product test_product{
   .name = "test-product",
   .vendor_name = ss::sstring{sa::vendor_name},
-  .version = ss::sstring{redpanda_git_version()}};
+  .version = ss::sstring{redpanda_git_version()},
+  .feature = sa::feature{.name = "test-feature"}};
 
 static const ss::sstring test_product_ser{
   R"(
 {
+  "feature": {
+    "name": "test-feature"
+  },
   "name": "test-product",
   "vendor_name": ")"
   + ss::sstring{sa::vendor_name} + R"(",
@@ -412,22 +416,22 @@ BOOST_AUTO_TEST_CASE(validate_application_lifecycle) {
 
     auto ser = sa::rjson_serialize(app_lifecycle);
 
-    const ss::sstring expected{
+    const auto expected = fmt::format(
       R"(
-{
+{{
   "category_uid": 6,
   "class_uid": 6002,
-  "metadata": )"
-      + metadata_ser + R"(,
+  "metadata": {metadata},
   "severity_id": 1,
-  "time": )"
-      + ss::to_sstring(now) + R"(,
+  "time": {time},
   "type_uid": 600203,
   "activity_id": 3,
-  "app": )"
-      + test_product_ser + R"(
-}
-)"};
+  "app": {product}
+}}
+)",
+      fmt::arg("metadata", metadata_ser),
+      fmt::arg("time", ss::to_sstring(app_lifecycle.get_time())),
+      fmt::arg("product", test_product_ser));
 
     BOOST_REQUIRE_EQUAL(ser, ::json::minify(expected));
 }

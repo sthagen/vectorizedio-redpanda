@@ -27,6 +27,7 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/util/bool_class.hh>
 
 #include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/indexed_by.hpp>
@@ -46,10 +47,15 @@ concept InheritsFromOCSFBase
 
 class audit_sink;
 
+using is_started = ss::bool_class<struct is_started_tag>;
+
 class audit_log_manager
   : public ss::peering_sharded_service<audit_log_manager> {
 public:
     static constexpr auto client_shard_id = ss::shard_id{0};
+
+    using audit_event_passthrough
+      = ss::bool_class<struct audit_event_permitted_tag>;
 
     audit_log_manager(
       cluster::controller* controller, kafka::client::configuration&);
@@ -75,13 +81,8 @@ public:
     /// return an error to the client.
     template<InheritsFromOCSFBase T>
     bool enqueue_audit_event(event_type type, T&& t) {
-        if (!_audit_enabled() || !is_audit_event_enabled(type)) {
-            return true;
-        }
-        if (_as.abort_requested()) {
-            /// Prevent auditing new messages when shutdown starts that way the
-            /// queue may be entirely flushed before shutdown
-            return false;
+        if (auto val = should_enqueue_audit_event(type); val.has_value()) {
+            return (bool)*val;
         }
         return do_enqueue_audit_event(std::make_unique<T>(std::forward<T>(t)));
     }
@@ -90,40 +91,32 @@ public:
       security::audit::returns_auditable_resource_vector Func,
       typename... Args>
     bool
-    enqueue_authz_audit_event(kafka::api_key api, Func func, Args... args) {
-        if (
-          !_audit_enabled()
-          || !is_audit_event_enabled(kafka_api_to_event_type(api))) {
-            return true;
+    enqueue_authz_audit_event(kafka::api_key api, Func func, Args&&... args) {
+        if (auto val = should_enqueue_audit_event(api); val.has_value()) {
+            return (bool)*val;
         }
-
-        if (_as.abort_requested()) {
-            /// Prevent auditing new messages when shutdown starts that way the
-            /// queue may be entirely flushed before shutdown
-            return false;
-        }
-
         return do_enqueue_audit_event(
           std::make_unique<api_activity>(make_api_activity_event(
             std::forward<Args>(args)..., create_resource_details(func()))));
     }
 
     template<typename... Args>
-    bool enqueue_authz_audit_event(kafka::api_key api, Args... args) {
-        if (
-          !_audit_enabled()
-          || !is_audit_event_enabled(kafka_api_to_event_type(api))) {
-            return true;
+    bool enqueue_authz_audit_event(kafka::api_key api, Args&&... args) {
+        if (auto val = should_enqueue_audit_event(api); val.has_value()) {
+            return (bool)*val;
         }
-
-        if (_as.abort_requested()) {
-            /// Prevent auditing new messages when shutdown starts that way the
-            /// queue may be entirely flushed before shutdown
-            return false;
-        }
-
         return do_enqueue_audit_event(std::make_unique<api_activity>(
           make_api_activity_event(std::forward<Args>(args)..., {})));
+    }
+
+    template<typename... Args>
+    bool enqueue_app_lifecycle_event(Args&&... args) {
+        if (auto val = should_enqueue_audit_event(); val.has_value()) {
+            return (bool)*val;
+        }
+
+        return do_enqueue_audit_event(std::make_unique<application_lifecycle>(
+          make_application_lifecycle(std::forward<Args>(args)...)));
     }
 
     /// Enqueue an event to be produced onto an audit log partition.  This will
@@ -136,13 +129,8 @@ public:
     /// return an error to the client.
     template<InheritsFromOCSFBase T>
     bool enqueue_mandatory_audit_event(T&& t) {
-        if (!_audit_enabled()) {
-            return true;
-        }
-        if (_as.abort_requested()) {
-            /// Prevent auditing new messages when shutdown starts that way the
-            /// queue may be entirely flushed before shutdown
-            return false;
+        if (auto val = should_enqueue_audit_event(); val.has_value()) {
+            return (bool)*val;
         }
         return do_enqueue_audit_event(std::make_unique<T>(std::forward<T>(t)));
     }
@@ -157,7 +145,19 @@ public:
     /// NOTE: Only works on shard_id{0}, use in unit tests
     bool is_client_enabled() const;
 
+    bool report_redpanda_app_event(is_started);
+
 private:
+    /// The following methods return nullopt in the case the event should
+    /// be audited, otherwise the optional is filled with the value representing
+    /// whether it could not be enqueued due to error or due to the event
+    /// not having attributes of desired trackable events
+    std::optional<audit_event_passthrough> should_enqueue_audit_event() const;
+    std::optional<audit_event_passthrough>
+      should_enqueue_audit_event(kafka::api_key) const;
+    std::optional<audit_event_passthrough>
+      should_enqueue_audit_event(event_type) const;
+
     ss::future<> drain();
     ss::future<> pause();
     ss::future<> resume();
@@ -197,6 +197,13 @@ private:
     static constexpr auto enabled_set_bitlength
       = std::underlying_type_t<event_type>(event_type::num_elements);
     std::bitset<enabled_set_bitlength> _enabled_event_types{0};
+
+    /// This will be true when the client detects that there is an issue with
+    /// authorization configuration. Auth must be enabled so the client
+    /// principal can be queried. This is needed so that redpanda can give
+    /// special permission to the audit client to do things like produce to the
+    /// audit topic.
+    bool _auth_misconfigured{false};
 
     /// Shutdown primitives
     ss::gate _gate;

@@ -205,6 +205,17 @@ static void set_auditing_kafka_client_defaults(
         client_config.client_identifier.set_value(
           std::make_optional<ss::sstring>("audit_log_client"));
     }
+    if (!client_config.produce_compression_type.is_overriden()) {
+        client_config.produce_compression_type.set_value("zstd");
+    }
+    if (!client_config.produce_ack_level.is_overriden()) {
+        client_config.produce_ack_level.set_value(int16_t(1));
+    }
+    /// explicity override the scram details as the client will need to use
+    /// broker generated ephemeral credentials
+    client_config.scram_password.reset();
+    client_config.scram_username.reset();
+    client_config.sasl_mechanism.reset();
 }
 
 application::application(ss::sstring logger_name)
@@ -404,6 +415,12 @@ int application::run(int ac, char** av) {
                 wire_up_and_start(app_signal);
                 post_start_tasks();
                 app_signal.wait().get();
+                if (!audit_mgr.local().report_redpanda_app_event(
+                      security::audit::is_started::no)) {
+                    vlog(
+                      _log.warn,
+                      "Failed to enqueue Redpanda shutdown audit event!");
+                }
                 trigger_abort_source();
                 vlog(_log.info, "Stopping...");
             } catch (const ss::abort_requested_exception&) {
@@ -589,7 +606,7 @@ void application::setup_public_metrics() {
       .invoke_on_all([](auto& public_metrics) {
           public_metrics.groups.add_group(
             "cpu",
-            {sm::make_gauge(
+            {sm::make_counter(
               "busy_seconds_total",
               [] {
                   return std::chrono::duration<double>(
@@ -2274,6 +2291,15 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     }
 
     audit_mgr.invoke_on_all(&security::audit::audit_log_manager::start).get();
+
+    if (!audit_mgr.local().report_redpanda_app_event(
+          security::audit::is_started::yes)) {
+        vlog(
+          _log.error,
+          "Failed to enqueue startup audit event!  Possible issue with audit "
+          "system");
+        throw std::runtime_error("Failed to enqueue startup audit event!");
+    }
 
     start_kafka(node_id, app_signal);
     controller->set_ready().get();
