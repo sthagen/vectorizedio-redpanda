@@ -170,7 +170,7 @@ configuration::configuration()
       {
         .needs_restart = needs_restart::yes,
         .example = std::to_string(25_MiB),
-        .visibility = visibility::tunable,
+        .visibility = visibility::user,
       },
       20_MiB,
       {.min = 64_KiB, .max = 100_GiB})
@@ -185,7 +185,7 @@ configuration::configuration()
       {
         .needs_restart = needs_restart::yes,
         .example = std::to_string(5_MiB),
-        .visibility = visibility::tunable,
+        .visibility = visibility::user,
       },
       2_MiB,
       // WebAssembly uses 64KiB pages and has a 32bit address space
@@ -731,6 +731,12 @@ configuration::configuration()
       "to simplify testing and shouldn't be set in production.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       false)
+  , log_compaction_use_sliding_window(
+      *this,
+      "log_compaction_use_sliding_window",
+      "Use sliding window compaction.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      true)
   , retention_bytes(
       *this,
       "retention_bytes",

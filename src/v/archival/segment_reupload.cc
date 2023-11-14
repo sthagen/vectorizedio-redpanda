@@ -11,6 +11,7 @@
 #include "segment_reupload.h"
 
 #include "cloud_storage/partition_manifest.h"
+#include "config/configuration.h"
 #include "logger.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
@@ -176,11 +177,17 @@ void segment_collector::do_collect(segment_collector_mode mode) {
           _segments.empty()
           && mode == segment_collector_mode::collect_compacted) {
             // We may have found our first segment, but we can't always use its
-            // base offset -- it's possible the log has been prefix truncated
-            // within a segment (e.g. with delete records).
+            // base offset:
+            // - it's possible the log has been prefix truncated within a
+            //   segment (e.g. with delete records), so we must bump to the log
+            //   start offset
+            // - it's possible the segment we found is below our reupload
+            //   target start offset (_begin_inclusive), e.g. if the target
+            //   start offset is in the middle of a segment.
             _begin_inclusive = std::max(
-              _log.offsets().start_offset,
-              result.segment->offsets().base_offset);
+              {_begin_inclusive,
+               _log.offsets().start_offset,
+               result.segment->offsets().base_offset});
             align_begin_offset_to_manifest();
         }
         _segments.push_back(result.segment);
@@ -294,7 +301,8 @@ segment_collector::lookup_result segment_collector::find_next_segment(
     }
 
     const auto& segment = *it;
-    auto segment_is_compacted = segment->finished_self_compaction();
+    auto segment_is_compacted
+      = archival_policy::eligible_for_compacted_reupload(*segment);
     auto compacted_segment_expected
       = mode == segment_collector_mode::collect_compacted;
     if (segment_is_compacted == compacted_segment_expected) {

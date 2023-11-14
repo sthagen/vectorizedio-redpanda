@@ -756,6 +756,7 @@ SEASTAR_THREAD_TEST_CASE(test_upload_candidate_generation) {
 
     for (auto i : spec.compacted_segment_indices) {
         b.get_segment(i).mark_as_finished_self_compaction();
+        b.get_segment(i).mark_as_finished_windowed_compaction();
     }
 
     size_t max_size = b.get_segment(0).size_bytes()
@@ -837,10 +838,8 @@ SEASTAR_THREAD_TEST_CASE(test_upload_aligned_to_non_existent_offset) {
     b | storage::add_segment(*first)
       | storage::add_random_batch(*first, spec.last_segment_num_records);
 
-    // Compaction only works one segment at a time
-    for (auto i = 0; i < spec.compacted_segment_indices.size(); ++i) {
-        b.gc(model::timestamp::max(), std::nullopt).get();
-    }
+    // Compaction will rewrite each segment.
+    b.gc(model::timestamp::max(), std::nullopt).get();
 
     size_t max_size = b.get_segment(0).size_bytes()
                       + b.get_segment(1).size_bytes()
@@ -918,6 +917,7 @@ SEASTAR_THREAD_TEST_CASE(test_same_size_reupload_skipped) {
     // segments for re-upload. The upload candidate should be a noop
     // since the selected reupload has the same size as the existing segment.
     b.get_segment(0).mark_as_finished_self_compaction();
+    b.get_segment(0).mark_as_finished_windowed_compaction();
 
     {
         archival::segment_collector collector{
@@ -957,6 +957,7 @@ SEASTAR_THREAD_TEST_CASE(test_same_size_reupload_skipped) {
     // should be a no-op since the reupload of the two local segments
     // results in a segment of the same size as the one that should be replaced.
     b.get_segment(1).mark_as_finished_self_compaction();
+    b.get_segment(1).mark_as_finished_windowed_compaction();
 
     {
         archival::segment_collector collector{
@@ -1114,6 +1115,84 @@ SEASTAR_THREAD_TEST_CASE(test_do_not_reupload_prefix_truncated) {
 
     // Since we can't replace offsets starting at 0, the first remote segment
     // isn't eligible for reupload and we should start from the next segment.
+    collector.collect_segments();
+    BOOST_REQUIRE_EQUAL(collector.begin_inclusive()(), 500);
+    BOOST_REQUIRE_EQUAL(collector.segments().size(), 3);
+    BOOST_REQUIRE_EQUAL(collector.segments()[0]->offsets().base_offset(), 0);
+    BOOST_REQUIRE(collector.should_replace_manifest_segment());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_bump_start_when_not_aligned) {
+    auto ntp = model::ntp{"test_ns", "test_tpc", 0};
+    temporary_dir tmp_dir("concat_segment_read");
+    auto data_path = tmp_dir.get_path();
+    using namespace storage;
+
+    auto b = make_log_builder(data_path.string());
+
+    auto o = std::make_unique<ntp_config::default_overrides>();
+    o->cleanup_policy_bitflags = model::cleanup_policy_bitflags::compaction;
+    b | start(ntp_config{ntp, {data_path}, std::move(o)});
+    auto defer = ss::defer([&b] { b.stop().get(); });
+
+    b | storage::add_segment(0) | storage::add_random_batch(0, 1000)
+      | storage::add_segment(1000) | storage::add_random_batch(1000, 1000)
+      | storage::add_segment(2000) | storage::add_random_batch(2000, 1000);
+
+    // Set up our manifest to look as if our local data is a compacted version
+    // of what's in the cloud.
+    auto seg_size = b.get_segment(0).size_bytes();
+    cloud_storage::partition_manifest m(ntp, model::initial_revision_id{1});
+    m.add(
+      segment_name("0-499-v1.log"),
+      cloud_storage::segment_meta{
+        .is_compacted = false,
+        .size_bytes = seg_size,
+        .base_offset = model::offset(0),
+        .committed_offset = model::offset(499),
+        .delta_offset = model::offset_delta(0),
+        .delta_offset_end = model::offset_delta(0)});
+    m.add(
+      segment_name("500-999-v1.log"),
+      cloud_storage::segment_meta{
+        .is_compacted = false,
+        .size_bytes = seg_size,
+        .base_offset = model::offset(500),
+        .committed_offset = model::offset(999),
+        .delta_offset = model::offset_delta(0),
+        .delta_offset_end = model::offset_delta(0)});
+    m.add(
+      segment_name("1000-1999-v1.log"),
+      cloud_storage::segment_meta{
+        .is_compacted = false,
+        .size_bytes = seg_size,
+        .base_offset = model::offset(1000),
+        .committed_offset = model::offset(1999),
+        .delta_offset = model::offset_delta(0),
+        .delta_offset_end = model::offset_delta(0)});
+    m.add(
+      segment_name("2000-2999-v1.log"),
+      cloud_storage::segment_meta{
+        .is_compacted = false,
+        .size_bytes = seg_size,
+        .base_offset = model::offset(2000),
+        .committed_offset = model::offset(2999),
+        .delta_offset = model::offset_delta(0),
+        .delta_offset_end = model::offset_delta(0)});
+
+    // Mark our local segments compacted, making them eligible for reupload.
+    for (int i = 0; i < 3; i++) {
+        b.get_segment(i).mark_as_compacted_segment();
+        b.get_segment(i).mark_as_finished_self_compaction();
+        b.get_segment(i).mark_as_finished_windowed_compaction();
+    }
+
+    // Try collecting from the middle of a local segment that hapens to align
+    // with our manifest. The containing segment should be included, and the
+    // start offset of the upload candidate should be aligned with our
+    // manifest.
+    archival::segment_collector collector{
+      model::offset{500}, m, b.get_disk_log_impl(), seg_size * 10};
     collector.collect_segments();
     BOOST_REQUIRE_EQUAL(collector.begin_inclusive()(), 500);
     BOOST_REQUIRE_EQUAL(collector.segments().size(), 3);
