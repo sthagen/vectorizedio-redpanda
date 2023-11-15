@@ -83,7 +83,7 @@
 #include "raft/coordinated_recovery_throttle.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
-#include "redpanda/admin_server.h"
+#include "redpanda/admin/server.h"
 #include "resource_mgmt/io_priority.h"
 #include "resource_mgmt/memory_sampling.h"
 #include "rpc/rpc_utils.h"
@@ -1406,6 +1406,7 @@ void application::wire_up_redpanda_services(
       std::ref(raft_group_manager),
       std::ref(feature_table),
       std::ref(cloud_storage_api),
+      std::ref(shadow_index_cache),
       std::ref(node_status_table),
       std::ref(metadata_cache));
     controller->wire_up().get0();

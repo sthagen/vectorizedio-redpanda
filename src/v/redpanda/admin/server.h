@@ -62,6 +62,8 @@ namespace cloud_storage {
 struct topic_recovery_service;
 }
 
+extern ss::logger adminlog;
+
 class admin_server {
 public:
     explicit admin_server(
@@ -184,6 +186,15 @@ private:
             return ss::make_exception_future<R>(eptr);
         };
     };
+
+    static model::ntp
+    parse_ntp_from_request(ss::httpd::parameters& param, model::ns ns);
+
+    static model::ntp parse_ntp_from_request(ss::httpd::parameters& param);
+
+    static ss::future<json::Document> parse_json_body(ss::http::request* req);
+
+    static model::node_id parse_broker_id(const ss::http::request& req);
 
     /**
      * Helper for binding handlers to routes, which also adds in
@@ -507,6 +518,10 @@ private:
         std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
     ss::future<ss::json::json_return_type>
     query_automated_recovery(std::unique_ptr<ss::http::request> req);
+    ss::future<std::unique_ptr<ss::http::reply>> initialize_cluster_recovery(
+      std::unique_ptr<ss::http::request>, std::unique_ptr<ss::http::reply>);
+    ss::future<ss::json::json_return_type>
+    get_cluster_recovery(std::unique_ptr<ss::http::request> req);
     ss::future<ss::json::json_return_type>
     get_partition_cloud_storage_status(std::unique_ptr<ss::http::request> req);
     ss::future<ss::json::json_return_type>

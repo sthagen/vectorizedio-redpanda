@@ -27,6 +27,7 @@
 #include "cluster/topics_frontend.h"
 #include "cluster/types.h"
 #include "config/configuration.h"
+#include "model/fundamental.h"
 #include "model/timeout_clock.h"
 #include "rpc/connection_cache.h"
 #include "rpc/errc.h"
@@ -762,10 +763,13 @@ service::get_controller_committed_offset(
                     .result = errc::not_leader_controller});
             }
             return _controller->linearizable_barrier().then([](auto r) {
-                const auto errc = r.has_error() ? errc::not_leader_controller
-                                                : errc::success;
+                if (r.has_error()) {
+                    return controller_committed_offset_reply{
+                      .last_committed = model::offset{},
+                      .result = errc::not_leader_controller};
+                }
                 return controller_committed_offset_reply{
-                  .last_committed = r.value(), .result = errc};
+                  .last_committed = r.value(), .result = errc::success};
             });
         });
     });
@@ -798,17 +802,23 @@ service::do_get_partition_state(partition_state_request req) {
 
 ss::future<upsert_plugin_response>
 service::upsert_plugin(upsert_plugin_request&& req, rpc::streaming_context&) {
+    // Capture the request values in this coroutine
+    auto transform = std::move(req.transform);
+    auto deadline = model::timeout_clock::now() + req.timeout;
     co_await ss::coroutine::switch_to(get_scheduling_group());
     auto ec = co_await _plugin_frontend.local().upsert_transform(
-      std::move(req.transform), model::timeout_clock::now() + req.timeout);
+      std::move(transform), deadline);
     co_return upsert_plugin_response{.ec = ec};
 }
 
 ss::future<remove_plugin_response>
 service::remove_plugin(remove_plugin_request&& req, rpc::streaming_context&) {
+    // Capture the request values in this coroutine
+    auto name = std::move(req.name);
+    auto deadline = model::timeout_clock::now() + req.timeout;
     co_await ss::coroutine::switch_to(get_scheduling_group());
     auto result = co_await _plugin_frontend.local().remove_transform(
-      std::move(req.name), model::timeout_clock::now() + req.timeout);
+      name, deadline);
     co_return remove_plugin_response{.uuid = result.uuid, .ec = result.ec};
 }
 
