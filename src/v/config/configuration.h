@@ -316,6 +316,9 @@ struct configuration final : public config_store {
     property<std::chrono::milliseconds> cloud_storage_idle_timeout_ms;
     property<std::chrono::milliseconds>
       cloud_storage_cluster_metadata_upload_interval_ms;
+    property<std::chrono::milliseconds>
+      cloud_storage_cluster_metadata_upload_timeout_ms;
+    property<int16_t> cloud_storage_cluster_metadata_retries;
     property<double> cloud_storage_idle_threshold_rps;
     property<int32_t> cloud_storage_background_jobs_quota;
     property<bool> cloud_storage_enable_segment_merging;
@@ -525,6 +528,7 @@ struct configuration final : public config_store {
     property<ss::sstring> oidc_token_audience;
     property<std::chrono::seconds> oidc_clock_skew_tolerance;
     property<ss::sstring> oidc_principal_mapping;
+    property<std::chrono::seconds> oidc_keys_refresh_interval;
 
     // HTTP Authentication
     property<std::vector<ss::sstring>> http_authentication;

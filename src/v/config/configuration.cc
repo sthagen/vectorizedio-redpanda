@@ -1618,7 +1618,19 @@ configuration::configuration()
       "cloud_storage_cluster_metadata_upload_interval_ms",
       "Time interval to wait between cluster metadata uploads.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1h)
+  , cloud_storage_cluster_metadata_upload_timeout_ms(
+      *this,
+      "cloud_storage_cluster_metadata_upload_timeout_ms",
+      "Timeout for cluster metadata uploads.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       60s)
+  , cloud_storage_cluster_metadata_retries(
+      *this,
+      "cloud_storage_cluster_metadata_retries",
+      "Number of attempts metadata operations may be retried.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      5)
   , cloud_storage_idle_threshold_rps(
       *this,
       "cloud_storage_idle_threshold_rps",
@@ -2775,6 +2787,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       "$.sub",
       security::oidc::validate_principal_mapping_rule)
+  , oidc_keys_refresh_interval(
+      *this,
+      "oidc_keys_refresh_interval",
+      "The frequency of refreshing the JSON Web Keys (JWKS) used to validate "
+      "access tokens.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      1h)
   , http_authentication(
       *this,
       "http_authentication",
