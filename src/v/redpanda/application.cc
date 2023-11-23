@@ -20,6 +20,7 @@
 #include "cloud_storage_clients/client_pool.h"
 #include "cluster/bootstrap_service.h"
 #include "cluster/cloud_metadata/offsets_recovery_service.h"
+#include "cluster/cloud_metadata/producer_id_recovery_manager.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/cluster_uuid.h"
@@ -113,6 +114,7 @@
 #include <seastar/core/prometheus.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/json/json_elements.hh>
@@ -130,9 +132,6 @@
 #include <memory>
 #include <vector>
 
-// This file in the data directory tracks the metadata
-// needed to detect crash loops.
-static constexpr std::string_view crash_loop_tracker_file = "startup_log";
 // Crash tracking resets every 1h.
 static constexpr model::timestamp_clock::duration crash_reset_duration{1h};
 
@@ -831,10 +830,12 @@ void application::check_for_crash_loop() {
         // that can potentially accumulate state across restarts.
         return;
     }
-    auto file_path = config::node().data_directory().path
-                     / crash_loop_tracker_file;
+    auto file_path = config::node().crash_loop_tracker_path();
     std::optional<crash_tracker_metadata> maybe_crash_md;
-    if (ss::file_exists(file_path.string()).get()) {
+    if (
+      // Tracking is reset every time the broker boots in recovery mode.
+      !config::node().recovery_mode_enabled()
+      && ss::file_exists(file_path.string()).get()) {
         // Ok to read the entire file, it contains a serialized uint32_t.
         auto buf = read_fully(file_path).get();
         try {
@@ -919,9 +920,7 @@ void application::schedule_crash_tracker_file_cleanup() {
     // next run.
     // We emplace it in the front to make it the last task to run.
     _deferred.emplace_front([&] {
-        auto file = (config::node().data_directory().path
-                     / crash_loop_tracker_file)
-                      .string();
+        auto file = config::node().crash_loop_tracker_path().string();
         if (ss::file_exists(file).get()) {
             ss::remove_file(file).get();
             ss::sync_directory(config::node().data_directory().as_sstring())
@@ -1398,6 +1397,12 @@ void application::wire_up_redpanda_services(
       std::ref(producer_manager))
       .get();
     vlog(_log.info, "Partition manager started");
+    construct_service(
+      offsets_lookup,
+      node_id,
+      std::ref(partition_manager),
+      std::ref(shard_table))
+      .get();
 
     construct_service(node_status_table, node_id).get();
     // controller
@@ -1658,6 +1663,12 @@ void application::wire_up_redpanda_services(
       node_id,
       std::ref(controller))
       .get();
+
+    producer_id_recovery_manager
+      = ss::make_shared<cluster::cloud_metadata::producer_id_recovery_manager>(
+        std::ref(controller->get_members_table()),
+        std::ref(_connection_cache),
+        std::ref(id_allocator_frontend));
 
     syschecks::systemd_message("Creating tx registry frontend").get();
     construct_service(
@@ -2400,7 +2411,18 @@ void application::start_runtime_services(
           .get();
     }
     syschecks::systemd_message("Starting controller").get();
-    controller->start(cd, app_signal.abort_source()).get0();
+    ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>
+      offsets_upload_requestor;
+    if (offsets_upload_router.local_is_initialized()) {
+        offsets_upload_requestor = offsets_upload_router.local_shared();
+    }
+    controller
+      ->start(
+        cd,
+        app_signal.abort_source(),
+        std::move(offsets_upload_requestor),
+        producer_id_recovery_manager)
+      .get0();
 
     // FIXME: in first patch explain why this is started after the
     // controller so the broker set will be available. Then next patch fix.
@@ -2418,6 +2440,7 @@ void application::start_runtime_services(
               cluster::cloud_metadata::offsets_recovery_rpc_service>(
               sched_groups.archival_upload(),
               smp_service_groups.cluster_smp_sg(),
+              std::ref(offsets_lookup),
               std::ref(offsets_upload_router)));
           runtime_services.push_back(std::make_unique<cluster::id_allocator>(
             sched_groups.raft_sg(),

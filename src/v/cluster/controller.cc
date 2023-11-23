@@ -11,6 +11,8 @@
 
 #include "cluster/bootstrap_backend.h"
 #include "cluster/cloud_metadata/cluster_recovery_backend.h"
+#include "cluster/cloud_metadata/offsets_upload_rpc_types.h"
+#include "cluster/cloud_metadata/producer_id_recovery_manager.h"
 #include "cluster/cloud_metadata/uploader.h"
 #include "cluster/cluster_discovery.h"
 #include "cluster/cluster_recovery_table.h"
@@ -164,8 +166,13 @@ ss::future<> controller::wire_up() {
       .then([this] { _probe.start(); });
 }
 
-ss::future<>
-controller::start(cluster_discovery& discovery, ss::abort_source& shard0_as) {
+ss::future<> controller::start(
+  cluster_discovery& discovery,
+  ss::abort_source& shard0_as,
+  ss::shared_ptr<cluster::cloud_metadata::offsets_upload_requestor>
+    offsets_uploader,
+  ss::shared_ptr<cluster::cloud_metadata::producer_id_recovery_manager>
+    producer_id_recovery) {
     auto initial_raft0_brokers = discovery.founding_brokers();
     std::vector<model::node_id> seed_nodes;
     seed_nodes.reserve(initial_raft0_brokers.size());
@@ -604,7 +611,7 @@ controller::start(cluster_discovery& discovery, ss::abort_source& shard0_as) {
             partition_balancer_backend::shard,
             &partition_balancer_backend::start);
       })
-      .then([this] {
+      .then([this, offsets_uploader, producer_id_recovery] {
           auto& bucket_property
             = cloud_storage::configuration::get_bucket_config();
           if (
@@ -618,7 +625,9 @@ controller::start(cluster_discovery& discovery, ss::abort_source& shard0_as) {
             _storage.local(),
             bucket,
             _cloud_storage_api.local(),
-            _raft0);
+            _raft0,
+            _tp_state.local(),
+            offsets_uploader);
           if (config::shard_local_cfg().enable_cluster_metadata_upload_loop()) {
               _metadata_uploader->start();
           }
@@ -633,10 +642,12 @@ controller::start(cluster_discovery& discovery, ss::abort_source& shard0_as) {
               _credentials.local(),
               _authorizer.local().store(),
               _tp_state.local(),
+              _api.local(),
               _feature_manager.local(),
               _config_frontend.local(),
               _security_frontend.local(),
               _tp_frontend.local(),
+              producer_id_recovery,
               std::ref(_recovery_table),
               _raft0);
           if (!config::shard_local_cfg()

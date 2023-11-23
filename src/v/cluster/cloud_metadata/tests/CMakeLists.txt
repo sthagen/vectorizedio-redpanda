@@ -19,6 +19,8 @@ rp_test(
   SOURCES
     controller_snapshot_reconciliation_test.cc
     manifest_downloads_test.cc
+    offsets_lookup_batcher_test.cc
+    offsets_lookup_test.cc
     offsets_recovery_test.cc
     uploader_test.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
@@ -39,12 +41,15 @@ rp_test(
   FIXTURE_TEST
   GTEST
   BINARY_NAME gtest_cluster_cloud_metadata
-  SOURCES cluster_recovery_backend_test.cc
+  SOURCES
+    cluster_recovery_backend_test.cc
+    producer_id_recovery_test.cc
   LIBRARIES
     v::application
     v::kafka_test_utils
     v::gtest_main
     v::s3_imposter
+    v::storage_test_utils
   ARGS "-- -c 1"
   LABELS cluster
 )

@@ -195,6 +195,7 @@ v_cc_library(
     cloud_metadata/cluster_recovery_backend.cc
     cloud_metadata/key_utils.cc
     cloud_metadata/manifest_downloads.cc
+    cloud_metadata/producer_id_recovery_manager.cc
     cloud_metadata/uploader.cc
   DEPS
     Seastar::seastar
@@ -226,6 +227,8 @@ add_subdirectory(self_test/tests)
 v_cc_library(
   NAME kafka_recovery
   SRCS
+    cloud_metadata/offsets_lookup.cc
+    cloud_metadata/offsets_lookup_batcher.cc
     cloud_metadata/offsets_uploader.cc
   DEPS
     v::model
