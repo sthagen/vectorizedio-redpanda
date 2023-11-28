@@ -1140,7 +1140,8 @@ void application::wire_up_runtime_services(
           memory_groups().kafka_total_memory(),
           *_schema_reg_client_config,
           *_schema_reg_config,
-          std::reference_wrapper(controller));
+          std::reference_wrapper(controller),
+          std::ref(audit_mgr));
     }
 
     if (wasm_data_transforms_enabled()) {
@@ -2323,7 +2324,8 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
     start_kafka(node_id, app_signal);
     controller->set_ready().get();
 
-    if (wasm_data_transforms_enabled()) {
+    if (
+      wasm_data_transforms_enabled() && !config::node().recovery_mode_enabled) {
         const auto& cluster = config::shard_local_cfg();
         wasm::runtime::config config = {
           .heap_memory = {

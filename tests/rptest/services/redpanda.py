@@ -168,7 +168,8 @@ PREV_VERSION_LOG_ALLOW_LIST = [
 AUDIT_LOG_ALLOW_LIST = RESTART_LOG_ALLOW_LIST + [
     re.compile(".*Failed to audit authentication.*"),
     re.compile(".*Failed to append authz event to audit log.*"),
-    re.compile(".*Failed to append authentication event to audit log.*")
+    re.compile(".*Failed to append authentication event to audit log.*"),
+    re.compile(".*Failed to audit authorization request for endpoint.*")
 ]
 
 # Path to the LSAN suppressions file
@@ -1580,7 +1581,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
         self._kubectl = KubectlTool(
             self,
             remote_uri=remote_uri,
-            cluster_id=self._cloud_cluster.config.id,
+            cluster_id=self._cloud_cluster.cluster_id,
             cluster_privider=self._cloud_cluster.config.provider,
             cluster_region=self._cloud_cluster.config.region,
             tp_proxy=self._cloud_cluster.config.teleport_auth_server,
@@ -1594,7 +1595,7 @@ class RedpandaServiceCloud(RedpandaServiceK8s):
             self._cloud_cluster.delete()
         else:
             self.logger.info(
-                f'skipping delete of cluster {self._cloud_cluster.config.id}')
+                f'skipping delete of cluster {self._cloud_cluster.cluster_id}')
 
     def clean_node(self, node, **kwargs):
         pass

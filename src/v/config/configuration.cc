@@ -1371,9 +1371,10 @@ configuration::configuration()
       "audit_log_replication_factor",
       "Replication factor of the internal audit log topic. Attempt to create "
       "topic is only performed if it doesn't already exist, disable and "
-      "re-enable auditing for changes to take affect",
+      "re-enable auditing for changes to take affect.  If unset, defaults to "
+      "`default_topic_replication`",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      3)
+      std::nullopt)
   , audit_client_max_buffer_size(
       *this,
       "audit_client_max_buffer_size",
@@ -1405,7 +1406,8 @@ configuration::configuration()
       *this,
       "audit_enabled_event_types",
       "List of event classes that will be audited, options are: "
-      "[management, produce, consume, describe, heartbeat, authenticate]. "
+      "[management, produce, consume, describe, heartbeat, authenticate, "
+      "admin, schema_registry]. "
       "Please refer to the documentation to know exactly which request(s) map "
       "to a particular audit event type.",
       {
@@ -1413,7 +1415,7 @@ configuration::configuration()
         .example = R"(["management", "describe"])",
         .visibility = visibility::user,
       },
-      {"management"},
+      {"management", "authenticate", "admin"},
       validate_audit_event_types)
   , audit_excluded_topics(
       *this,
@@ -1641,6 +1643,20 @@ configuration::configuration()
       "Number of attempts metadata operations may be retried.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       5)
+  , cloud_storage_attempt_cluster_recovery_on_bootstrap(
+      *this,
+      "cloud_storage_attempt_cluster_recovery_on_bootstrap",
+      "If set to `true`, when a cluster is started for the first time and "
+      "there is cluster metadata in the configured cloud storage bucket, "
+      "Redpanda automatically starts a cluster recovery from that metadata. If "
+      "using an automated method for deployment where it's not easy to "
+      "predictably determine that a recovery is needed, we recommend setting "
+      "to `true`. Take care to ensure that in such deployments, a cluster "
+      "bootstrap with a given bucket means that any previous cluster using "
+      "that bucket is fully destroyed; otherwise tiered storage subsystems may "
+      "interfere with each other.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      false)
   , cloud_storage_idle_threshold_rps(
       *this,
       "cloud_storage_idle_threshold_rps",
