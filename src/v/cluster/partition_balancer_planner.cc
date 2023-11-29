@@ -413,9 +413,9 @@ ss::future<> partition_balancer_planner::init_ntp_sizes_from_health_report(
         }
         const auto& sizes = size_it->second;
 
-        auto moving_from = subtract_replica_sets(
+        auto moving_from = subtract(
           update.get_previous_replicas(), update.get_target_replicas());
-        auto moving_to = subtract_replica_sets(
+        auto moving_to = subtract(
           update.get_target_replicas(), update.get_previous_replicas());
 
         switch (update.get_state()) {
@@ -594,8 +594,7 @@ public:
             auto sizes_it = _ctx._ntp2sizes.find(_ntp);
             if (sizes_it != _ctx._ntp2sizes.end()) {
                 const auto& sizes = sizes_it->second;
-                auto moving_to = subtract_replica_sets(
-                  _replicas, _orig_replicas);
+                auto moving_to = subtract(_replicas, _orig_replicas);
                 for (const auto& bs : moving_to) {
                     auto node_it = _ctx.node_disk_reports.find(bs.node_id);
                     if (node_it != _ctx.node_disk_reports.end()) {
@@ -668,6 +667,8 @@ public:
         reconfiguration_state,
         // can't add more actions
         batch_full,
+        // disabled by user
+        disabled,
     };
 
     immutability_reason reason() const { return _reason; }
@@ -690,6 +691,9 @@ public:
         case immutability_reason::reconfiguration_state:
             reason = ssx::sformat(
               "reconfiguration in progress, state: {}", _reconfiguration_state);
+            break;
+        case immutability_reason::disabled:
+            reason = "partition disabled by user";
             break;
         }
 
@@ -767,6 +771,8 @@ auto partition_balancer_planner::request_context::do_with_partition(
   const model::ntp& ntp,
   const std::vector<model::broker_shard>& orig_replicas,
   Visitor& visitor) {
+    const bool is_disabled = _parent._state.topics().is_disabled(ntp);
+
     auto in_progress_it = _parent._state.topics().updates_in_progress().find(
       ntp);
     if (in_progress_it != _parent._state.topics().updates_in_progress().end()) {
@@ -774,6 +780,16 @@ auto partition_balancer_planner::request_context::do_with_partition(
         const auto& orig_replicas
           = in_progress_it->second.get_previous_replicas();
         auto state = in_progress_it->second.get_state();
+
+        if (is_disabled) {
+            partition part{immutable_partition{
+              ntp,
+              replicas,
+              immutable_partition::immutability_reason::disabled,
+              state,
+              *this}};
+            return visitor(part);
+        }
 
         if (state == reconfiguration_state::in_progress) {
             if (can_add_cancellation()) {
@@ -798,6 +814,16 @@ auto partition_balancer_planner::request_context::do_with_partition(
               *this}};
             return visitor(part);
         }
+    }
+
+    if (is_disabled) {
+        partition part{immutable_partition{
+          ntp,
+          orig_replicas,
+          immutable_partition::immutability_reason::disabled,
+          std::nullopt,
+          *this}};
+        return visitor(part);
     }
 
     auto reassignment_it = _reassignments.find(ntp);

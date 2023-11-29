@@ -1169,6 +1169,7 @@ ss::future<> admin_server::throw_on_error(
         case cluster::errc::transform_invalid_environment:
         case cluster::errc::source_topic_not_exists:
         case cluster::errc::source_topic_still_in_use:
+        case cluster::errc::invalid_partition_operation:
             throw ss::httpd::bad_request_exception(
               fmt::format("{}", ec.message()));
         default:
@@ -2663,7 +2664,7 @@ admin_server::get_decommission_progress_handler(
         status.ns = p.ntp.ns;
         status.topic = p.ntp.tp.topic;
         status.partition = p.ntp.tp.partition;
-        auto added_replicas = cluster::subtract_replica_sets(
+        auto added_replicas = cluster::subtract(
           p.current_assignment, p.previous_assignment);
         // we are only interested in reconfigurations where one replica was
         // added to the node
@@ -4979,11 +4980,14 @@ admin_server::initialize_cluster_recovery(
 ss::future<ss::json::json_return_type>
 admin_server::get_cluster_recovery(std::unique_ptr<ss::http::request> req) {
     ss::httpd::shadow_indexing_json::cluster_recovery_status ret;
+    ret.state = "inactive";
 
     auto latest_recovery
       = _controller->get_cluster_recovery_table().local().current_recovery();
-    if (!latest_recovery.has_value()) {
-        ret.state = "No recoveries active";
+    if (
+      !latest_recovery.has_value()
+      || latest_recovery.value().get().stage
+           == cluster::recovery_stage::complete) {
         co_return ret;
     }
     auto& recovery = latest_recovery.value().get();

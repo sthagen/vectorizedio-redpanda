@@ -211,6 +211,9 @@ static void set_auditing_kafka_client_defaults(
     if (!client_config.produce_ack_level.is_overriden()) {
         client_config.produce_ack_level.set_value(int16_t(1));
     }
+    if (!client_config.produce_shutdown_delay.is_overriden()) {
+        client_config.produce_shutdown_delay.set_value(3000ms);
+    }
     /// explicity override the scram details as the client will need to use
     /// broker generated ephemeral credentials
     client_config.scram_password.reset();
@@ -231,6 +234,19 @@ void application::shutdown() {
     }
     if (_rpc.local_is_initialized()) {
         _rpc.invoke_on_all(&rpc::rpc_server::shutdown_input).get();
+    }
+    // Stop routing upload requests, as each may take a while to finish.
+    if (offsets_upload_router.local_is_initialized()) {
+        offsets_upload_router
+          .invoke_on_all(
+            &cluster::cloud_metadata::offsets_upload_router::request_stop)
+          .get();
+    }
+    if (offsets_uploader.local_is_initialized()) {
+        offsets_uploader
+          .invoke_on_all(
+            &cluster::cloud_metadata::offsets_uploader::request_stop)
+          .get();
     }
 
     // We schedule shutting down controller input and aborting its operation as

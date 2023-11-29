@@ -216,6 +216,7 @@ struct configuration final : public config_store {
     bounded_property<uint64_t> storage_target_replay_bytes;
     bounded_property<uint64_t> storage_max_concurrent_replay;
     bounded_property<uint64_t> storage_compaction_index_memory;
+    bounded_property<uint64_t> storage_compaction_key_map_memory;
     property<size_t> max_compacted_log_segment_size;
     property<std::optional<std::chrono::seconds>>
       storage_ignore_timestamps_in_future_sec;
@@ -272,7 +273,7 @@ struct configuration final : public config_store {
     property<std::optional<int16_t>> audit_log_replication_factor;
     property<size_t> audit_client_max_buffer_size;
     property<std::chrono::milliseconds> audit_queue_drain_interval_ms;
-    property<size_t> audit_max_queue_elements_per_shard;
+    property<size_t> audit_queue_max_buffer_size_per_shard;
     property<std::vector<ss::sstring>> audit_enabled_event_types;
     property<std::vector<ss::sstring>> audit_excluded_topics;
     property<std::vector<ss::sstring>> audit_excluded_principals;

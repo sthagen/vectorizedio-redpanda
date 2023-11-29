@@ -1048,6 +1048,16 @@ configuration::configuration()
        .visibility = visibility::tunable},
       128_MiB,
       {.min = 16_MiB, .max = 100_GiB})
+  , storage_compaction_key_map_memory(
+      *this,
+      "storage_compaction_key_map_memory",
+      "Maximum number of bytes that may be used on each shard by compaction"
+      "key-offset maps",
+      {.needs_restart = needs_restart::no,
+       .example = "1073741824",
+       .visibility = visibility::tunable},
+      128_MiB,
+      {.min = 16_MiB, .max = 100_GiB})
   , max_compacted_log_segment_size(
       *this,
       "max_compacted_log_segment_size",
@@ -1382,7 +1392,7 @@ configuration::configuration()
       "audit log records. Disable and re-enable auditing for changes to take "
       "affect",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      1_MiB)
+      16_MiB)
   , audit_queue_drain_interval_ms(
       *this,
       "audit_queue_drain_interval_ms",
@@ -1392,16 +1402,16 @@ configuration::configuration()
       "the risk of data loss during hard shutdowns.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       500ms)
-  , audit_max_queue_elements_per_shard(
+  , audit_queue_max_buffer_size_per_shard(
       *this,
-      "audit_max_queue_elements_per_shard",
-      "Maximum number of allowed elements in the audit buffers, per shard. "
+      "audit_queue_max_buffer_size_per_shard",
+      "Maximum amount of memory allowed in the audit buffer per shard "
       "Once this value is reached, any request handlers that cannot enqueue "
       "audit messages will return a non retryable error to the client. Note "
       "that this only will occur when handling requests that are currently "
       "enabled for auditing.",
-      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      100000)
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      1_MiB)
   , audit_enabled_event_types(
       *this,
       "audit_enabled_event_types",

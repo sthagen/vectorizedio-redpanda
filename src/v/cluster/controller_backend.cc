@@ -665,6 +665,7 @@ ss::future<> controller_backend::bootstrap_partition_claims() {
 ss::future<result<ss::stop_iteration>>
 controller_backend::force_replica_set_update(
   ss::lw_shared_ptr<partition> partition,
+  const replicas_t& previous_replicas,
   const replicas_t& new_replicas,
   const replicas_revision_map& initial_replicas_revisions,
   model::revision_id cmd_rev) {
@@ -683,10 +684,12 @@ controller_backend::force_replica_set_update(
         co_return ss::stop_iteration::yes;
     }
 
+    auto [voters, learners] = split_voters_learners_for_force_reconfiguration(
+      previous_replicas, new_replicas, initial_replicas_revisions, cmd_rev);
+
     // Force raft configuration update locally.
     co_return co_await partition->force_update_replica_set(
-      create_vnode_set(new_replicas, initial_replicas_revisions, cmd_rev),
-      cmd_rev);
+      std::move(voters), std::move(learners), cmd_rev);
 }
 
 /**
@@ -997,15 +1000,18 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
           = (updated_shard_on_cur_node == ss::this_shard_id());
     }
 
+    const bool is_disabled = _topics.local().is_disabled(ntp);
+
     vlog(
       clusterlog.trace,
       "[{}] orig_shard_on_cur_node: {}, updated_shard_on_cur_node: {}, "
-      "expected_log_rev: {}, expected_on_cur_shard: {}",
+      "expected_log_rev: {}, expected_on_cur_shard: {}, is_disabled: {}",
       ntp,
       orig_shard_on_cur_node,
       updated_shard_on_cur_node,
       expected_log_rev,
-      expected_on_cur_shard);
+      expected_on_cur_shard,
+      is_disabled);
 
     auto partition = _partition_manager.local().get(ntp);
     auto claim_it = _ntp_claims.find(ntp);
@@ -1084,9 +1090,10 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
 
     // After this point the partition is expected to exist on this node.
 
-    if (!expected_on_cur_shard) {
-        // Partition is expected to exist on some other shard. If we still own
-        // it, shut it down and make it available for cross-shard move.
+    if (!expected_on_cur_shard || is_disabled) {
+        // Partition is disabled or expected to exist on some other shard. If we
+        // still own it, shut it down and make it available for a possible
+        // cross-shard move.
 
         if (partition) {
             rs.set_cur_operation(
@@ -1125,9 +1132,20 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
           updated_replicas
           && update_it->second.get_state()
                == reconfiguration_state::force_update) {
-            // For force-update new replica starts with the updated
-            // configuration right away (joint consensus is not used)
-            initial_replicas = *updated_replicas;
+            auto [voters, learners]
+              = split_voters_learners_for_force_reconfiguration(
+                *orig_replicas,
+                *updated_replicas,
+                p_it->second.replicas_revisions,
+                last_cmd_revision);
+            // Current nodes is a voter only if we do not
+            // retain any of the original nodes. initial
+            // replicas is populated only if the replica is voter
+            // because for learners it automatically replicated
+            // via configuration update at raft level.
+            if (learners.empty()) {
+                initial_replicas = *updated_replicas;
+            }
         } else {
             // Configuration will be replicate to the new replica
             initial_replicas = {};
@@ -1272,6 +1290,7 @@ controller_backend::reconcile_partition_reconfiguration(
     case reconfiguration_state::force_update:
         co_return co_await force_replica_set_update(
           std::move(partition),
+          update.get_previous_replicas(),
           update.get_target_replicas(),
           replicas_revisions,
           cmd_revision);
@@ -1430,7 +1449,7 @@ ss::future<std::error_code> controller_backend::create_partition(
           group, source_shard.value(), ss::this_shard_id(), _storage);
         co_await raft::offset_translator::move_persistent_state(
           group, source_shard.value(), ss::this_shard_id(), _storage);
-        co_await detail::move_persistent_stm_state(
+        co_await raft::move_persistent_stm_state(
           ntp, source_shard.value(), ss::this_shard_id(), _storage);
 
         my_claim.hosting = true;
@@ -1909,6 +1928,52 @@ ss::future<> controller_backend::delete_partition(
 
 bool controller_backend::should_skip(const model::ntp& ntp) const {
     return config::node().recovery_mode_enabled() && model::is_user_topic(ntp);
+}
+
+std::pair<controller_backend::vnodes, controller_backend::vnodes>
+controller_backend::split_voters_learners_for_force_reconfiguration(
+  const replicas_t& original,
+  const replicas_t& new_replicas,
+  const replicas_revision_map& replicas_revision_map,
+  model::revision_id command_revision) {
+    auto original_vnodes = create_vnode_set(
+      original, replicas_revision_map, command_revision);
+    auto new_vnodes = create_vnode_set(
+      new_replicas, replicas_revision_map, command_revision);
+
+    auto enhanced_force_reconfiguration_enabled = _features.local().is_active(
+      features::feature::enhanced_force_reconfiguration);
+
+    vnodes voters;
+    vnodes learners;
+    if (unlikely(!enhanced_force_reconfiguration_enabled)) {
+        voters = std::move(new_vnodes);
+    } else {
+        auto remaining_original_nodes = intersect(original_vnodes, new_vnodes);
+        if (remaining_original_nodes.size() == 0) {
+            // we do not retain any of the original replicas, so
+            // the new replica set begins with every replica as a
+            // voter.
+            voters = std::move(new_vnodes);
+        } else {
+            // Here we do retain some original nodes, so making them
+            // as voters and the rest as learners ensures that the learners
+            // are first caught up before they form a majority.
+            voters = std::move(remaining_original_nodes);
+            learners = subtract(new_vnodes, original_vnodes);
+        }
+    }
+    vassert(
+      voters.size() + learners.size() == new_replicas.size(),
+      "Incorrect computation of voters {} and learners {} during force "
+      "reconfiguration, previous: {}, new replicas: {}, revision: {}. This is "
+      "most likely a logic error / bug.",
+      voters,
+      learners,
+      original,
+      new_replicas,
+      command_revision);
+    return std::make_pair(std::move(voters), std::move(learners));
 }
 
 std::ostream& operator<<(
