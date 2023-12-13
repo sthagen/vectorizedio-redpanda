@@ -225,6 +225,26 @@ security::audit::authentication_event_options make_authn_event_options(
       = {.name = username, .type_id = security::audit::user::type::unknown},
       .error_reason = reason};
 }
+
+bool escape_hatch_request(ss::httpd::const_req req) {
+    /// The following "break glass" mechanism allows the cluster config
+    /// API to be hit in the case the user desires to disable auditing
+    /// so the cluster can continue to make progress in the event auditing
+    /// is not working as expected.
+    static const auto allowed_requests = std::to_array(
+      {ss::httpd::cluster_config_json::get_cluster_config_status,
+       ss::httpd::cluster_config_json::get_cluster_config_schema,
+       ss::httpd::cluster_config_json::patch_cluster_config});
+
+    return std::any_of(
+      allowed_requests.cbegin(),
+      allowed_requests.cend(),
+      [method = req._method,
+       url = req.get_url()](const ss::httpd::path_description& d) {
+          return d.path == url
+                 && d.operations.method == ss::httpd::str2type(method);
+      });
+}
 } // namespace
 
 model::ntp admin_server::parse_ntp_from_request(
@@ -295,7 +315,8 @@ admin_server::admin_server(
   ss::sharded<resources::cpu_profiler>& cpu_profiler,
   ss::sharded<transform::service>* transform_service,
   ss::sharded<security::audit::audit_log_manager>& audit_mgr,
-  std::unique_ptr<cluster::tx_manager_migrator>& tx_manager_migrator)
+  std::unique_ptr<cluster::tx_manager_migrator>& tx_manager_migrator,
+  ss::sharded<kafka::server>& kafka_server)
   : _log_level_timer([this] { log_level_timer_handler(); })
   , _server("admin")
   , _cfg(std::move(cfg))
@@ -324,6 +345,7 @@ admin_server::admin_server(
   , _transform_service(transform_service)
   , _audit_mgr(audit_mgr)
   , _tx_manager_migrator(tx_manager_migrator)
+  , _kafka_server(kafka_server)
   , _default_blocked_reactor_notify(
       ss::engine().get_blocked_reactor_notify_ms()) {
     _server.set_content_streaming(true);
@@ -658,24 +680,7 @@ void admin_server::audit_authz(
       bool(authorized),
       reason);
     if (!success) {
-        ///
-        /// The following "break glass" mechanism allows the cluster config
-        /// API to be hit in the case the user desires to disable auditing
-        /// so the cluster can continue to make progress in the event auditing
-        /// is not working as expected.
-        static const auto allowed_requests = std::to_array(
-          {ss::httpd::cluster_config_json::get_cluster_config_status,
-           ss::httpd::cluster_config_json::get_cluster_config_schema,
-           ss::httpd::cluster_config_json::patch_cluster_config});
-
-        bool is_allowed = std::any_of(
-          allowed_requests.cbegin(),
-          allowed_requests.cend(),
-          [method = req._method,
-           url = req.get_url()](const ss::httpd::path_description& d) {
-              return d.path == url
-                     && d.operations.method == ss::httpd::str2type(method);
-          });
+        bool is_allowed = escape_hatch_request(req);
 
         if (!is_allowed) {
             vlog(
@@ -689,7 +694,8 @@ void admin_server::audit_authz(
 
         vlog(
           adminlog.error,
-          "Request to modify or view cluster configuration was not audited due "
+          "Request to authorize user to modify or view cluster configuration "
+          "was not audited due "
           "to audit queues being full");
     }
 }
@@ -713,13 +719,23 @@ void admin_server::do_audit_authn(
     auto success = _audit_mgr.local().enqueue_authn_event(std::move(options));
 
     if (!success) {
+        bool is_allowed = escape_hatch_request(req);
+
+        if (!is_allowed) {
+            vlog(
+              adminlog.error,
+              "Failed to audit authentication request for endpoint: {}",
+              req.format_url());
+            throw ss::httpd::base_exception(
+              "Failed to audit authentication request",
+              ss::http::reply::status_type::service_unavailable);
+        }
+
         vlog(
           adminlog.error,
-          "Failed to audit authentication request for endpoint: {}",
-          req.format_url());
-        throw ss::httpd::base_exception(
-          "Failed to audit authentication request",
-          ss::http::reply::status_type::service_unavailable);
+          "Request authenticate user to modify or view cluster configuration "
+          "was not audited due "
+          "to audit queues being full");
     }
 }
 
@@ -1035,8 +1051,6 @@ get_brokers(cluster::controller* const controller) {
               }
               b.membership_status = fmt::format(
                 "{}", nm.state.get_membership_state());
-              b.liveness_status = fmt::format(
-                "{}", nm.state.get_liveness_state());
 
               // These fields are defaults that will be overwritten with
               // data from the health report.
@@ -3381,21 +3395,21 @@ admin_server::get_majority_lost_partitions(
         throw co_await redirect_to_leader(*request, model::controller_ntp);
     }
 
-    auto input = request->get_query_param("defunct_nodes");
+    auto input = request->get_query_param("dead_nodes");
     if (input.length() <= 0) {
         throw ss::httpd::bad_param_exception(
-          "Query parameter defunct_nodes not set, expecting a csv of integers "
+          "Query parameter dead_nodes not set, expecting a csv of integers "
           "(broker_ids)");
     }
 
     std::vector<ss::sstring> tokens;
     boost::split(tokens, input, boost::is_any_of(","));
 
-    std::vector<model::node_id> defunct_nodes;
-    defunct_nodes.reserve(tokens.size());
+    std::vector<model::node_id> dead_nodes;
+    dead_nodes.reserve(tokens.size());
     for (auto& token : tokens) {
         try {
-            defunct_nodes.emplace_back(std::stoi(token));
+            dead_nodes.emplace_back(std::stoi(token));
         } catch (...) {
             throw ss::httpd::bad_param_exception(fmt::format(
               "Token {} doesn't parse to an integer in input: {}, expecting a "
@@ -3405,7 +3419,7 @@ admin_server::get_majority_lost_partitions(
         }
     }
 
-    if (defunct_nodes.size() == 0) {
+    if (dead_nodes.size() == 0) {
         throw ss::httpd::bad_param_exception(fmt::format(
           "Malformed input query parameter: {}, expecting a csv of "
           "integers (broker_ids)",
@@ -3415,11 +3429,11 @@ admin_server::get_majority_lost_partitions(
     vlog(
       adminlog.info,
       "Request for majority loss partitions from input defunct nodes: {}",
-      defunct_nodes);
+      dead_nodes);
 
     auto result = co_await _controller->get_topics_frontend()
                     .local()
-                    .partitions_with_lost_majority(std::move(defunct_nodes));
+                    .partitions_with_lost_majority(std::move(dead_nodes));
     if (!result) {
         if (
           result.error().category() == cluster::error_category()
@@ -3458,8 +3472,8 @@ admin_server::get_majority_lost_partitions(
               assignment.core = replica.shard;
               result.replicas.push(assignment);
           }
-          for (auto& node : ntp.defunct_nodes) {
-              result.defunct_nodes.push(node());
+          for (auto& node : ntp.dead_nodes) {
+              result.dead_nodes.push(node());
           }
           return result;
       }));
@@ -3496,7 +3510,7 @@ json::validator make_force_recover_partitions_validator() {
 {
   "type": "object",
   "properties": {
-    "defunct_nodes": {
+    "dead_nodes": {
       "type": "array",
       "items": {
         "type": "number"
@@ -3547,7 +3561,7 @@ json::validator make_force_recover_partitions_validator() {
               ]
             }
           },
-          "defunct_nodes": {
+          "dead_nodes": {
             "type": "array",
             "items": {
               "type": "number"
@@ -3558,13 +3572,13 @@ json::validator make_force_recover_partitions_validator() {
           "ntp",
           "topic_revision",
           "replicas",
-          "defunct_nodes"
+          "dead_nodes"
         ]
       }
     }
   },
   "required": [
-    "defunct_nodes",
+    "dead_nodes",
     "partitions_to_force_recover"
   ]
 }
@@ -3669,7 +3683,7 @@ admin_server::force_recover_partitions_from_nodes(
 
     // parse the json body into a controller command.
     std::vector<model::node_id> dead_nodes = parse_node_ids_from_json(
-      doc["defunct_nodes"]);
+      doc["dead_nodes"]);
     fragmented_vector<cluster::ntp_with_majority_loss>
       partitions_to_force_recover;
     for (auto& r : doc["partitions_to_force_recover"].GetArray()) {
@@ -3677,13 +3691,13 @@ admin_server::force_recover_partitions_from_nodes(
         auto replicas = parse_replicas_from_json(r["replicas"]);
         auto topic_revision = model::revision_id(
           r["topic_revision"].GetInt64());
-        auto dead_replicas = parse_node_ids_from_json(r["defunct_nodes"]);
+        auto dead_replicas = parse_node_ids_from_json(r["dead_nodes"]);
 
         cluster::ntp_with_majority_loss ntp_entry;
         ntp_entry.ntp = std::move(ntp);
         ntp_entry.assignment = std::move(replicas);
         ntp_entry.topic_revision = topic_revision;
-        ntp_entry.defunct_nodes = std::move(dead_replicas);
+        ntp_entry.dead_nodes = std::move(dead_replicas);
         partitions_to_force_recover.push_back(std::move(ntp_entry));
     }
 

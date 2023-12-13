@@ -38,12 +38,6 @@ namespace cluster {
 static constexpr std::chrono::seconds controller_stm_sync_timeout = 10s;
 static constexpr std::chrono::seconds add_move_cmd_timeout = 10s;
 
-class balancer_tick_aborted_exception final : public std::runtime_error {
-public:
-    explicit balancer_tick_aborted_exception(const std::string& msg)
-      : std::runtime_error(msg) {}
-};
-
 partition_balancer_backend::partition_balancer_backend(
   consensus_ptr raft0,
   ss::sharded<controller_stm>& controller_stm,
@@ -537,14 +531,15 @@ partition_balancer_overview_reply partition_balancer_backend::overview() const {
     ret.decommission_realloc_failures
       = _cur_term->last_tick_decommission_realloc_failures;
     ret.partitions_pending_force_recovery_count
-      = _state.partitions_to_force_reconfigure().size();
+      = _state.topics().partitions_to_force_recover().size();
     if (ret.partitions_pending_force_recovery_count > 0) {
         constexpr size_t max_partitions_to_include = 10;
         auto sample_size = std::min(
           ret.partitions_pending_force_recovery_count,
           max_partitions_to_include);
         ret.partitions_pending_force_recovery_sample.reserve(sample_size);
-        for (const auto& [ntp, _] : _state.partitions_to_force_reconfigure()) {
+        for (const auto& [ntp, _] :
+             _state.topics().partitions_to_force_recover()) {
             if (
               ret.partitions_pending_force_recovery_sample.size()
               > max_partitions_to_include) {
