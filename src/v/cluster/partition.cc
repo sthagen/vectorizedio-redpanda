@@ -395,7 +395,7 @@ kafka_stages partition::replicate_in_stages(
         }
     }
 
-    if (bid.has_idempotent()) {
+    if (bid.is_idempotent()) {
         if (!_is_idempotence_enabled) {
             vlog(
               clusterlog.error,
@@ -573,7 +573,8 @@ ss::future<> partition::stop() {
         // `partition_manager::do_shutdown` (caller of stop) will assert
         // out on any thrown exceptions. Hence, acquire the units without
         // a timeout or abort source.
-        auto archiver_reset_guard = ss::get_units(_archiver_reset_mutex, 1);
+        auto archiver_reset_guard = co_await ss::get_units(
+          _archiver_reset_mutex, 1);
 
         if (_archiver) {
             _upload_housekeeping.local().deregister_jobs(
