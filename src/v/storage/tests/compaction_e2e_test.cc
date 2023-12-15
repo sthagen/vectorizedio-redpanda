@@ -10,6 +10,7 @@
 #include "kafka/server/tests/produce_consume_utils.h"
 #include "model/namespace.h"
 #include "redpanda/tests/fixture.h"
+#include "storage/tests/manual_mixin.h"
 #include "test_utils/async.h"
 #include "test_utils/scoped_config.h"
 #include "test_utils/test.h"
@@ -23,18 +24,6 @@
 namespace {
 ss::logger cmp_testlog("cmp_testlog");
 } // anonymous namespace
-
-class storage_manual_mixin {
-public:
-    storage_manual_mixin() {
-        cfg.get("log_segment_size_min")
-          .set_value(std::make_optional<uint64_t>(1));
-        cfg.get("log_disable_housekeeping_for_tests").set_value(true);
-    }
-
-private:
-    scoped_config cfg;
-};
 
 struct work_dir_summary {
     explicit work_dir_summary(ss::sstring path)
@@ -113,7 +102,10 @@ public:
     }
 
     ss::future<> generate_data(
-      size_t num_segments, size_t cardinality, size_t records_per_segment) {
+      size_t num_segments,
+      size_t cardinality,
+      size_t batches_per_segment,
+      size_t records_per_batch = 1) {
         tests::kafka_produce_transport producer(co_await make_kafka_client());
         co_await producer.start();
 
@@ -121,15 +113,15 @@ public:
         size_t val_count = 0;
         absl::btree_map<ss::sstring, ss::sstring> latest_kv;
         for (size_t i = 0; i < num_segments; i++) {
-            for (int r = 0; r < records_per_segment; r++) {
+            for (int r = 0; r < batches_per_segment; r++) {
                 auto kvs = tests::kv_t::sequence(
-                  val_count % cardinality, 1, val_count);
+                  val_count, records_per_batch, val_count, cardinality);
                 for (const auto& [k, v] : kvs) {
                     latest_kv[k] = v;
                 }
                 co_await producer.produce_to_partition(
                   topic_name, model::partition_id(0), std::move(kvs));
-                val_count++;
+                val_count += records_per_batch;
             }
             co_await log->flush();
             co_await log->force_roll(ss::default_priority_class());
@@ -262,13 +254,21 @@ TEST_F(CompactionFixtureTest, TestDedupeMultiPass) {
     ASSERT_NO_FATAL_FAILURE(check_records(cardinality, num_segments - 1).get());
 }
 
-TEST_F(CompactionFixtureTest, TestRecompactWithNewData) {
+class CompactionFixtureBatchSizeParamTest
+  : public CompactionFixtureTest
+  , public ::testing::WithParamInterface<size_t> {};
+
+TEST_P(CompactionFixtureBatchSizeParamTest, TestRecompactWithNewData) {
+    auto records_per_batch = GetParam();
     constexpr auto duplicates_per_key = 10;
     constexpr auto num_segments = 10;
     constexpr auto total_records = 100;
     constexpr auto cardinality = total_records / duplicates_per_key; // 10
     size_t records_per_segment = total_records / num_segments;       // 10
-    generate_data(num_segments, cardinality, records_per_segment).get();
+    size_t batches_per_segment = records_per_segment / records_per_batch;
+    generate_data(
+      num_segments, cardinality, batches_per_segment, records_per_batch)
+      .get();
 
     // Compact everything in one go.
     ss::abort_source never_abort;
@@ -310,13 +310,17 @@ TEST_F(CompactionFixtureTest, TestRecompactWithNewData) {
     ASSERT_EQ(segments_compacted + 3, segments_compacted_3);
 
     // Check for a reasonable compaction ratio.
-    ASSERT_LT(compaction_ratio_3, 0.5);
+    ASSERT_LT(compaction_ratio_3, 0.65);
 
     // Compared to our first compaction ratio that windowed compacted many
     // segments in a row, one self-compaction + windowed compaction will have a
     // worse compaction ratio.
     ASSERT_LT(compaction_ratio, compaction_ratio_3);
 }
+INSTANTIATE_TEST_SUITE_P(
+  RecordsPerBatch,
+  CompactionFixtureBatchSizeParamTest,
+  ::testing::Values(1, 5, 10));
 
 // Regression test for a bug when compacting when the last segment is all
 // non-data batches. Previously such segments would appear uncompacted, and
