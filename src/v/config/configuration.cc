@@ -14,6 +14,7 @@
 #include "config/node_config.h"
 #include "config/validators.h"
 #include "model/metadata.h"
+#include "model/namespace.h"
 #include "pandaproxy/schema_registry/schema_id_validation.h"
 #include "security/gssapi_principal_mapper.h"
 #include "security/mtls.h"
@@ -753,6 +754,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       1,
       {.min = 1, .oddeven = odd_even_constraint::odd})
+  , minimum_topic_replication(
+      *this,
+      "minimum_topic_replications",
+      "Minimum permitted value of replication factor for new topics",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      1,
+      {.min = 1, .oddeven = odd_even_constraint::odd})
   , transaction_coordinator_replication(
       *this, "transaction_coordinator_replication")
   , id_allocator_replication(*this, "id_allocator_replication")
@@ -1237,7 +1245,7 @@ configuration::configuration()
       "kafka_nodelete_topics",
       "Prevents the topics in the list from being deleted via the kafka api",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      {"__audit_log", "__consumer_offsets", "_schemas"},
+      {model::kafka_audit_logging_topic(), "__consumer_offsets", "_schemas"},
       &validate_non_empty_string_vec)
   , kafka_noproduce_topics(
       *this,
