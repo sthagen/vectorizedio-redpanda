@@ -11,12 +11,12 @@
 
 #pragma once
 
+#include "base/seastarx.h"
 #include "kafka/protocol/produce.h"
 #include "kafka/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "raft/types.h"
-#include "seastarx.h"
 #include "storage/parser_utils.h"
 #include "storage/record_batch_builder.h"
 
@@ -85,10 +85,11 @@ public:
         return _client_reqs.back().promise.get_future();
     }
 
-    model::record_batch consume() {
-        auto batch = std::exchange(_builder, make_builder()).build();
+    ss::future<model::record_batch> consume() {
+        auto batch
+          = co_await std::exchange(_builder, make_builder()).build_async();
         _broker_reqs.emplace_back(batch.record_count());
-        return batch;
+        co_return batch;
     }
 
     void handle_response(partition_response res) {
