@@ -383,7 +383,8 @@ def verify_file_layout(baseline_per_host,
                     logger.info(
                         f"checking size of the partition for {ntp}, new {total_size} vs already accounted {ntps[ntp]}"
                     )
-                    assert total_size == ntps[ntp]
+                    assert total_size == ntps[ntp],\
+                          f"{ntp=} new {total_size=} differs from already accounted size={ntps[ntp]}"
                 else:
                     ntps[ntp] = max(total_size, ntps[ntp])
         return ntps
@@ -653,26 +654,29 @@ def quiesce_uploads(redpanda, topic_names: list[str], timeout_sec):
     **Important**: you must have interval uploads enabled, or this function
     will fail: it expects all data to be uploaded eventually.
     """
+
+    last_msg = ""
+
     def remote_has_reached_hwm(ntp: NTP, hwm: int):
+        nonlocal last_msg
         view = BucketView(redpanda)
         try:
             manifest = view.get_partition_manifest(ntp)
         except Exception as e:
-            redpanda.logger.debug(
-                f"Partition {ntp} doesn't have a manifest yet ({e})")
+            last_msg = f"Partition {ntp} doesn't have a manifest yet ({e})"
+            redpanda.logger.debug(last_msg)
             return False
 
         remote_committed_offset = BucketView.kafka_last_offset(manifest)
         if remote_committed_offset is None:
-            redpanda.logger.debug(
-                f"Partition {ntp} does not have committed offset yet")
+            last_msg = f"Partition {ntp} does not have committed offset yet"
+            redpanda.logger.debug(last_msg)
             return False
         else:
             ready = remote_committed_offset >= hwm - 1
             if not ready:
-                redpanda.logger.debug(
-                    f"Partition {ntp} not yet ready ({remote_committed_offset} < {hwm-1})"
-                )
+                last_msg = f"Partition {ntp} not yet ready ({remote_committed_offset} < {hwm-1})"
+                redpanda.logger.debug(last_msg)
             return ready
 
     t_initial = time.time()
@@ -693,7 +697,8 @@ def quiesce_uploads(redpanda, topic_names: list[str], timeout_sec):
 
             redpanda.wait_until(lambda: remote_has_reached_hwm(ntp, hwm),
                                 timeout_sec=timeout,
-                                backoff_sec=1)
+                                backoff_sec=1,
+                                err_msg=lambda: last_msg)
             redpanda.logger.debug(f"Partition {ntp} ready (reached HWM {hwm})")
 
         if p_count == 0:
