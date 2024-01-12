@@ -261,6 +261,14 @@ configuration::configuration()
         .min = 0,     // It is not mandatory to reserve any capacity
         .max = 131072 // Same max as topic_partitions_per_shard
       })
+  , partition_manager_shutdown_watchdog_timeout(
+      *this,
+      "partition_manager_shutdown_watchdog_timeout",
+      "A threshold value to detect partitions which shutdown might have been "
+      "stuck. After this threshold a watchdog in partition manager will log "
+      "information about partition shutdown not making progress",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      30s)
   , admin_api_require_auth(
       *this,
       "admin_api_require_auth",
@@ -2061,15 +2069,16 @@ configuration::configuration()
       "past the local retention limit, and will be trimmed automatically as "
       "storage reaches the configured target size.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      false)
+      false,
+      property<bool>::noop_validator,
+      legacy_default<bool>(true, legacy_version{9}))
   , retention_local_strict_override(
       *this,
       "retention_local_strict_override",
       "Trim log data when a cloud topic reaches its local retention limit. "
       "When this option is disabled Redpanda will allow partitions to grow "
       "past the local retention limit, and will be trimmed automatically as "
-      "storage reaches the configured target size. This option is ignored and "
-      "deprecated in versions >= v23.3.",
+      "storage reaches the configured target size.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       true)
   , retention_local_target_capacity_bytes(
