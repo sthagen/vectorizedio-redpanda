@@ -23,6 +23,7 @@ const (
 	DefaultAdminPort     = 9644
 	DefaultRPCPort       = 33145
 	DefaultListenAddress = "0.0.0.0"
+	LoopbackIP           = "127.0.0.1"
 
 	DefaultBallastFilePath = "/var/lib/redpanda/data/ballast"
 	DefaultBallastFileSize = "1GiB"
@@ -54,6 +55,8 @@ type DevOverrides struct {
 	// CloudToken bypasses the oauth.LoadFlow, allowing you to pass a cloud
 	// token instead of logging in.
 	CloudToken string `env:"RPK_CLOUD_TOKEN"`
+	// PublicAPIURL is used by `rpk cloud` to override the public API URL.
+	PublicAPIURL string `env:"RPK_PUBLIC_API_URL"`
 }
 
 // Config encapsulates a redpanda.yaml and/or an rpk.yaml. This is the
