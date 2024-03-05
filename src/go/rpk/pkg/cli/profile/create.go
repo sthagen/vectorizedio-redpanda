@@ -22,6 +22,7 @@ import (
 	container "github.com/redpanda-data/redpanda/src/go/rpk/pkg/cli/container/common"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/cloudapi"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
+	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/httpapi"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/oauth"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/oauth/providers/auth0"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
@@ -104,9 +105,7 @@ rpk always switches to the newly created profile.
 				out.Die("profile name cannot be empty unless using %v or %v", fromCloudFlag, fromContainerFlag)
 			}
 
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
-			defer cancel()
-			name, msg, err := createProfile(ctx, fs, y, cfg, fromRedpanda, fromProfile, fromCloud, fromContainer, set, name, description)
+			name, msg, err := createProfile(cmd.Context(), fs, y, cfg, fromRedpanda, fromProfile, fromCloud, fromContainer, set, name, description)
 			out.MaybeDieErr(err)
 
 			fmt.Printf("Created and switched to new profile %q.\n", name)
@@ -272,7 +271,7 @@ func createCloudProfile(ctx context.Context, y *config.RpkYaml, cfg *config.Conf
 	if expired {
 		return CloudClusterOutputs{}, fmt.Errorf("token for %q has expired, please login again", y.CurrentCloudAuth)
 	}
-	cl := cloudapi.NewClient(overrides.CloudAPIURL, a.AuthToken)
+	cl := cloudapi.NewClient(overrides.CloudAPIURL, a.AuthToken, httpapi.ReqTimeout(10*time.Second))
 
 	if clusterID == "prompt" {
 		return PromptCloudClusterProfile(ctx, cl)
@@ -372,7 +371,7 @@ them in rpk with
 func CloudClusterMessage(p config.RpkProfile, clusterName, clusterID string) string {
 	return fmt.Sprintf(`
 Cluster %s
-  Web UI: https://cloudv2.redpanda.com/clusters/%s/overview
+  Web UI: https://cloud.redpanda.com/clusters/%s/overview
   Redpanda Seed Brokers: [%s]
 `, clusterName, clusterID, strings.Join(p.KafkaAPI.Brokers, ", "))
 }
