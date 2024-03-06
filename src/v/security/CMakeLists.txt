@@ -27,6 +27,7 @@ v_cc_library(
     krb5.cc
     krb5_configurator.cc
     gssapi_principal_mapper.cc
+    role.cc
   DEPS
     v::http
     v::security_config
@@ -42,6 +43,7 @@ v_cc_library(
     re2
     gssapi_krb5
     krb5
+    v::crypto
  )
 
 add_subdirectory(audit)
