@@ -435,6 +435,11 @@ std::ostream& operator<<(std::ostream& o, const partition_assignment& p_as) {
     return o;
 }
 
+std::ostream& operator<<(std::ostream& o, const shard_placement_target& eg) {
+    fmt::print(o, "{{log_revision: {}, shard: {}}}", eg.log_revision, eg.shard);
+    return o;
+}
+
 std::ostream& operator<<(std::ostream& o, const partition_operation_type& tp) {
     switch (tp) {
     case partition_operation_type::add:
@@ -1395,7 +1400,7 @@ adl<cluster::create_topics_request>::from(iobuf io) {
 
 cluster::create_topics_request
 adl<cluster::create_topics_request>::from(iobuf_parser& in) {
-    using underlying_t = std::vector<cluster::topic_configuration>;
+    using underlying_t = cluster::topic_configuration_vector;
     auto configs = adl<underlying_t>().from(in);
     auto timeout = adl<model::timeout_clock::duration>().from(in);
     return cluster::create_topics_request{
@@ -1416,7 +1421,7 @@ cluster::create_topics_reply
 adl<cluster::create_topics_reply>::from(iobuf_parser& in) {
     auto results = adl<std::vector<cluster::topic_result>>().from(in);
     auto md = adl<std::vector<model::topic_metadata>>().from(in);
-    auto cfg = adl<std::vector<cluster::topic_configuration>>().from(in);
+    auto cfg = adl<cluster::topic_configuration_vector>().from(in);
     return cluster::create_topics_reply{
       std::move(results), std::move(md), std::move(cfg)};
 }
