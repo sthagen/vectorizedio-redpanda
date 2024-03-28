@@ -126,6 +126,8 @@ static error_code map_produce_error_code(std::error_code ec) {
         // be not determined, it may succeed or be aborted earlier and abandoned
         case raft::errc::shutting_down:
             return error_code::request_timed_out;
+        case raft::errc::invalid_input_records:
+            return error_code::invalid_record;
         default:
             return error_code::request_timed_out;
         }
@@ -144,6 +146,8 @@ static error_code map_produce_error_code(std::error_code ec) {
             return error_code::out_of_order_sequence_number;
         case cluster::errc::invalid_request:
             return error_code::invalid_request;
+        case cluster::errc::producer_ids_vcluster_limit_exceeded:
+            return error_code::policy_violation;
         case cluster::errc::generic_tx_error:
             return error_code::unknown_server_error;
         default:

@@ -1647,10 +1647,23 @@ configuration::configuration()
        .example = "config_file",
        .visibility = visibility::user},
       model::cloud_credentials_source::config_file,
-      {model::cloud_credentials_source::config_file,
-       model::cloud_credentials_source::aws_instance_metadata,
-       model::cloud_credentials_source::sts,
-       model::cloud_credentials_source::gcp_instance_metadata})
+      {
+        model::cloud_credentials_source::config_file,
+        model::cloud_credentials_source::aws_instance_metadata,
+        model::cloud_credentials_source::sts,
+        model::cloud_credentials_source::gcp_instance_metadata,
+        model::cloud_credentials_source::azure_aks_oidc_federation,
+        model::cloud_credentials_source::azure_vm_instance_metadata,
+      })
+  , cloud_storage_azure_managed_identity_id(
+      *this,
+      "cloud_storage_azure_managed_identity_id",
+      "The managed identity ID to use with Azure Managed Identities. This "
+      "takes affect when the cloud_storage_credential_source configuration "
+      "option is set to azure_vm_instance_metadata.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt,
+      &validate_non_empty_string_opt)
   , cloud_storage_roles_operation_timeout_ms(
       *this,
       "cloud_storage_roles_operation_timeout_ms",
@@ -3047,7 +3060,14 @@ configuration::configuration()
       "enable_mpx_extensions",
       "Enable Redpanda extensions for MPX.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      false) {}
+      false)
+  , virtual_cluster_min_producer_ids(
+      *this,
+      "virtual_cluster_min_producer_ids",
+      "Minimum number of active producers per virtual cluster",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      std::numeric_limits<uint64_t>::max(),
+      {.min = 1}) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {
