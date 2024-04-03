@@ -24,7 +24,8 @@ if(REDPANDA_RUN_CLANG_TIDY)
         bugprone-stringview-nullptr
         bugprone-unused-return-value
         bugprone-suspicious-string-compare
-        cppcoreguidelines-rvalue-reference-param-not-moved
+        # TODO: Reenable this after fixing all the noise (and nuking ADL)
+        # cppcoreguidelines-rvalue-reference-param-not-moved
         misc-unused-using-decls
         misc-unused-alias-decls
         modernize-redundant-void-arg
@@ -95,14 +96,14 @@ add_subdirectory(container)
 add_subdirectory(strings)
 add_subdirectory(crypto)
 add_subdirectory(cloud_roles)
+add_subdirectory(syschecks)
+add_subdirectory(io)
+add_subdirectory(ssx)
 
 # libraries
 add_subdirectory(test_utils)
-add_subdirectory(io)
-add_subdirectory(ssx)
 add_subdirectory(finjector)
 add_subdirectory(utils)
-add_subdirectory(syschecks)
 add_subdirectory(net)
 add_subdirectory(rpc)
 add_subdirectory(metrics)

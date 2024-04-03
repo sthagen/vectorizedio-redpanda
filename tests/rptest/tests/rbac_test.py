@@ -7,12 +7,13 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
+import json
+from requests.exceptions import HTTPError
+import random
 import time
 from typing import Optional
 
 from ducktape.utils.util import wait_until
-from requests.exceptions import HTTPError
-import json
 
 import ducktape.errors
 from ducktape.utils.util import wait_until
@@ -606,13 +607,17 @@ class RBACTelemetryTest(RBACTestBase):
             self.logger.debug(f'New report: {self.metrics.reports()[-1]}')
             return self.metrics.reports()[-1]
 
-        assert wait_for_new_report()['has_rbac'] is False
+        assert wait_for_new_report()['rbac_role_count'] == 0
 
-        self.superuser_admin.create_role(role=self.role_name0)
+        names = ['a', 'b', 'c', 'd', 'e', 'f']
 
-        wait_until(lambda: wait_for_new_report()['has_rbac'] is True,
-                   timeout_sec=20,
-                   backoff_sec=1)
+        for n in names:
+            self.superuser_admin.create_role(role=n)
+
+        wait_until(
+            lambda: wait_for_new_report()['rbac_role_count'] == len(names),
+            timeout_sec=20,
+            backoff_sec=1)
         self.metrics.stop()
 
 
@@ -852,3 +857,72 @@ class RBACEndToEndTest(RBACTestBase):
         roles = RolesList.from_response(self.superuser_admin.list_roles())
 
         assert len(roles) == 1, f"Wrong number of roles {str(roles)}"
+
+
+class RolePersistenceTest(RBACTestBase):
+    @cluster(num_nodes=3)
+    def test_role_survives_restart(self):
+        admin = self.superuser_admin
+
+        names = [
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+        ]
+
+        for n in names:
+            admin.create_role(role=n)
+
+        rand_role = random.choice(names)
+
+        users = [
+            'u1',
+            'u2',
+            'u3',
+            'u4',
+            'u5',
+            'u6',
+        ]
+
+        self.logger.debug(
+            "Submit several updates, each of which is destructive.")
+
+        for u in users:
+            admin.update_role_members(role=rand_role, add=[RoleMember.User(u)])
+
+        partition = len(users) // 2
+
+        to_remove = [RoleMember.User(u) for u in users[partition:]]
+
+        admin.update_role_members(role=rand_role, remove=to_remove)
+
+        r = wait_until_result(
+            lambda: Role.from_response(admin.get_role(role=rand_role)),
+            timeout_sec=10,
+            backoff_sec=1,
+            retry_on_exc=True)
+
+        assert r.name == rand_role
+
+        self.redpanda.restart_nodes(self.redpanda.nodes)
+
+        for n in names:
+            r = wait_until_result(
+                lambda: Role.from_response(admin.get_role(role=n)),
+                timeout_sec=10,
+                backoff_sec=1,
+                retry_on_exc=True)
+            assert r.name == n
+
+        expected = [RoleMember.User(u) for u in users[:partition]]
+
+        wait_until(lambda: set(
+            RoleMemberList.from_response(
+                admin.list_role_members(role=rand_role)).members) == set(
+                    expected),
+                   timeout_sec=10,
+                   backoff_sec=1,
+                   retry_on_exc=True)

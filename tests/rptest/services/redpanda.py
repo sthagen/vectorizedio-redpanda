@@ -100,13 +100,6 @@ DEFAULT_LOG_ALLOW_LIST = [
     # A client disconnecting is not bad behaviour on redpanda's part
     re.compile(r"kafka rpc protocol.*(Connection reset by peer|Broken pipe)"),
 
-    # ubsan supports supressions, but it appears to not support supressions for
-    # generic "undefined behavior", rather only specific ones like invalid
-    # value for type, overflow, alignment, etc...
-    re.compile(
-        r"SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior aead.c:(182|214)"
-    ),
-
     # Sometines we're getting 'Internal Server Error' from S3 on CDT and it doesn't
     # lead to any test failure because the error is transient (AWS weather).
     re.compile(r"unexpected REST API error \"Internal Server Error\" detected"
@@ -182,6 +175,9 @@ AUDIT_LOG_ALLOW_LIST = RESTART_LOG_ALLOW_LIST + [
 
 # Path to the LSAN suppressions file
 LSAN_SUPPRESSIONS_FILE = "/opt/lsan_suppressions.txt"
+
+# Path to the UBSAN suppressions file
+UBSAN_SUPPRESSIONS_FILE = "/opt/ubsan_suppressions.txt"
 
 FAILURE_INJECTION_LOG_ALLOW_LIST = [
     re.compile(
@@ -2444,6 +2440,14 @@ class RedpandaService(RedpandaServiceBase):
         else:
             self.logger.debug(f'{LSAN_SUPPRESSIONS_FILE} does not exist')
 
+        # ubsan, halt at first violation and include a stack trace
+        # in the logs.
+        ubsan_opts = 'print_stacktrace=1:halt_on_error=1:abort_on_error=1'
+        if os.path.exists(UBSAN_SUPPRESSIONS_FILE):
+            ubsan_opts += f":suppressions={UBSAN_SUPPRESSIONS_FILE}"
+
+        self._environment['UBSAN_OPTIONS'] = ubsan_opts
+
         if environment is not None:
             self._environment.update(environment)
 
@@ -4587,7 +4591,10 @@ class RedpandaService(RedpandaServiceBase):
         # insist on Redpanda completing its own scrub before
         # we externally validate
         # (https://github.com/redpanda-data/redpanda/issues/9072)
-        permitted_anomalies = {"segments_outside_manifest"}
+        # see https://github.com/redpanda-data/redpanda/issues/17502 for ntr_no_topic_manifest, remove it as soon as it's fixed
+        permitted_anomalies = {
+            "segments_outside_manifest", "ntr_no_topic_manifest"
+        }
 
         # Whether any anomalies were found
         any_anomalies = any(len(v) for v in report['anomalies'].values())
