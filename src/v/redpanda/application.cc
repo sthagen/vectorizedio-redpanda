@@ -1899,16 +1899,19 @@ void application::wire_up_redpanda_services(
       }))
       .get();
     _kafka_conn_quotas
-      .start([]() {
-          return net::conn_quota_config{
-            .max_connections
-            = config::shard_local_cfg().kafka_connections_max.bind(),
-            .max_connections_per_ip
-            = config::shard_local_cfg().kafka_connections_max_per_ip.bind(),
-            .max_connections_overrides
-            = config::shard_local_cfg().kafka_connections_max_overrides.bind(),
-          };
-      })
+      .start(
+        []() {
+            return net::conn_quota_config{
+              .max_connections
+              = config::shard_local_cfg().kafka_connections_max.bind(),
+              .max_connections_per_ip
+              = config::shard_local_cfg().kafka_connections_max_per_ip.bind(),
+              .max_connections_overrides
+              = config::shard_local_cfg()
+                  .kafka_connections_max_overrides.bind(),
+            };
+        },
+        &kafka::klog)
       .get();
 
     ss::sharded<net::server_configuration> kafka_cfg;
@@ -2694,8 +2697,8 @@ void application::start_runtime_services(
             std::ref(controller->get_feature_table()),
             std::ref(controller->get_health_monitor()),
             std::ref(_connection_cache),
-            std::ref(controller->get_partition_manager())));
-
+            std::ref(controller->get_partition_manager()),
+            std::ref(node_status_backend)));
           runtime_services.push_back(
             std::make_unique<cluster::metadata_dissemination_handler>(
               sched_groups.cluster_sg(),
