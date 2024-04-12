@@ -32,6 +32,7 @@
 #include "cluster/feature_manager.h"
 #include "cluster/fwd.h"
 #include "cluster/health_manager.h"
+#include "cluster/health_monitor_backend.h"
 #include "cluster/health_monitor_frontend.h"
 #include "cluster/logger.h"
 #include "cluster/members_backend.h"
@@ -645,6 +646,7 @@ ss::future<> controller::start(
             std::ref(_config_frontend),
             std::ref(_feature_table),
             std::ref(_roles),
+            std::addressof(_plugin_table),
             std::ref(_as));
       })
       .then([this] {
