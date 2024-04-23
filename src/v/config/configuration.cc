@@ -406,6 +406,15 @@ configuration::configuration()
           }
           return std::nullopt;
       })
+  , raft_enable_longest_log_detection(
+      *this,
+      "raft_enable_longest_log_detection",
+      "Enables additional step in leader election where candidate is allowed "
+      "to wait for all the replies from node it requested votes from. This may "
+      "introduce a small delay when recovering from failure but will prevent "
+      "truncation if any of the replicas has more data than the majority.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      true)
   , enable_usage(
       *this,
       "enable_usage",
@@ -2905,7 +2914,7 @@ configuration::configuration()
       "milliseconds. Value of 0 disables the balancer and makes all the "
       "throughput quotas immutable.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      750ms,
+      0ms,
       {.min = 0ms})
   , kafka_quota_balancer_min_shard_throughput_ratio(
       *this,
