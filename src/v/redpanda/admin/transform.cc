@@ -12,6 +12,7 @@
 #include "model/transform.h"
 
 #include "bytes/streambuf.h"
+#include "container/lw_shared_container.h"
 #include "json/document.h"
 #include "json/istreamwrapper.h"
 #include "json/validator.h"
@@ -228,7 +229,7 @@ admin_server::deploy_transform(std::unique_ptr<ss::http::request> req) {
         .output_topics = output_topics,
         .environment = std::move(env),
       },
-      std::move(body));
+      model::wasm_binary_iobuf(std::make_unique<iobuf>(std::move(body))));
 
     co_await throw_on_error(*req, ec, model::controller_ntp);
     co_return ss::json::json_void();
@@ -247,7 +248,7 @@ admin_server::list_committed_offsets(std::unique_ptr<ss::http::request> req) {
     }
 
     co_return ss::json::json_return_type(ss::json::stream_range_as_array(
-      admin::lw_shared_container(std::move(result).value()),
+      lw_shared_container(std::move(result).value()),
       [](const model::transform_committed_offset& committed) {
           ss::httpd::transform_json::committed_offset response;
           response.transform_name = committed.name();
