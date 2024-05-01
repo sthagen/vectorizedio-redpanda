@@ -654,7 +654,19 @@ configuration::configuration()
       "wasn't reached",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1ms)
-  , fetch_read_strategy(*this, "fetch_read_strategy")
+  , fetch_read_strategy(
+      *this,
+      "fetch_read_strategy",
+      "The strategy used to fulfill fetch requests",
+      {.needs_restart = needs_restart::no,
+       .example = model::fetch_read_strategy_to_string(
+         model::fetch_read_strategy::non_polling),
+       .visibility = visibility::tunable},
+      model::fetch_read_strategy::non_polling,
+      {
+        model::fetch_read_strategy::polling,
+        model::fetch_read_strategy::non_polling,
+      })
   , alter_topic_cfg_timeout_ms(
       *this,
       "alter_topic_cfg_timeout_ms",
@@ -3174,7 +3186,15 @@ configuration::configuration()
       "Minimum number of active producers per virtual cluster",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::numeric_limits<uint64_t>::max(),
-      {.min = 1}) {}
+      {.min = 1})
+  , unsafe_enable_consumer_offsets_delete_retention(
+      *this,
+      "unsafe_enable_consumer_offsets_delete_retention",
+      "Enables delete retention of consumer offsets topic. This is an "
+      "internal-only configuration and should be enabled only after consulting "
+      "with Redpanda Support or engineers.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      false) {}
 
 configuration::error_map_t configuration::load(const YAML::Node& root_node) {
     if (!root_node["redpanda"]) {
