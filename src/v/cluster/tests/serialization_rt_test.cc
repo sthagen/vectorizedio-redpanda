@@ -25,6 +25,8 @@
 #include "model/tests/randoms.h"
 #include "model/timestamp.h"
 #include "raft/fundamental.h"
+#include "raft/group_configuration.h"
+#include "raft/types.h"
 #include "random/generators.h"
 #include "reflection/adl.h"
 #include "reflection/async_adl.h"
@@ -1944,8 +1946,8 @@ SEASTAR_THREAD_TEST_CASE(serde_reflection_roundtrip) {
         roundtrip_test(data);
     }
     {
-        const auto gold = model::test::make_random_batches(
-          model::offset(0), 20);
+        const auto gold
+          = model::test::make_random_batches(model::offset(0), 20).get();
 
         // make a copy of the source batches for later comparison because the
         // copy moved into the request will get eaten.
