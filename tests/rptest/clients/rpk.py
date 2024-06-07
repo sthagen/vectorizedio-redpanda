@@ -105,6 +105,7 @@ class RpkGroupPartition(typing.NamedTuple):
     topic: str
     partition: int
     current_offset: Optional[int]
+    log_start_offset: Optional[int]
     log_end_offset: Optional[int]
     lag: Optional[int]
     member_id: str
@@ -840,8 +841,8 @@ class RpkTool:
 
                 received_columns = set(c.name for c in table.columns)
                 required_columns = set([
-                    "TOPIC", "PARTITION", "CURRENT-OFFSET", "LOG-END-OFFSET",
-                    "LAG", "MEMBER-ID", "CLIENT-ID", "HOST"
+                    "TOPIC", "PARTITION", "CURRENT-OFFSET", "LOG-START-OFFSET",
+                    "LOG-END-OFFSET", "LAG", "MEMBER-ID", "CLIENT-ID", "HOST"
                 ])
                 optional_columns = set(["INSTANCE-ID", "ERROR"])
 
@@ -885,6 +886,8 @@ class RpkTool:
                         topic=obj["TOPIC"],
                         partition=int(obj["PARTITION"]),
                         current_offset=maybe_parse_int(obj["CURRENT-OFFSET"]),
+                        log_start_offset=maybe_parse_int(
+                            obj["LOG-START-OFFSET"]),
                         log_end_offset=maybe_parse_int(obj["LOG-END-OFFSET"]),
                         lag=maybe_parse_int(obj["LAG"]),
                         member_id=obj["MEMBER-ID"],
@@ -1760,7 +1763,7 @@ class RpkTool:
 
         return self._run_txn(cmd)
 
-    def describe_txn(self, txn_id, print_partitions=False):
+    def describe_txn(self, txn_id, print_partitions=False) -> dict | str:
         cmd = ["describe", txn_id]
 
         if print_partitions:
@@ -1771,7 +1774,11 @@ class RpkTool:
     def list_txn(self):
         return self._run_txn(["list"])
 
-    def _run_txn(self, cmd, stdin=None, timeout=None, output_format="json"):
+    def _run_txn(self,
+                 cmd,
+                 stdin=None,
+                 timeout=None,
+                 output_format="json") -> dict | str:
         cmd = [
             self._rpk_binary(),
             "cluster",
@@ -1845,6 +1852,60 @@ class RpkTool:
             self._rpk_binary(), "security", "role", "--format", output_format,
             "-X", "admin.hosts=" + self._redpanda.admin_endpoints()
         ] + cmd
+
+        out = self._execute(cmd)
+
+        return json.loads(out) if output_format == "json" else out
+
+    def describe_cluster_quotas(self,
+                                any=[],
+                                default=[],
+                                name=[],
+                                strict=False,
+                                output_format="json"):
+        cmd = ["describe"]
+
+        if strict:
+            cmd += ["--strict"]
+        if len(any) > 0:
+            cmd += ["--any", ",".join(any)]
+        if len(default) > 0:
+            cmd += ["--default", ",".join(default)]
+        if len(name) > 0:
+            cmd += ["--name", ",".join(name)]
+
+        return self._run_cluster_quotas(cmd, output_format=output_format)
+
+    def alter_cluster_quotas(self,
+                             add=[],
+                             delete=[],
+                             default=[],
+                             name=[],
+                             dry=False,
+                             output_format="json"):
+        cmd = ["describe"]
+
+        if dry:
+            cmd += ["--dry"]
+        if len(add) > 0:
+            cmd += ["--add", ",".join(add)]
+        if len(delete) > 0:
+            cmd += ["--delete", ",".join(delete)]
+        if len(default) > 0:
+            cmd += ["--default", ",".join(default)]
+        if len(name) > 0:
+            cmd += ["--name", ",".join(name)]
+
+        return self._run_cluster_quotas(cmd, output_format=output_format)
+
+    def _run_cluster_quotas(self, cmd, output_format="json"):
+        cmd = [
+            self._rpk_binary(),
+            "cluster",
+            "quotas",
+            "--format",
+            output_format,
+        ] + self._kafka_conn_settings() + cmd
 
         out = self._execute(cmd)
 
