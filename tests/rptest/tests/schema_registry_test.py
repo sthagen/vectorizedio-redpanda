@@ -10,7 +10,7 @@
 from enum import Enum
 import http.client
 import json
-from typing import Optional
+from typing import Literal, NamedTuple, Optional
 import uuid
 import re
 import requests
@@ -108,6 +108,57 @@ log_config = LoggingConfig('info',
                                'pandaproxy': 'trace',
                                'kafka/client': 'trace'
                            })
+
+
+class TestDataset(NamedTuple):
+    type: SchemaType
+    schema_base: str
+    schema_backward_compatible: str
+    schema_not_backward_compatible: str
+
+
+def get_dataset(type: SchemaType) -> TestDataset:
+    if type == SchemaType.AVRO:
+        return TestDataset(type=SchemaType.AVRO,
+                           schema_base=schema1_def,
+                           schema_backward_compatible=schema2_def,
+                           schema_not_backward_compatible=schema3_def)
+    if type == SchemaType.JSON:
+        return TestDataset(
+            type=SchemaType.JSON,
+            schema_base="""
+{
+  "type": "object",
+  "properties": {
+    "aaaa": {"type": "integer"},
+    "bbbb": {"type": "boolean"}
+  },
+  "additionalProperties": false,
+  "required": ["aaaa", "bbbb"]
+}
+""",
+            schema_backward_compatible="""
+{
+  "type": "object",
+  "properties": {
+    "aaaa": {"type": "number"}
+  },
+  "additionalProperties": {"type": "boolean"},
+  "required": ["aaaa"]
+}
+""",
+            schema_not_backward_compatible="""
+{
+  "type": "object",
+  "properties": {
+    "aaaa": {"type": "string"}
+  },
+  "additionalProperties": {"type": "boolean"},
+  "required": ["aaaa"]
+}
+""",
+        )
+    assert False, f"Unsupported schema {type=}"
 
 
 class SchemaRegistryEndpoints(RedpandaTest):
@@ -394,9 +445,19 @@ class SchemaRegistryEndpoints(RedpandaTest):
             headers=headers,
             **kwargs)
 
-    def _get_subjects(self, deleted=False, headers=HTTP_GET_HEADERS, **kwargs):
+    def _get_subjects(self,
+                      deleted=False,
+                      subject_prefix=None,
+                      headers=HTTP_GET_HEADERS,
+                      **kwargs):
+        params = {}
+        if deleted:
+            params['deleted'] = 'true'
+        if subject_prefix:
+            params['subjectPrefix'] = subject_prefix
         return self._request("GET",
-                             f"subjects{'?deleted=true' if deleted else ''}",
+                             "subjects",
+                             params=params,
                              headers=headers,
                              **kwargs)
 
@@ -1034,17 +1095,31 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )["message"] == f"Subject 'foo-key' not found.", f"{json.dumps(result_raw.json(), indent=1)}"
 
     @cluster(num_nodes=3)
-    def test_post_compatibility_subject_version(self):
+    @parametrize(dataset_type=SchemaType.AVRO)
+    @parametrize(dataset_type=SchemaType.JSON)
+    def test_post_compatibility_subject_version(self,
+                                                dataset_type: SchemaType):
         """
         Verify compatibility
         """
+        dataset = get_dataset(dataset_type)
+        self.logger.debug(f"testing with {dataset=}")
 
         topic = create_topic_names(1)[0]
 
         self.logger.debug(f"Register a schema against a subject")
-        schema_1_data = json.dumps({"schema": schema1_def})
-        schema_2_data = json.dumps({"schema": schema2_def})
-        schema_3_data = json.dumps({"schema": schema3_def})
+        schema_1_data = json.dumps({
+            "schema": dataset.schema_base,
+            "schemaType": str(dataset.type)
+        })
+        schema_2_data = json.dumps({
+            "schema": dataset.schema_backward_compatible,
+            "schemaType": str(dataset.type)
+        })
+        schema_3_data = json.dumps({
+            "schema": dataset.schema_not_backward_compatible,
+            "schemaType": str(dataset.type)
+        })
 
         self.logger.debug("Posting schema 1 as a subject key")
         result_raw = self._post_subjects_subject_versions(
@@ -2247,6 +2322,45 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
                                                        auth=self.super_auth)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [{"subject": subject, "version": 1}]
+
+    @cluster(num_nodes=3)
+    def test_get_subjects(self):
+        """
+        Verify getting subjects
+        """
+        self._init_users()
+
+        topics = ['a', 'aa', 'b', 'ab', 'bb']
+
+        schema_1_data = json.dumps({"schema": schema1_def})
+
+        self.logger.debug("Posting schemas 1 as subject keys")
+
+        def post(topic):
+            result_raw = self._post_subjects_subject_versions(
+                subject=f"{topic}-key",
+                data=schema_1_data,
+                auth=self.super_auth)
+            self.logger.debug(result_raw)
+            assert result_raw.status_code == requests.codes.ok
+
+        for t in topics:
+            post(t)
+
+        def get_subjects(prefix: Optional[str]):
+            result_raw = self._get_subjects(subject_prefix=prefix,
+                                            auth=self.super_auth)
+            assert result_raw.status_code == requests.codes.ok
+
+            return result_raw.json()
+
+        assert len(get_subjects(prefix=None)) == 5
+        assert len(get_subjects(prefix="")) == 5
+        assert len(get_subjects(prefix="a")) == 3
+        assert len(get_subjects(prefix="aa")) == 1
+        assert len(get_subjects(prefix="aaa")) == 0
+        assert len(get_subjects(prefix="b")) == 2
+        assert len(get_subjects(prefix="bb")) == 1
 
     @cluster(num_nodes=3)
     def test_post_subjects_subject_versions(self):

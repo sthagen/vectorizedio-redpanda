@@ -354,10 +354,12 @@ ss::future<subject_schema> sharded_store::get_subject_schema(
       .deleted = v_id.deleted};
 }
 
-ss::future<chunked_vector<subject>>
-sharded_store::get_subjects(include_deleted inc_del) {
+ss::future<chunked_vector<subject>> sharded_store::get_subjects(
+  include_deleted inc_del, std::optional<ss::sstring> subject_prefix) {
     using subjects = chunked_vector<subject>;
-    auto map = [inc_del](store& s) { return s.get_subjects(inc_del); };
+    auto map = [inc_del, &subject_prefix](store& s) {
+        return s.get_subjects(inc_del, subject_prefix);
+    };
     auto reduce = [](subjects acc, subjects subs) {
         acc.reserve(acc.size() + subs.size());
         std::move(subs.begin(), subs.end(), std::back_inserter(acc));
@@ -686,10 +688,16 @@ ss::future<bool> sharded_store::is_compatible(
         co_return true;
     }
 
-    // Currently support PROTOBUF, AVRO
-    if (
-      new_schema.type() != schema_type::avro
-      && new_schema.type() != schema_type::protobuf) {
+    // Currently support JSON, PROTOBUF, AVRO
+    if (![type = new_schema.type()] {
+            switch (type) {
+            case schema_type::avro:
+            case schema_type::protobuf:
+            case schema_type::json:
+                return true;
+            }
+            return false;
+        }()) {
         throw as_exception(invalid_schema_type(new_schema.type()));
     }
 

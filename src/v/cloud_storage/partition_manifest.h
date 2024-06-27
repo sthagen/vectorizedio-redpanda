@@ -43,10 +43,6 @@ struct partition_manifest_path_components {
     operator<<(std::ostream& s, const partition_manifest_path_components& c);
 };
 
-/// Parse partition manifest path and return components
-std::optional<partition_manifest_path_components>
-get_partition_manifest_path_components(const std::filesystem::path& path);
-
 struct segment_name_components {
     model::offset base_offset;
     model::term_id term;
@@ -123,9 +119,6 @@ public:
     /// Generate segment path to use in the cloud
     static remote_segment_path
     generate_remote_segment_path(const model::ntp& ntp, const value& val);
-    /// Generate segment path to use locally
-    static local_segment_path
-    generate_local_segment_path(const model::ntp& ntp, const value& val);
 
     /// Create empty manifest that supposed to be updated later
     partition_manifest();
@@ -218,6 +211,9 @@ public:
             return get_manifest_format_and_path().second;
         }
     }
+
+    static ss::sstring filename() { return "manifest.bin"; }
+    virtual ss::sstring get_manifest_filename() const { return filename(); }
 
     remote_manifest_path get_manifest_path() const override {
         return get_manifest_format_and_path().second;
