@@ -34,6 +34,7 @@
 #include "cluster/cluster_uuid.h"
 #include "cluster/controller.h"
 #include "cluster/controller_snapshot.h"
+#include "cluster/data_migration_service_handler.h"
 #include "cluster/ephemeral_credential_frontend.h"
 #include "cluster/ephemeral_credential_service.h"
 #include "cluster/fwd.h"
@@ -85,6 +86,7 @@
 #include "kafka/server/coordinator_ntp_mapper.h"
 #include "kafka/server/group_manager.h"
 #include "kafka/server/group_router.h"
+#include "kafka/server/group_tx_tracker_stm.h"
 #include "kafka/server/queue_depth_monitor.h"
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/rm_group_frontend.h"
@@ -2684,6 +2686,7 @@ void application::start_runtime_services(
             config::shard_local_cfg().cloud_storage_enabled(),
             cloud_storage_api,
             feature_table);
+          pm.register_factory<kafka::group_tx_tracker_stm_factory>();
       })
       .get();
     partition_manager.invoke_on_all(&cluster::partition_manager::start).get();
@@ -2861,6 +2864,12 @@ void application::start_runtime_services(
                   std::ref(controller->get_partition_leaders()),
                   config::node().node_id().value()));
           }
+          runtime_services.push_back(
+            std::make_unique<cluster::data_migrations::service_handler>(
+              sched_groups.cluster_sg(),
+              smp_service_groups.cluster_smp_sg(),
+              std::ref(controller->get_data_migration_frontend())));
+
           s.add_services(std::move(runtime_services));
 
           // Done! Disallow unknown method errors.

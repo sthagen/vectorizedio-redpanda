@@ -176,13 +176,21 @@ std::filesystem::path ntp::topic_path() const {
 std::istream& operator>>(std::istream& i, compression& c) {
     ss::sstring s;
     i >> s;
-    c = string_switch<compression>(s)
-          .match_all("none", "uncompressed", compression::none)
-          .match("gzip", compression::gzip)
-          .match("snappy", compression::snappy)
-          .match("lz4", compression::lz4)
-          .match("zstd", compression::zstd)
-          .match("producer", compression::producer);
+    auto tmp = string_switch<std::optional<compression>>(s)
+                 .match_all("none", "uncompressed", compression::none)
+                 .match("gzip", compression::gzip)
+                 .match("snappy", compression::snappy)
+                 .match("lz4", compression::lz4)
+                 .match("zstd", compression::zstd)
+                 .match("producer", compression::producer)
+                 .default_match(std::nullopt);
+
+    if (tmp.has_value()) {
+        c = tmp.value();
+    } else {
+        i.setstate(std::ios_base::failbit);
+    }
+
     return i;
 }
 
@@ -372,6 +380,10 @@ std::ostream& operator<<(std::ostream& o, record_batch_type bt) {
         return o << "batch_type::role_management_cmd";
     case record_batch_type::client_quota:
         return o << "batch_type::client_quota";
+    case record_batch_type::data_migration_cmd:
+        return o << "batch_type::data_migration_cmd";
+    case record_batch_type::group_fence_tx:
+        return o << "batch_type::group_fence_tx";
     }
 
     return o << "batch_type::unknown{" << static_cast<int>(bt) << "}";

@@ -50,7 +50,9 @@ enum class record_batch_type : int8_t {
     = 29, // place holder for last batch in a segment that was aborted
     role_management_cmd = 30, // role management command
     client_quota = 31,        // client quota command
-    MAX = client_quota,
+    data_migration_cmd = 32,  // data migration manipulation command
+    group_fence_tx = 33,      // fence batch in group transactions
+    MAX = group_fence_tx,
 };
 
 std::ostream& operator<<(std::ostream& o, record_batch_type bt);
