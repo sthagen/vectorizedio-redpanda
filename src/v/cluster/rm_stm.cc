@@ -394,13 +394,25 @@ ss::future<tx::errc> rm_stm::do_commit_tx(
             // Already committed request
             co_return tx::errc::none;
         }
+        // At this point we do not have any trace of the transaction with
+        // required sequence. This is possible only when the transaction has
+        // been sealed (committed/aborted) as we do not evict in progress
+        // transaction state. The state could've been GC-ed along with the
+        // producer or there are edge cases like upgrading from snapshot
+        // v5 -> v6 that does not preserve sealed transactions (rare edge
+        // case only relevant during upgrades).
+        //
+        // It can only be committed because the commit_tx request from the
+        // coordinator originates if the transaction has been marked prepared
+        // in the coordinator log, so the only way it would have been sealed
+        // already is with another commit request and this is a replay.
         vlog(
-          _ctx_log.warn,
-          "No in progress transaction {} while attempting to commit "
-          "sequence: {}",
+          _ctx_log.info,
+          "No in progress transaction {} while attempting to (replay) commit "
+          "sequence: {}, assuming committed.",
           *producer,
           expected_tx_seq);
-        co_return tx::errc::invalid_txn_state;
+        co_return tx::errc::none;
     }
     auto transaction_sequence = producer->transaction_state()->sequence;
     if (transaction_sequence > expected_tx_seq) {
@@ -1228,6 +1240,7 @@ ss::future<tx::errc> rm_stm::do_try_abort_old_tx(producer_ptr producer) {
     const auto& tx_state = producer->transaction_state();
 
     if (!tx_state || !producer->has_transaction_expired()) {
+        vlog(_ctx_log.debug, "[{}] no transaction to expire", *producer);
         co_return tx::errc::stale;
     }
 
