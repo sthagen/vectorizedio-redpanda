@@ -126,6 +126,17 @@ class RpkGroup(typing.NamedTuple):
     partitions: list[RpkGroupPartition]
 
 
+class RpkListGroup(typing.NamedTuple):
+    broker: str
+    group: str
+    state: str
+
+    @staticmethod
+    def from_line(line: str):
+        parts = line.split()
+        return RpkListGroup(broker=parts[0], group=parts[1], state=parts[2])
+
+
 class RpkWasmListProcessorResponse(typing.NamedTuple):
     node_id: int
     partition: int
@@ -517,10 +528,11 @@ class RpkTool:
 
         return self._run(cmd)
 
-    def sasl_update_user(self, user, new_password):
+    def sasl_update_user(self, user, new_password, new_mechanism):
         cmd = [
             "acl", "user", "update", user, "--new-password", new_password,
-            "-X", "admin.hosts=" + self._redpanda.admin_endpoints()
+            "--mechanism", new_mechanism, "-X",
+            "admin.hosts=" + self._redpanda.admin_endpoints()
         ]
         return self._run(cmd)
 
@@ -935,11 +947,16 @@ class RpkTool:
         cmd = ["delete", group]
         self._run_group(cmd)
 
-    def group_list(self):
+    def group_list(self, states: list[str] = []) -> list[RpkListGroup]:
         cmd = ['list']
+        if states:
+            cmd += ['--states', ','.join(states)]
         out = self._run_group(cmd)
 
-        return [l.split()[1] for l in out.splitlines()[1:]]
+        return [RpkListGroup.from_line(l) for l in out.splitlines()[1:]]
+
+    def group_list_names(self) -> list[str]:
+        return [res.group for res in self.group_list()]
 
     def wasm_remove(self, name):
         cmd = ['wasm', 'remove', name, '--brokers', self._redpanda.brokers()]
