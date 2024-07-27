@@ -1387,30 +1387,11 @@ bool is_superset(
            "definitions",
            "dependencies",
            // draft 6 unhandled keywords:
-           "$comment",
            "$ref",
-           "const",
-           "contains",
-           "examples",
-           "propertyNames",
-           // draft 7 unhandled keywords
-           "contentEncoding",
-           "contentMediaType",
-           "readOnly",
-           "writeOnly",
            // draft 2019-09 unhandled keywords:
-           "$anchor",
-           "$recursiveRef",
-           "$recursiveAnchor",
-           "unevaluatedItems",
-           "unevaluatedProperties",
            "dependentRequired",
-           "maxContains",
-           "minContains",
-           "deprecated",
+           "dependentSchemas",
            // draft 2020-12 unhandled keywords:
-           "$dynamicRef",
-           "$dynamicAnchor",
            "prefixItems",
          }) {
         if (
@@ -1469,6 +1450,32 @@ bool check_compatible_dialects(
     return true;
 }
 
+void sort(json::Value& val) {
+    switch (val.GetType()) {
+    case rapidjson::Type::kFalseType:
+    case rapidjson::Type::kNullType:
+    case rapidjson::Type::kNumberType:
+    case rapidjson::Type::kStringType:
+    case rapidjson::Type::kTrueType:
+        break;
+    case rapidjson::Type::kArrayType: {
+        for (auto& v : val.GetArray()) {
+            sort(v);
+        }
+        break;
+    }
+    case rapidjson::Type::kObjectType: {
+        auto v = val.GetObject();
+        std::sort(v.begin(), v.end(), [](auto& lhs, auto& rhs) {
+            return std::string_view{
+                     lhs.name.GetString(), lhs.name.GetStringLength()}
+                   < std::string_view{
+                     rhs.name.GetString(), rhs.name.GetStringLength()};
+        });
+    }
+    }
+}
+
 } // namespace
 
 ss::future<json_schema_definition>
@@ -1483,16 +1490,24 @@ make_json_schema_definition(sharded_store&, canonical_schema schema) {
 }
 
 ss::future<canonical_schema> make_canonical_json_schema(
-  sharded_store& store, unparsed_schema unparsed_schema) {
-    // TODO BP: More validation and normalisation
-    parse_json(unparsed_schema.def().shared_raw()).value(); // throws on error
+  sharded_store& store, unparsed_schema unparsed_schema, normalize norm) {
     auto [sub, unparsed] = std::move(unparsed_schema).destructure();
     auto [def, type, refs] = std::move(unparsed).destructure();
+
+    auto doc = parse_json(std::move(def)).value(); // throws on error
+    if (norm) {
+        sort(doc);
+        std::sort(refs.begin(), refs.end());
+        refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    }
+    json::chunked_buffer out;
+    json::Writer<json::chunked_buffer> w{out};
+    doc.Accept(w);
 
     canonical_schema schema{
       std::move(sub),
       canonical_schema_definition{
-        canonical_schema_definition::raw_string{std::move(def)()},
+        canonical_schema_definition::raw_string{std::move(out).as_iobuf()},
         type,
         std::move(refs)}};
 
