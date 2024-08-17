@@ -2452,11 +2452,13 @@ class RedpandaService(RedpandaServiceBase):
                     self.LOG_LEVEL_KEY, self.DEFAULT_LOG_LEVEL)
             else:
                 self._log_level = log_level
-            self._log_config = LoggingConfig(self._log_level, {
-                'exception': 'debug',
-                'io': 'debug',
-                'seastar_memory': 'debug'
-            })
+            self._log_config = LoggingConfig(
+                self._log_level, {
+                    'exception': 'debug',
+                    'io': 'debug',
+                    'seastar_memory': 'debug',
+                    'dns_resolver': 'info'
+                })
 
         self._started: Set[ClusterNode] = set()
 
@@ -3868,6 +3870,12 @@ class RedpandaService(RedpandaServiceBase):
 
     def clean(self, **kwargs):
         super().clean(**kwargs)
+        # If we bypassed bucket creation, there is no need to try to delete it.
+        if self._si_settings and self._si_settings.bypass_bucket_creation:
+            self.logger.info(
+                f"Skipping deletion of bucket/container: {self.si_settings.cloud_storage_bucket},"
+                "because its creation was bypassed.")
+            return
         if self._cloud_storage_client:
             try:
                 self.delete_bucket_from_si()

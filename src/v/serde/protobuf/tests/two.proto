@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Redpanda Data, Inc.
+ * Copyright 2024 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -9,15 +9,12 @@
  * by the Apache License, Version 2.0
  */
 
-#pragma once
+syntax = "proto2";
 
-#include "base/seastarx.h"
+package pbtwo;
 
-#include <seastar/util/log.hh>
-
-namespace storage {
-extern ss::logger stlog;
-extern ss::logger gclog;
-extern ss::logger finjectlog;
-extern ss::logger rslog;
-} // namespace storage
+message SearchRequest {
+    optional string query = 1;
+    optional int32 page_number = 2;
+    optional int32 results_per_page = 3;
+}
