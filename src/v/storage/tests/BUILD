@@ -70,3 +70,43 @@ redpanda_cc_btest(
         "@boost//:test",
     ],
 )
+
+redpanda_cc_btest(
+    name = "batch_cache_test",
+    timeout = "short",
+    srcs = [
+        "batch_cache_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:random",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/storage:batch_cache",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "batch_cache_reclaim_test",
+    timeout = "short",
+    srcs = [
+        "batch_cache_reclaim_test.cc",
+    ],
+    target_compatible_with = select({
+        "@seastar//:use_system_allocator": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//src/v/model",
+        "//src/v/storage:batch_cache",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
