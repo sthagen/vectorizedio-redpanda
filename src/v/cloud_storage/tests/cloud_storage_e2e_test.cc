@@ -52,8 +52,8 @@ class EndToEndFixture
 public:
     EndToEndFixture()
       : redpanda_thread_fixture(
-        redpanda_thread_fixture::init_cloud_storage_tag{},
-        httpd_port_number()) {
+          redpanda_thread_fixture::init_cloud_storage_tag{},
+          httpd_port_number()) {
         // No expectations: tests will PUT and GET organically.
         set_expectations_and_listen({});
         wait_for_controller_leadership().get();
@@ -96,6 +96,7 @@ TEST_P(EndToEndFixture, TestProduceConsumeFromCloud) {
       model::timestamp::min(),
       1,
       log->stm_manager()->max_collectible_offset(),
+      std::nullopt,
       ss::default_priority_class(),
       as);
     partition->log()->housekeeping(housekeeping_conf).get();
@@ -367,8 +368,8 @@ public:
     static constexpr auto segs_per_spill = 10;
     CloudStorageEndToEndManualTest()
       : redpanda_thread_fixture(
-        redpanda_thread_fixture::init_cloud_storage_tag{},
-        httpd_port_number()) {
+          redpanda_thread_fixture::init_cloud_storage_tag{},
+          httpd_port_number()) {
         // No expectations: tests will PUT and GET organically.
         set_expectations_and_listen({});
         wait_for_controller_leadership().get();
@@ -516,6 +517,7 @@ TEST_P(CloudStorageEndToEndManualTest, TestTimequeryAfterArchivalGC) {
       model::timestamp::min(),
       1, // max_bytes_in_log
       log->stm_manager()->max_collectible_offset(),
+      std::nullopt,
       ss::default_priority_class(),
       as);
     partition->log()->housekeeping(housekeeping_conf).get();
@@ -809,6 +811,7 @@ TEST_P(EndToEndFixture, TestCloudStorageTimequery) {
       model::timestamp::max(),
       0,
       log->stm_manager()->max_collectible_offset(),
+      std::nullopt,
       ss::default_priority_class(),
       as);
     partition->log()->housekeeping(housekeeping_conf).get();

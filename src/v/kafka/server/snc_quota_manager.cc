@@ -142,7 +142,7 @@ quota_t node_to_shard_quota(const std::optional<quota_t> node_quota) {
 
 auto update_node_bucket(
   ssx::sharded_ptr<kafka::snc_quota_manager::bucket_t>& b,
-  config::binding<std::optional<int64_t>> const& cfg) {
+  const config::binding<std::optional<int64_t>>& cfg) {
     if (!cfg().has_value()) {
         return b.reset();
     }
@@ -934,8 +934,8 @@ void snc_quota_manager::update_balance_config() {
 } // namespace kafka
 
 struct parseless_formatter {
-    constexpr auto parse(fmt::format_parse_context& ctx)
-      -> decltype(ctx.begin()) {
+    constexpr auto
+    parse(fmt::format_parse_context& ctx) -> decltype(ctx.begin()) {
         return ctx.begin();
     }
 };

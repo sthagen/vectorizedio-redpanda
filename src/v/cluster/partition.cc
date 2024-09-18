@@ -239,7 +239,7 @@ partition_cloud_storage_status partition::get_cloud_storage_status() const {
         // Calculate local space usage that does not overlap with cloud space
         const auto local_space_excl = status.cloud_log_last_offset
                                         ? _raft->log()->size_bytes_after_offset(
-                                          manifest.get_last_offset())
+                                            manifest.get_last_offset())
                                         : status.local_log_size_bytes;
 
         status.total_log_size_bytes = status.cloud_log_size_bytes
@@ -747,7 +747,7 @@ uint64_t partition::non_log_disk_size_bytes() const {
     _raft->stm_manager()->for_each_stm(
       [this, &stm_local_size](
         const ss::sstring& name, const raft::state_machine_base& stm) {
-          auto const sz = stm.get_local_state_size();
+          const auto sz = stm.get_local_state_size();
           vlog(
             clusterlog.trace,
             "local non-log disk size of {} stm {} = {} bytes",
@@ -782,7 +782,7 @@ ss::future<> partition::update_configuration(topic_properties properties) {
     auto old_retention_ms = old_ntp_config.has_overrides()
                               ? old_ntp_config.get_overrides().retention_time
                               : tristate<std::chrono::milliseconds>(
-                                std::nullopt);
+                                  std::nullopt);
     auto new_retention_ms = new_ntp_config.retention_time;
 
     auto old_retention_bytes

@@ -1540,7 +1540,7 @@ consensus::do_start(std::optional<xshard_transfer_state> xst_state) {
             }
         }
 
-        auto const last_applied = read_last_applied();
+        const auto last_applied = read_last_applied();
         if (last_applied > lstats.dirty_offset) {
             vlog(
               _ctxlog.error,
@@ -1598,7 +1598,7 @@ ss::future<> consensus::write_last_applied(model::offset o) {
      * In order to keep an invariant that: 'last applied offset MUST be
      * readable' we limit it here to committed (leader flushed) offset.
      */
-    auto const limited_offset = std::min(o, _flushed_offset);
+    const auto limited_offset = std::min(o, _flushed_offset);
     auto key = last_applied_key();
     iobuf val = reflection::to_iobuf(limited_offset);
     return _storage.kvs().put(
@@ -1972,7 +1972,8 @@ consensus::do_append_entries(append_entries_request&& r) {
       = lstats.dirty_offset == request_metadata.prev_log_index
           ? lstats.dirty_offset_term // use term from lstats
           : get_term(model::offset(
-            request_metadata.prev_log_index)); // lookup for request term in log
+              request_metadata
+                .prev_log_index)); // lookup for request term in log
     // We can only check prev_log_term for entries that are present in the
     // log. When leader installed snapshot on the follower we may require to
     // skip the term check as term of prev_log_idx may not be available.

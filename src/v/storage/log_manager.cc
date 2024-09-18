@@ -95,10 +95,10 @@ log_config::log_config(
   with_cache with,
   std::optional<file_sanitize_config> file_cfg) noexcept
   : log_config(
-    std::move(directory),
-    segment_size,
-    compaction_priority,
-    std::move(file_cfg)) {
+      std::move(directory),
+      segment_size,
+      compaction_priority,
+      std::move(file_cfg)) {
     cache = with;
 }
 
@@ -275,6 +275,8 @@ log_manager::housekeeping_scan(model::timestamp collection_threshold) {
           collection_threshold,
           _config.retention_bytes(),
           current_log.handle->stm_manager()->max_collectible_offset(),
+          /*TODO: current_log.handle->config().tombstone_retention_ms()*/
+          std::nullopt,
           _config.compaction_priority,
           _abort_source,
           std::move(ntp_sanitizer_cfg),
@@ -656,8 +658,8 @@ ss::future<> remove_orphan_partition_files(
               vlog(stlog.info, "Cleaning up ntp directory {} ", ntp_directory);
               return ss::recursive_remove_directory(ntp_directory)
                 .handle_exception_type([ntp_directory](
-                                         std::filesystem::
-                                           filesystem_error const& err) {
+                                         const std::filesystem::
+                                           filesystem_error& err) {
                     vlog(
                       stlog.error,
                       "Exception while cleaning orphan files for {} Error: {}",
@@ -713,7 +715,7 @@ ss::future<> log_manager::remove_orphan_files(
                       topic_directory.string());
                 })
                 .handle_exception_type(
-                  [](std::filesystem::filesystem_error const& err) {
+                  [](const std::filesystem::filesystem_error& err) {
                       auto lvl = err.code()
                                      == std::errc::no_such_file_or_directory
                                    ? ss::log_level::trace
@@ -726,7 +728,7 @@ ss::future<> log_manager::remove_orphan_files(
                   });
           })
           .handle_exception_type(
-            [](std::filesystem::filesystem_error const& err) {
+            [](const std::filesystem::filesystem_error& err) {
                 vlog(
                   stlog.error, "Exception while cleaning orphan files {}", err);
             });

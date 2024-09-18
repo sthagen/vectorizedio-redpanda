@@ -181,10 +181,9 @@ security::audit::authentication_event_options make_authn_event_options(
         .name = auth_result.get_username().empty() ? "{{anonymous}}"
                                                    : auth_result.get_username(),
         .type_id = auth_result.is_authenticated()
-                     ? (
-                       auth_result.is_superuser()
-                         ? security::audit::user::type::admin
-                         : security::audit::user::type::user)
+                     ? (auth_result.is_superuser()
+                          ? security::audit::user::type::admin
+                          : security::audit::user::type::user)
                      : security::audit::user::type::unknown}};
 }
 
@@ -672,7 +671,7 @@ void admin_server::rearm_log_level_timer() {
 
     auto reset_values = _log_level_resets | std::views::values;
     auto& lvl_rst = *std::ranges::min_element(
-      reset_values, std::less<>{}, [](level_reset const& l) {
+      reset_values, std::less<>{}, [](const level_reset& l) {
           return l.expires.value_or(ss::timer<>::clock::time_point::max());
       });
     if (lvl_rst.expires.has_value()) {
@@ -699,7 +698,7 @@ void admin_server::log_level_timer_handler() {
 }
 
 ss::future<ss::httpd::redirect_exception> admin_server::redirect_to_leader(
-  ss::http::request& req, model::ntp const& ntp) const {
+  ss::http::request& req, const model::ntp& ntp) const {
     auto leader_id_opt = _metadata_cache.local().get_leader_id(ntp);
 
     if (!leader_id_opt.has_value()) {
@@ -783,7 +782,7 @@ ss::future<ss::httpd::redirect_exception> admin_server::redirect_to_leader(
         auto match_i = std::find_if(
           kafka_endpoints.begin(),
           kafka_endpoints.end(),
-          [req_hostname](model::broker_endpoint const& be) {
+          [req_hostname](const model::broker_endpoint& be) {
               return be.address.host() == req_hostname;
           });
         if (match_i != kafka_endpoints.end()) {
@@ -1026,7 +1025,7 @@ get_brokers(cluster::controller* const controller) {
 ss::future<> admin_server::throw_on_error(
   ss::http::request& req,
   std::error_code ec,
-  model::ntp const& ntp,
+  const model::ntp& ntp,
   model::node_id id) const {
     if (!ec) {
         co_return;
@@ -1472,11 +1471,12 @@ void admin_server::register_config_routes() {
             name,
             cur_level,
             new_level,
-            expires_v / 1s > 0 ? fmt::format(
-              "{}s",
-              std::chrono::duration_cast<std::chrono::seconds>(expires_v)
-                .count())
-                               : "NEVER");
+            expires_v / 1s > 0
+              ? fmt::format(
+                  "{}s",
+                  std::chrono::duration_cast<std::chrono::seconds>(expires_v)
+                    .count())
+              : "NEVER");
 
           ss::global_logger_registry().set_logger_level(name, new_level);
 
@@ -1552,10 +1552,10 @@ join_properties(const std::vector<std::reference_wrapper<
  * checks, so for the moment we just do the checks here by hand.
  */
 void config_multi_property_validation(
-  ss::sstring const& username,
+  const ss::sstring& username,
   pandaproxy::schema_registry::api* schema_registry,
-  cluster::config_update_request const& req,
-  config::configuration const& updated_config,
+  const cluster::config_update_request& req,
+  const config::configuration& updated_config,
   std::map<ss::sstring, ss::sstring>& errors) {
     absl::flat_hash_set<ss::sstring> modified_keys;
     for (const auto& i : req.upsert) {
@@ -1698,6 +1698,14 @@ void config_multi_property_validation(
         errors[ss::sstring(name)] = ssx::sformat(
           "{} requires schema_registry to be enabled in redpanda.yaml", name);
     }
+
+    // cloud_storage_cache_size/size_percent validation
+    if (auto invalid_cache = cloud_storage::cache::validate_cache_config(
+          updated_config);
+        invalid_cache.has_value()) {
+        auto name = ss::sstring(updated_config.cloud_storage_cache_size.name());
+        errors[name] = invalid_cache.value();
+    }
 }
 } // namespace
 
@@ -1750,7 +1758,7 @@ void admin_server::register_cluster_config_routes() {
       ss::httpd::cluster_config_json::patch_cluster_config,
       [this](
         std::unique_ptr<ss::http::request> req,
-        request_auth_result const& auth_state) {
+        const request_auth_result& auth_state) {
           return patch_cluster_config_handler(std::move(req), auth_state);
       });
 }
@@ -1758,7 +1766,7 @@ void admin_server::register_cluster_config_routes() {
 ss::future<ss::json::json_return_type>
 admin_server::patch_cluster_config_handler(
   std::unique_ptr<ss::http::request> req,
-  request_auth_result const& auth_state) {
+  const request_auth_result& auth_state) {
     static thread_local auto cluster_config_validator(
       make_cluster_config_validator());
     auto doc = co_await parse_json_body(req.get());
@@ -1844,7 +1852,7 @@ admin_server::patch_cluster_config_handler(
                         upsert_no_op_names.insert(yaml_name);
                     }
                 }
-            } catch (YAML::BadConversion const& e) {
+            } catch (const YAML::BadConversion& e) {
                 // Be helpful, and give the user an example of what
                 // the setting should look like, if we have one.
                 ss::sstring example;

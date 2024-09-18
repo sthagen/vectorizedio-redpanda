@@ -31,15 +31,15 @@ using namespace std::chrono_literals;
 
 configuration::configuration()
   : log_segment_size(
-    *this,
-    "log_segment_size",
-    "Default log segment size in bytes for topics which do not set "
-    "segment.bytes",
-    {.needs_restart = needs_restart::no,
-     .example = "2147483648",
-     .visibility = visibility::tunable},
-    128_MiB,
-    {.min = 1_MiB})
+      *this,
+      "log_segment_size",
+      "Default log segment size in bytes for topics which do not set "
+      "segment.bytes",
+      {.needs_restart = needs_restart::no,
+       .example = "2147483648",
+       .visibility = visibility::tunable},
+      128_MiB,
+      {.min = 1_MiB})
   , log_segment_size_min(
       *this,
       "log_segment_size_min",
@@ -418,7 +418,7 @@ configuration::configuration()
       "the log will be automatically force flushed.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       100ms,
-      [](auto const& v) -> std::optional<ss::sstring> {
+      [](const auto& v) -> std::optional<ss::sstring> {
           // maximum duration imposed by serde serialization.
           if (v < 1ms || v > serde::max_serializable_ms) {
               return fmt::format(
@@ -3280,7 +3280,7 @@ configuration::configuration()
       "provider.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
       "https://auth.prd.cloud.redpanda.com/.well-known/openid-configuration",
-      [](auto const& v) -> std::optional<ss::sstring> {
+      [](const auto& v) -> std::optional<ss::sstring> {
           auto res = security::oidc::parse_url(v);
           if (res.has_error()) {
               return res.error().message();

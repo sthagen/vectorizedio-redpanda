@@ -24,7 +24,7 @@ public:
     unauthorized_user_exception(
       security::credential_user username, const std::string& msg)
       : ss::httpd::base_exception(
-        msg, ss::http::reply::status_type::unauthorized)
+          msg, ss::http::reply::status_type::unauthorized)
       , _username(std::move(username)) {}
     const security::credential_user& get_username() const { return _username; }
 
@@ -65,7 +65,7 @@ public:
       , _sasl_mechanism(std::move(sasl_mechanism))
       , _authenticated(true)
       , _superuser(is_superuser)
-      , _auth_required(true){};
+      , _auth_required(true) {};
 
     /**
      * Anonymous user.  They may still be considered authenticated/superuser
@@ -78,7 +78,7 @@ public:
       auth_required is_auth_required)
       : _authenticated(is_authenticated)
       , _superuser(is_superuser)
-      , _auth_required(is_auth_required){};
+      , _auth_required(is_auth_required) {};
 
     ~request_auth_result() noexcept(false);
 
@@ -97,9 +97,9 @@ public:
      */
     void pass();
 
-    ss::sstring const& get_username() const { return _username; }
-    ss::sstring const& get_password() const { return _password; }
-    ss::sstring const& get_sasl_mechanism() const { return _sasl_mechanism; }
+    const ss::sstring& get_username() const { return _username; }
+    const ss::sstring& get_password() const { return _password; }
+    const ss::sstring& get_sasl_mechanism() const { return _sasl_mechanism; }
 
     bool is_authenticated() const { return _authenticated; };
     bool is_superuser() const { return _superuser; }
@@ -126,8 +126,8 @@ public:
 
 private:
     request_auth_result do_authenticate(
-      ss::http::request const& req,
-      security::credential_store const& cred_store,
+      const ss::http::request& req,
+      const security::credential_store& cred_store,
       bool require_auth);
 
     cluster::controller* _controller{nullptr};

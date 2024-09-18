@@ -228,6 +228,7 @@ public:
     iobuf release_value() { return std::exchange(_value, {}); }
     iobuf share_value() { return _value.share(0, _value.size_bytes()); }
     bool has_value() const { return _val_size >= 0; }
+    bool is_tombstone() const { return !has_value(); }
 
     const std::vector<record_header>& headers() const { return _headers; }
     std::vector<record_header>& headers() { return _headers; }
@@ -360,7 +361,7 @@ public:
     record_batch_attributes& operator|=(model::compression c) {
         // clang-format off
         _attributes |=
-        static_cast<std::underlying_type_t<model::compression>>(c) 
+        static_cast<std::underlying_type_t<model::compression>>(c)
             & record_batch_attributes::compression_mask;
         // clang-format on
         return *this;
@@ -377,7 +378,7 @@ public:
     friend inline void read_nested(
       iobuf_parser& in,
       record_batch_attributes& attrs,
-      size_t const bytes_left_limit) {
+      const size_t bytes_left_limit) {
         attrs._attributes = serde::read_nested<uint64_t>(in, bytes_left_limit);
     }
 

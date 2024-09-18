@@ -32,7 +32,10 @@
 struct manual_deletion_fixture : public raft_test_fixture {
     manual_deletion_fixture()
       : gr(
-        raft::group_id(0), 3, model::cleanup_policy_bitflags::deletion, 1_KiB) {
+          raft::group_id(0),
+          3,
+          model::cleanup_policy_bitflags::deletion,
+          1_KiB) {
         config::shard_local_cfg().log_segment_size_min.set_value(
           std::optional<uint64_t>());
         gr.enable_all();
@@ -112,6 +115,7 @@ struct manual_deletion_fixture : public raft_test_fixture {
                       retention_timestamp,
                       100_MiB,
                       model::offset::max(),
+                      std::nullopt,
                       ss::default_priority_class(),
                       as,
                       storage::ntp_sanitizer_config{.sanitize_only = true}))

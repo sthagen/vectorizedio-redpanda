@@ -214,14 +214,14 @@ ss::future<> consumer::subscribe(chunked_vector<model::topic> topics) {
 void consumer::on_leader_join(const join_group_response& res) {
     _members.clear();
     _members.reserve(res.data.members.size());
-    for (auto const& m : res.data.members) {
+    for (const auto& m : res.data.members) {
         _members.push_back(m.member_id);
     }
     std::sort(_members.begin(), _members.end());
     _members.erase_to_end(std::unique(_members.begin(), _members.end()));
 
     _subscribed_topics.clear();
-    for (auto const& m : res.data.members) {
+    for (const auto& m : res.data.members) {
         protocol::decoder r(bytes_to_iobuf(m.metadata));
         auto topics = r.read_array([](protocol::decoder& reader) {
             return model::topic(reader.read_string());
@@ -281,7 +281,7 @@ consumer::get_subscribed_topic_metadata() {
 ss::future<> consumer::sync() {
     return (is_leader() ? get_subscribed_topic_metadata()
                         : ss::make_ready_future<
-                          chunked_vector<metadata_response::topic>>())
+                            chunked_vector<metadata_response::topic>>())
       .then([this](chunked_vector<metadata_response::topic> topics) {
           auto req_builder = [me{shared_from_this()},
                               topics{std::move(topics)}]() {
@@ -367,10 +367,10 @@ consumer::offset_fetch(std::vector<offset_fetch_request_topic> topics) {
       .then([this](offset_fetch_response res) {
           return res.data.error_code == error_code::none
                    ? ss::make_ready_future<offset_fetch_response>(
-                     std::move(res))
+                       std::move(res))
                    : ss::make_exception_future<offset_fetch_response>(
-                     consumer_error(
-                       _group_id, _member_id, res.data.error_code));
+                       consumer_error(
+                         _group_id, _member_id, res.data.error_code));
       });
 }
 
@@ -420,7 +420,7 @@ ss::future<fetch_response> consumer::fetch(
     refresh_inactivity_timer();
     // Split requests by broker
     broker_reqs_t broker_reqs;
-    for (auto const& [t, ps] : _assignment) {
+    for (const auto& [t, ps] : _assignment) {
         for (const auto& p : ps) {
             auto tp = model::topic_partition{t, p};
             auto leader = co_await _topic_cache.leader(tp);

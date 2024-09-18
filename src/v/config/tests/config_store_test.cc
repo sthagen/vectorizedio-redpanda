@@ -47,11 +47,11 @@ struct test_config : public config::config_store {
 
     test_config()
       : optional_int(
-        *this,
-        "optional_int",
-        "An optional int value",
-        {.visibility = config::visibility::tunable},
-        100)
+          *this,
+          "optional_int",
+          "An optional int value",
+          {.visibility = config::visibility::tunable},
+          100)
       , required_string(
           *this,
           "required_string",
@@ -536,7 +536,7 @@ SEASTAR_THREAD_TEST_CASE(property_bind_with_multiple_config_stores) {
         // admin/server.cc::patch_cluster_config)
         auto cfg_tmp = test_config();
         // Populate the temporary config object with existing values
-        cfg.for_each([&](auto const& p) {
+        cfg.for_each([&](const auto& p) {
             auto& tmp_p = cfg_tmp.get(p.name());
             tmp_p = p;
         });

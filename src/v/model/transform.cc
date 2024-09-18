@@ -275,7 +275,7 @@ transform_report::transform_report(transform_metadata meta)
 transform_report::transform_report(
   transform_metadata meta, absl::btree_map<model::partition_id, processor> map)
   : metadata(std::move(meta))
-  , processors(std::move(map)){};
+  , processors(std::move(map)) {};
 
 void transform_report::add(processor processor) {
     processors.insert_or_assign(processor.id, processor);
@@ -437,7 +437,7 @@ void tag_invoke(
   serde::tag_t<serde::read_tag>,
   iobuf_parser& in,
   wasm_binary_iobuf& t,
-  std::size_t const bytes_left_limit) {
+  const std::size_t bytes_left_limit) {
     auto size = serde::read_nested<serde::serde_size_t>(in, bytes_left_limit);
     t = wasm_binary_iobuf(std::make_unique<iobuf>(in.share(size)));
 }

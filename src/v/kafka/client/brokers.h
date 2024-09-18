@@ -34,10 +34,10 @@ class brokers {
 
 public:
     explicit brokers(const configuration& config)
-      : _config(config){};
+      : _config(config) {};
     brokers(const brokers&) = delete;
     brokers(brokers&&) = default;
-    brokers& operator=(brokers const&) = delete;
+    brokers& operator=(const brokers&) = delete;
     brokers& operator=(brokers&&) = delete;
     ~brokers() noexcept = default;
 

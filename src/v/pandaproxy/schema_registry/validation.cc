@@ -142,8 +142,8 @@ ss::future<std::optional<ss::sstring>> get_record_name(
 template<typename T>
 T combine(
   pandaproxy::schema_registry::schema_id_validation_mode mode,
-  std::optional<T> const& redpanda,
-  std::optional<T> const& compat,
+  const std::optional<T>& redpanda,
+  const std::optional<T>& compat,
   T dflt) {
     switch (mode) {
     case pandaproxy::schema_registry::schema_id_validation_mode::none:
@@ -192,8 +192,10 @@ public:
           subject_name_strategy::topic_name)} {}
 
     auto validate_field(
-      field field, model::topic topic, subject_name_strategy sns, iobuf buf)
-      -> ss::future<bool> {
+      field field,
+      model::topic topic,
+      subject_name_strategy sns,
+      iobuf buf) -> ss::future<bool> {
         iobuf_parser parser(std::move(buf));
 
         if (parser.bytes_left() < 5) {

@@ -33,8 +33,8 @@ class read_replica_e2e_fixture
 public:
     read_replica_e2e_fixture()
       : redpanda_thread_fixture(
-        redpanda_thread_fixture::init_cloud_storage_tag{},
-        httpd_port_number()) {
+          redpanda_thread_fixture::init_cloud_storage_tag{},
+          httpd_port_number()) {
         // No expectations: tests will PUT and GET organically.
         set_expectations_and_listen({});
         wait_for_controller_leadership().get();
@@ -119,8 +119,8 @@ FIXTURE_TEST(test_read_replica_basic_sync, read_replica_e2e_fixture) {
                                     topic_name, model::partition_id(0), next)
                                   .get();
         BOOST_REQUIRE(!consumed_records.empty());
-        for (const auto& [k, v] : consumed_records) {
-            BOOST_REQUIRE_EQUAL(k, ssx::sformat("key{}", next()));
+        for (const auto& kv : consumed_records) {
+            BOOST_REQUIRE_EQUAL(kv.key, ssx::sformat("key{}", next()));
             next += model::offset(1);
         }
     }
