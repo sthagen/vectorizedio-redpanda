@@ -55,6 +55,7 @@ redpanda_cc_library(
         "datatypes.h",
     ],
     include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
         "//src/v/container:fragmented_vector",
@@ -426,6 +427,7 @@ redpanda_cc_library(
         ":manifest_entry",
         ":schema",
         "//src/v/model",
+        "@abseil-cpp//absl/container:btree",
     ],
 )
 
@@ -439,9 +441,9 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":json_utils",
-        "//src/v/container:chunked_hash_map",
         "//src/v/model",
         "//src/v/strings:string_switch",
+        "@abseil-cpp//absl/container:btree",
     ],
     include_prefix = "iceberg",
     deps = [
@@ -613,6 +615,7 @@ redpanda_cc_library(
         "//src/v/bytes:iobuf_parser",
     ],
     include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
     deps = [
         "//src/v/bytes:iobuf",
         "//src/v/container:fragmented_vector",
@@ -639,5 +642,25 @@ redpanda_cc_library(
         ":datatypes",
         ":values",
         "@avro",
+    ],
+)
+
+redpanda_cc_library(
+    name = "values_bytes",
+    srcs = [
+        "values_bytes.cc",
+    ],
+    hdrs = [
+        "values_bytes.h",
+    ],
+    implementation_deps = [
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/utils:uuid",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":datatypes",
+        ":values",
+        "//src/v/bytes",
     ],
 )

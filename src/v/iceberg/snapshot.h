@@ -12,6 +12,8 @@
 #include "iceberg/schema.h"
 #include "model/timestamp.h"
 
+#include <absl/container/btree_map.h>
+
 namespace iceberg {
 
 enum class snapshot_operation {
@@ -41,7 +43,7 @@ struct snapshot_summary {
     // NOTE: these aren't necessarily important to Redpanda's Iceberg write
     // path, but are still important to serialize, as they may be used for
     // optimization by Iceberg readers.
-    chunked_hash_map<ss::sstring, ss::sstring> other;
+    absl::btree_map<ss::sstring, ss::sstring> other;
 
     friend bool operator==(const snapshot_summary&, const snapshot_summary&)
       = default;
@@ -77,6 +79,39 @@ struct snapshot {
     std::optional<schema::id_t> schema_id;
 
     friend bool operator==(const snapshot&, const snapshot&) = default;
+};
+
+// The type of snapshot reference.
+enum class snapshot_ref_type {
+    // A label for an individual snapshot.
+    tag,
+
+    // A mutable named reference. Can be updated by committing a new snapshot
+    // as a branch's referened snapshot.
+    branch,
+};
+
+// Represents a named reference to a snapshot.
+// NOTE: the name of the reference is tracked outside of the reference itself,
+// e.g. in table metadata.
+struct snapshot_reference {
+    snapshot_id snapshot_id;
+    snapshot_ref_type type;
+
+    // For snapshot references except the 'main' branch, a positive number for
+    // the max age of the snapshot reference to keep while expiring snapshots.
+    std::optional<int64_t> max_ref_age_ms;
+
+    // For branch type only, a positive number for the max age of snapshots to
+    // keep when expiring, including the latest snapshot.
+    std::optional<int64_t> max_snapshot_age_ms;
+
+    // For branch type only, a positive number for the minimum number of
+    // snapshots to keep in a branch while expiring snapshots.
+    std::optional<int32_t> min_snapshots_to_keep;
+
+    friend bool operator==(const snapshot_reference&, const snapshot_reference&)
+      = default;
 };
 
 } // namespace iceberg
