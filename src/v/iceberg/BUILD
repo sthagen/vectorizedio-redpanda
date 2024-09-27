@@ -20,6 +20,23 @@ avro_cc_library(
 )
 
 redpanda_cc_library(
+    name = "action",
+    srcs = [
+        "action.cc",
+    ],
+    hdrs = [
+        "action.h",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":table_requirement",
+        ":table_update",
+        "//src/v/base",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "avro_utils",
     hdrs = [
         "avro_utils.h",
@@ -542,6 +559,28 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "table_update_applier",
+    srcs = [
+        "table_update_applier.cc",
+    ],
+    hdrs = [
+        "table_update_applier.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        ":schema",
+        "//src/v/base",
+        "//src/v/container:chunked_hash_map",
+        "//src/v/container:fragmented_vector",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":table_metadata",
+        ":table_update",
+    ],
+)
+
+redpanda_cc_library(
     name = "time_transform_visitor",
     srcs = [
         "time_transform_visitor.cc",
@@ -552,6 +591,31 @@ redpanda_cc_library(
     include_prefix = "iceberg",
     deps = [
         ":values",
+    ],
+)
+
+redpanda_cc_library(
+    name = "transaction",
+    srcs = [
+        "transaction.cc",
+    ],
+    hdrs = [
+        "transaction.h",
+    ],
+    implementation_deps = [
+        ":table_update_applier",
+        ":update_schema_action",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":action",
+        ":schema",
+        ":table_metadata",
+        ":table_requirement",
+        ":table_update",
+        "//src/v/base",
+        "//src/v/container:fragmented_vector",
+        "@seastar",
     ],
 )
 
@@ -599,6 +663,26 @@ redpanda_cc_library(
         ":time_transform_visitor",
         ":transform",
         ":values",
+    ],
+)
+
+redpanda_cc_library(
+    name = "update_schema_action",
+    srcs = [
+        "update_schema_action.cc",
+    ],
+    hdrs = [
+        "update_schema_action.h",
+    ],
+    implementation_deps = [
+        ":table_requirement",
+        ":table_update",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":action",
+        ":schema",
+        ":table_metadata",
     ],
 )
 
