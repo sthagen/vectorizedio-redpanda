@@ -253,7 +253,10 @@ class FullDiskReclaimTest(RedpandaTest):
     """
     Test that full disk alert triggers eager gc to reclaim space
     """
-    topics = (TopicSpec(partition_count=10,
+    partition_count = 10
+    log_segment_size = 1048576
+
+    topics = (TopicSpec(partition_count=partition_count,
                         retention_bytes=1,
                         retention_ms=1,
                         cleanup_policy=TopicSpec.CLEANUP_DELETE), )
@@ -261,7 +264,8 @@ class FullDiskReclaimTest(RedpandaTest):
     def __init__(self, test_ctx):
         extra_rp_conf = dict(
             log_compaction_interval_ms=24 * 60 * 60 * 1000,
-            log_segment_size=1048576,
+            log_segment_size=self.log_segment_size,
+            log_segment_size_jitter_percent=0,
         )
         super().__init__(test_context=test_ctx, extra_rp_conf=extra_rp_conf)
 
@@ -281,18 +285,23 @@ class FullDiskReclaimTest(RedpandaTest):
         nbytes = lambda mb: mb * 2**20
         node = self.redpanda.nodes[0]
 
+        produce_size = 3 * self.partition_count * self.log_segment_size
+        expected_size_after_gc = self.partition_count * self.log_segment_size + nbytes(
+            1)
+        assert expected_size_after_gc < produce_size
+
         def observed_data_size(pred):
             observed = self.redpanda.data_stat(node)
             observed_total = sum(s for path, s in observed
                                  if path.parts[0] == 'kafka')
             return pred(observed_total)
 
-        # write around 30 megabytes into the topic
-        produce_total_bytes(self.redpanda, self.topic, nbytes(100))
+        # write into the topic
+        produce_total_bytes(self.redpanda, self.topic, produce_size)
 
         # wait until all that data shows up. add some fuzz factor to avoid
         # timeouts due to placement skew or other such issues.
-        wait_until(lambda: observed_data_size(lambda s: s > nbytes(25)),
+        wait_until(lambda: observed_data_size(lambda s: s >= produce_size),
                    timeout_sec=30,
                    backoff_sec=2)
 
@@ -302,7 +311,7 @@ class FullDiskReclaimTest(RedpandaTest):
 
         # wait until all that data shows up. add some fuzz factor to avoid
         # timeouts due to placement skew or other such issues.
-        wait_until(lambda: observed_data_size(lambda s: s > nbytes(25)),
+        wait_until(lambda: observed_data_size(lambda s: s >= produce_size),
                    timeout_sec=30,
                    backoff_sec=2)
 
@@ -312,10 +321,15 @@ class FullDiskReclaimTest(RedpandaTest):
         full_disk = FullDiskHelper(self.logger, self.redpanda)
         full_disk.trigger_low_space(node=node)
 
-        # now wait until the data drops below 1 mb
-        wait_until(lambda: observed_data_size(lambda s: s < nbytes(1)),
-                   timeout_sec=10,
-                   backoff_sec=2)
+        # now wait until the data drops
+        # the expected size is at most one segment for each partition and a
+        # bit extra for stm snapshots. although we expect the subsystem to
+        # reclaim all segments there are other internal systems
+        # (e.g.leadership balancer) which can trigger writes to the partitions.
+        wait_until(
+            lambda: observed_data_size(lambda s: s < expected_size_after_gc),
+            timeout_sec=10,
+            backoff_sec=2)
 
 
 class LocalDiskReportTimeTest(RedpandaTest):
@@ -333,6 +347,8 @@ class LocalDiskReportTimeTest(RedpandaTest):
     def test_target_min_capacity_wanted_time_based(self):
         admin = Admin(self.redpanda)
         default_segment_size = admin.get_cluster_config()["log_segment_size"]
+        storage_reserve_min_segments = admin.get_cluster_config(
+        )["storage_reserve_min_segments"]
 
         # produce roughly 30mb at 0.5mb/sec
         kafka_tools = KafkaCliTools(self.redpanda)
@@ -340,28 +356,37 @@ class LocalDiskReportTimeTest(RedpandaTest):
                             30 * 1024,
                             1024,
                             throughput=500,
-                            acks=-1)
+                            acks=-1,
+                            linger_ms=50)
 
         node = self.redpanda.nodes[0]
         reported = admin.get_local_storage_usage(
             node)["target_min_capacity_wanted"]
 
-        # params. the size is about 900k larger than what was written,
-        # attributable to per record overheads etc... and determined emperically
-        # by looking at trace log stats.
+        # The size is slightly larger than what was written, attributable to
+        # per record overheads, indices, fallocation, etc... The expected size
+        # is determined empirically by looking at trace log stats.
         size = 32664482
         time = 61
         retention = 3600
         expected = retention * (size / time)
 
-        # factor in the 2 segments worth of space for controller log
-        diff = abs(reported - expected - 2 * default_segment_size)
+        # Factor in the full segments worth of space for controller log.
+        # This mirrors the math in disk_log_impl.cc
+        controller_want_size = storage_reserve_min_segments * default_segment_size
 
-        # there is definitely going to be some fuzz factor needed here and may
-        # need updated, but after many runs 50mb was a good amount of slack.
-        assert diff <= (
-            100 * 2**20
-        ), f"diff {diff} reported {reported} expected {expected} default seg size {default_segment_size}"
+        diff = reported - controller_want_size - expected
+
+        # There is definitely going to be some fuzz factor needed here and may
+        # need updated.
+        diff_threshold = 100 * 2**20
+
+        self.logger.info(
+            f"{diff=} {diff_threshold=} {reported=} {expected=} {controller_want_size=}"
+        )
+        assert abs(
+            diff
+        ) <= diff_threshold, f"abs({diff=}) <= {diff_threshold=} {reported=} {expected=} {controller_want_size=}"
 
 
 class LocalDiskReportTest(RedpandaTest):
