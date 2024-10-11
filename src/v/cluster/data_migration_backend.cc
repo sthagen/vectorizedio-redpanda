@@ -790,15 +790,25 @@ ss::future<> backend::advance(id migration_id, state sought_state) {
         ec = co_await _frontend.update_migration_state(
           migration_id, sought_state);
     }
+    bool success = ec == make_error_code(errc::success);
     vlogl(
       dm_log,
-      (ec == make_error_code(errc::success)) ? ss::log_level::debug
-                                             : ss::log_level::warn,
+      success ? ss::log_level::debug : ss::log_level::warn,
       "request to advance migration {} into state {} has "
       "been processed with error code {}",
       migration_id,
       sought_state,
       ec);
+    if (!success) {
+        co_await ss::sleep_abortable(5s, _as);
+        auto it = _advance_requests.find(migration_id);
+        if (
+          it != _advance_requests.end()
+          && it->second.sought_state == sought_state) {
+            it->second.sent = false;
+            wakeup();
+        }
+    }
 }
 
 void backend::spawn_advances() {
@@ -833,10 +843,6 @@ ss::future<> backend::handle_raft0_leadership_update() {
                 co_await reconcile_existing_topic(
                   nt, tstate, id, mrstate.scope, false);
             }
-        }
-        // resend advance requests
-        for (auto& [migration_id, advance_info] : _advance_requests) {
-            advance_info.sent = false;
         }
         wakeup();
     } else {
@@ -1549,7 +1555,7 @@ backend::work_scope backend::get_work_scope(
     case state::cut_over:
         return {state::finished, false, true};
     case state::canceling:
-        return {state::cancelled, false, true};
+        return {state::cancelled, true, true};
     default:
         return {{}, false, false};
     };
