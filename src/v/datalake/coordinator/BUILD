@@ -33,6 +33,33 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "coordinator_manager",
+    srcs = [
+        "coordinator_manager.cc",
+    ],
+    hdrs = [
+        "coordinator_manager.h",
+    ],
+    implementation_deps = [
+        "//src/v/base",
+        "//src/v/datalake:logger",
+        "//src/v/storage:record_batch_builder",
+    ],
+    include_prefix = "datalake/coordinator",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":coordinator",
+        ":state_update",
+        ":stm",
+        "//src/v/cluster",
+        "//src/v/cluster:notification",
+        "//src/v/model",
+        "//src/v/raft",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "data_file",
     srcs = [
         "data_file.cc",
@@ -41,10 +68,59 @@ redpanda_cc_library(
         "data_file.h",
     ],
     include_prefix = "datalake/coordinator",
+    visibility = [
+        ":__subpackages__",
+        "//src/v/datalake:__pkg__",
+    ],
     deps = [
         "//src/v/base",
         "//src/v/serde",
         "@fmt",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "file_committer",
+    hdrs = [
+        "file_committer.h",
+    ],
+    include_prefix = "datalake/coordinator",
+    deps = [
+        ":state_update",
+        "//src/v/base",
+        "//src/v/container:fragmented_vector",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "iceberg_file_committer",
+    srcs = [
+        "iceberg_file_committer.cc",
+    ],
+    hdrs = [
+        "iceberg_file_committer.h",
+    ],
+    implementation_deps = [
+        ":state",
+        "//src/v/base",
+        "//src/v/datalake:logger",
+        "//src/v/datalake:table_definition",
+        "//src/v/iceberg:manifest_entry",
+        "//src/v/iceberg:partition_key",
+        "//src/v/iceberg:table_metadata",
+        "//src/v/iceberg:transaction",
+        "//src/v/iceberg:values",
+    ],
+    include_prefix = "datalake/coordinator",
+    deps = [
+        ":file_committer",
+        ":state_update",
+        "//src/v/base",
+        "//src/v/container:fragmented_vector",
+        "//src/v/iceberg:catalog",
+        "//src/v/iceberg:manifest_io",
         "@seastar",
     ],
 )
@@ -159,9 +235,12 @@ redpanda_cc_library(
     include_prefix = "datalake/coordinator",
     visibility = ["//visibility:public"],
     deps = [
+        ":coordinator",
+        ":coordinator_manager",
         ":generated_datalake_coordinator_rpc",
         ":model",
         ":stm",
+        ":translated_offset_range",
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/container:fragmented_vector",
