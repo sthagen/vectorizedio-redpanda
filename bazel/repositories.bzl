@@ -167,9 +167,9 @@ def data_dependency():
     http_archive(
         name = "seastar",
         build_file = "//bazel/thirdparty:seastar.BUILD",
-        sha256 = "eefe8af689aac287971738e4d97ed495c7a285a7fe18b1aa8bbbfe025b528e6c",
-        strip_prefix = "seastar-c21f48b4aced07a80308215f7d801503a223d9db",
-        url = "https://github.com/redpanda-data/seastar/archive/c21f48b4aced07a80308215f7d801503a223d9db.tar.gz",
+        sha256 = "948e5f8ad769114a4721c81d5829f675ac51482e4a9a106d57ab313104308666",
+        strip_prefix = "seastar-4350d7960ec5ac8a1cf9274316c8f1ab1896d24e",
+        url = "https://github.com/redpanda-data/seastar/archive/4350d7960ec5ac8a1cf9274316c8f1ab1896d24e.tar.gz",
         patches = ["//bazel/thirdparty:seastar-fortify-source.patch"],
         patch_args = ["-p1"],
     )
@@ -177,9 +177,9 @@ def data_dependency():
     http_archive(
         name = "unordered_dense",
         build_file = "//bazel/thirdparty:unordered_dense.BUILD",
-        sha256 = "98c9d02ff8761d50a2cb6ebd53f78f7d311f6980aef509efdcdaa5f3868ca06c",
-        strip_prefix = "unordered_dense-9338f301522a965309ecec58ce61f54a52fb5c22",
-        url = "https://github.com/redpanda-data/unordered_dense/archive/9338f301522a965309ecec58ce61f54a52fb5c22.tar.gz",
+        sha256 = "8393d08b2a41949c70345926515036df55643e80118b608bcec6f4202d4a3026",
+        strip_prefix = "unordered_dense-f30ed41b58af8c79788e8581fe57a6faf856258e",
+        url = "https://github.com/martinus/unordered_dense/archive/f30ed41b58af8c79788e8581fe57a6faf856258e.tar.gz",
     )
 
     http_archive(
