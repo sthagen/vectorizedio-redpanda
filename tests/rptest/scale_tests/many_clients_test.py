@@ -15,7 +15,7 @@ from rptest.services.cluster import cluster
 from rptest.services.rpk_consumer import RpkConsumer
 
 from rptest.services.producer_swarm import ProducerSwarm
-from ducktape.mark import matrix, ok_to_fail
+from ducktape.mark import matrix, ignore
 
 
 class CompactionMode(str, enum.Enum):
@@ -76,7 +76,7 @@ class ManyClientsTest(RedpandaTest):
         self._test_many_clients(compaction_mode=CompactionMode.REALISTIC)
 
     @cluster(num_nodes=7)
-    @ok_to_fail
+    @ignore
     def test_many_clients_pathological_compaction(self):
         self._test_many_clients(compaction_mode=CompactionMode.PATHOLOGICAL)
 
