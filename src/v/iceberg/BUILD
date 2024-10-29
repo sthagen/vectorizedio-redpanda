@@ -42,6 +42,7 @@ redpanda_cc_library(
         "avro_utils.h",
     ],
     include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
     deps = [
         "//src/v/bytes:iobuf",
         "//src/v/container:fragmented_vector",
@@ -86,6 +87,7 @@ redpanda_cc_library(
         "catalog.h",
     ],
     implementation_deps = [
+        ":logger",
         "@fmt",
     ],
     include_prefix = "iceberg",
@@ -133,6 +135,19 @@ redpanda_cc_library(
         ":json_writer",
         "//src/v/json",
         "//src/v/strings:string_switch",
+    ],
+)
+
+redpanda_cc_library(
+    name = "field_collecting_visitor",
+    hdrs = [
+        "field_collecting_visitor.h",
+    ],
+    include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":datatypes",
+        "//src/v/container:fragmented_vector",
     ],
 )
 
@@ -497,6 +512,9 @@ redpanda_cc_library(
     hdrs = [
         "schema.h",
     ],
+    implementation_deps = [
+        ":field_collecting_visitor",
+    ],
     include_prefix = "iceberg",
     visibility = ["//visibility:public"],
     deps = [
@@ -533,10 +551,12 @@ redpanda_cc_library(
         "schema_avro.h",
     ],
     include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
     deps = [
         ":datatypes",
         "@avro",
         "@fmt",
+        "@seastar",
     ],
 )
 
@@ -954,6 +974,7 @@ redpanda_cc_library(
         "//src/v/bytes:iobuf_parser",
     ],
     include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
     deps = [
         ":datatypes",
         ":values",
