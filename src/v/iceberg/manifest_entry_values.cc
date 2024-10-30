@@ -143,11 +143,11 @@ data_file_content_type content_from_int(int c) {
 iobuf format_to_str(data_file_format f) {
     switch (f) {
     case data_file_format::avro:
-        return iobuf::from("avro");
+        return iobuf::from("AVRO");
     case data_file_format::orc:
-        return iobuf::from("orc");
+        return iobuf::from("ORC");
     case data_file_format::parquet:
-        return iobuf::from("parquet");
+        return iobuf::from("PARQUET");
     }
 }
 
@@ -174,16 +174,25 @@ std::unique_ptr<struct_value> data_file_to_value(const data_file& file) {
       long_value(static_cast<int64_t>(file.file_size_bytes)));
 
     // TODO: serialize the rest of the optional fields.
+    // column_sizes
     ret->fields.emplace_back(std::nullopt);
+    // value_counts
     ret->fields.emplace_back(std::nullopt);
+    // null_value_counts
     ret->fields.emplace_back(std::nullopt);
+    // nan_value_counts
     ret->fields.emplace_back(std::nullopt);
+    // lower_bounds
     ret->fields.emplace_back(std::nullopt);
+    // upper_bounds
     ret->fields.emplace_back(std::nullopt);
+    // key_metadata
     ret->fields.emplace_back(std::nullopt);
+    // split_offsets
     ret->fields.emplace_back(std::nullopt);
+    // equality_ids
     ret->fields.emplace_back(std::nullopt);
-    ret->fields.emplace_back(std::nullopt);
+    // sort_order_id
     ret->fields.emplace_back(std::nullopt);
     return ret;
 }
