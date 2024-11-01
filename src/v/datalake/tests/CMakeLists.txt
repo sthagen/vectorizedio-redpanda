@@ -38,12 +38,17 @@ rp_test(
   GTEST
   BINARY_NAME datalake
   SOURCES
+    record_schema_resolver_test.cc
     parquet_writer_test.cc
     partitioning_writer_test.cc
   LIBRARIES
+    v::bytes
+    v::utils
     v::gtest_main
     v::datalake_writer
     v::iceberg_test_utils
+    v::schema
+    v::schema_test_fixture
   LABELS datalake
 )
 
@@ -157,5 +162,20 @@ rp_test(
     v::datalake_writer
     v::iceberg_test_utils
   LABELS storage
+  ARGS "-- -c 1"
+)
+
+rp_test(
+  UNIT_TEST
+  GTEST
+  USE_CWD
+  BINARY_NAME datalake_avro
+  SOURCES 
+    datalake_avro_tests.cc
+  LIBRARIES
+    v::gtest_main
+    v::datalake_writer
+    v::iceberg_test_utils
+  LABELS datalake
   ARGS "-- -c 1"
 )

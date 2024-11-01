@@ -35,8 +35,10 @@ v_cc_library(
     data_writer_interface.cc
     parquet_writer.cc
     record_multiplexer.cc
+    record_schema_resolver.cc
     schema_registry.cc
     schemaless_translator.cc
+    schema_avro.cc
     schema_protobuf.cc
     partitioning_writer.cc
     protobuf_utils.cc
@@ -47,6 +49,8 @@ v_cc_library(
   DEPS
     v::cloud_io
     v::datalake_common
+    v::pandaproxy_schema_registry
+    v::schema
     v::storage
     Seastar::seastar
     Arrow::arrow_shared

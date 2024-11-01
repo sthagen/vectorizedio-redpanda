@@ -64,6 +64,7 @@ redpanda_cc_library(
     deps = [
         "//src/v/pandaproxy",
         "//src/v/serde",
+        "@boost//:container_hash",
     ],
 )
 
@@ -323,6 +324,25 @@ redpanda_cc_library(
         ":schema_identifier",
         "//src/v/base",
         "//src/v/iceberg:datatypes",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "schema_avro",
+    srcs = [
+        "schema_avro.cc",
+    ],
+    hdrs = [
+        "schema_avro.h",
+    ],
+    include_prefix = "datalake",
+    visibility = [":__subpackages__"],
+    deps = [
+        ":conversion_outcome",
+        "//src/v/iceberg:datatypes",
+        "@avro",
+        "@fmt",
         "@seastar",
     ],
 )
