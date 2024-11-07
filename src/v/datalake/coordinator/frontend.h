@@ -49,8 +49,9 @@ public:
     ss::future<add_translated_data_files_reply> add_translated_data_files(
       add_translated_data_files_request, local_only = local_only::no);
 
-    ss::future<fetch_latest_data_file_reply> fetch_latest_data_file(
-      fetch_latest_data_file_request, local_only = local_only::no);
+    ss::future<fetch_latest_translated_offset_reply>
+      fetch_latest_translated_offset(
+        fetch_latest_translated_offset_request, local_only = local_only::no);
 
 private:
     using proto_t = datalake::coordinator::rpc::impl::
@@ -77,8 +78,12 @@ private:
 
     ss::future<bool> ensure_topic_exists();
 
+    /**
+     * Returns the partition of datalake coordinator topic that
+     * coordinates datalake tasks for this topic partitions.
+     */
     std::optional<model::partition_id>
-    coordinator_partition(const model::topic_partition&) const;
+    coordinator_partition(const model::topic&) const;
 
     ss::future<add_translated_data_files_reply>
     add_translated_data_files_locally(
@@ -86,8 +91,9 @@ private:
       const model::ntp& coordinator_partition,
       ss::shard_id);
 
-    ss::future<fetch_latest_data_file_reply> fetch_latest_data_file_locally(
-      fetch_latest_data_file_request,
+    ss::future<fetch_latest_translated_offset_reply>
+    fetch_latest_translated_offset_locally(
+      fetch_latest_translated_offset_request,
       const model::ntp& coordinator_partition,
       ss::shard_id);
 
