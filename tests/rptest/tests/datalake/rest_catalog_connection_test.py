@@ -31,10 +31,6 @@ class RestCatalogConnectionTest(RedpandaTest):
         self.catalog_service = IcebergRESTCatalog(
             test_context,
             cloud_storage_bucket=self.si_settings.cloud_storage_bucket,
-            cloud_storage_access_key=self.si_settings.cloud_storage_access_key,
-            cloud_storage_secret_key=self.si_settings.cloud_storage_secret_key,
-            cloud_storage_region=self.si_settings.cloud_storage_region,
-            cloud_storage_api_endpoint=self.si_settings.endpoint_url,
             filesystem_wrapper_mode=False)
 
     def setUp(self):
@@ -88,14 +84,13 @@ class RestCatalogConnectionTest(RedpandaTest):
         return producer
 
     @cluster(num_nodes=5)
-    @matrix(storage_type=supported_storage_types(),
+    @matrix(cloud_storage_type=supported_storage_types(),
             use_serde_parquet=[False, True])
-    def test_redpanda_connection_to_rest_catalog(self, storage_type,
+    def test_redpanda_connection_to_rest_catalog(self, cloud_storage_type,
                                                  use_serde_parquet):
 
         catalog = self.catalog_service.client()
         namespace = "redpanda"
-        catalog.create_namespace(namespace)
         topic = TopicSpec(name='datalake-test-topic', partition_count=3)
 
         self.client().create_topic(topic)
