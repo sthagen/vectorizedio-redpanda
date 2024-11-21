@@ -26,12 +26,14 @@ record_multiplexer::record_multiplexer(
   const model::ntp& ntp,
   std::unique_ptr<parquet_file_writer_factory> writer_factory,
   schema_manager& schema_mgr,
-  type_resolver& type_resolver)
+  type_resolver& type_resolver,
+  record_translator& record_translator)
   : _log(datalake_log, fmt::format("{}", ntp))
   , _ntp(ntp)
   , _writer_factory{std::move(writer_factory)}
   , _schema_mgr(schema_mgr)
-  , _type_resolver(type_resolver) {}
+  , _type_resolver(type_resolver)
+  , _record_translator(record_translator) {}
 
 ss::future<ss::stop_iteration>
 record_multiplexer::operator()(model::record_batch batch) {
@@ -50,6 +52,11 @@ record_multiplexer::operator()(model::record_batch batch) {
           first_timestamp + record.timestamp_delta()};
         kafka::offset offset{batch.base_offset()() + record.offset_delta()};
         int64_t estimated_size = key.size_bytes() + val.size_bytes();
+        chunked_vector<std::pair<std::optional<iobuf>, std::optional<iobuf>>>
+          header_kvs;
+        for (auto& hdr : record.headers()) {
+            header_kvs.emplace_back(hdr.share_key_opt(), hdr.share_value_opt());
+        }
 
         auto val_type_res = co_await _type_resolver.resolve_buf_type(
           std::move(val));
@@ -61,7 +68,11 @@ record_multiplexer::operator()(model::record_batch batch) {
             case type_resolver::errc::bad_input:
             case type_resolver::errc::translation_error:
                 auto invalid_res = co_await handle_invalid_record(
-                  offset, record.share_key(), record.share_value(), timestamp);
+                  offset,
+                  record.share_key(),
+                  record.share_value(),
+                  timestamp,
+                  std::move(header_kvs));
                 if (invalid_res.has_error()) {
                     _error = invalid_res.error();
                     co_return ss::stop_iteration::yes;
@@ -70,14 +81,17 @@ record_multiplexer::operator()(model::record_batch batch) {
             }
         }
 
-        auto record_data_res = co_await record_translator::translate_data(
+        auto record_data_res = co_await _record_translator.translate_data(
+          _ntp.tp.partition,
           offset,
           std::move(key),
           val_type_res.value().type,
           std::move(val_type_res.value().parsable_buf),
-          timestamp);
+          timestamp,
+          header_kvs);
         if (record_data_res.has_error()) {
             switch (record_data_res.error()) {
+            case record_translator::errc::unexpected_schema:
             case record_translator::errc::translation_error:
                 vlog(
                   _log.debug,
@@ -85,7 +99,11 @@ record_multiplexer::operator()(model::record_batch batch) {
                   offset,
                   record_data_res.error());
                 auto invalid_res = co_await handle_invalid_record(
-                  offset, record.share_key(), record.share_value(), timestamp);
+                  offset,
+                  record.share_key(),
+                  record.share_value(),
+                  timestamp,
+                  std::move(header_kvs));
                 if (invalid_res.has_error()) {
                     _error = invalid_res.error();
                     co_return ss::stop_iteration::yes;
@@ -93,7 +111,7 @@ record_multiplexer::operator()(model::record_batch batch) {
                 continue;
             }
         }
-        auto record_type = record_translator::build_type(
+        auto record_type = _record_translator.build_type(
           std::move(val_type_res.value().type));
         auto writer_iter = _writers.find(record_type.comps);
         if (writer_iter == _writers.end()) {
@@ -107,7 +125,8 @@ record_multiplexer::operator()(model::record_batch batch) {
                       offset,
                       record.share_key(),
                       record.share_value(),
-                      timestamp);
+                      timestamp,
+                      std::move(header_kvs));
                     if (invalid_res.has_error()) {
                         _error = invalid_res.error();
                         co_return ss::stop_iteration::yes;
@@ -189,15 +208,22 @@ record_multiplexer::end_of_stream() {
 
 ss::future<result<std::nullopt_t, writer_error>>
 record_multiplexer::handle_invalid_record(
-  kafka::offset offset, iobuf key, iobuf val, model::timestamp ts) {
+  kafka::offset offset,
+  iobuf key,
+  iobuf val,
+  model::timestamp ts,
+  chunked_vector<std::pair<std::optional<iobuf>, std::optional<iobuf>>>
+    headers) {
     vlog(_log.debug, "Handling invalid record {}", offset);
     int64_t estimated_size = key.size_bytes() + val.size_bytes();
-    auto record_data_res = co_await record_translator::translate_data(
+    auto record_data_res = co_await _record_translator.translate_data(
+      _ntp.tp.partition,
       offset,
       std::move(key),
       /*val_type*/ std::nullopt,
       std::move(val),
-      ts);
+      ts,
+      headers);
     if (record_data_res.has_error()) {
         vlog(
           _log.error,
@@ -206,7 +232,7 @@ record_multiplexer::handle_invalid_record(
           record_data_res.error());
         co_return writer_error::parquet_conversion_error;
     }
-    auto record_type = record_translator::build_type(std::nullopt);
+    auto record_type = _record_translator.build_type(std::nullopt);
 
     // TODO: maybe this should be a writer specific for a dead-letter queue.
     auto writer_iter = _writers.find(record_type.comps);
