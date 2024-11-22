@@ -1436,10 +1436,10 @@ void application::wire_up_runtime_services(
           std::ref(raft_group_manager),
           std::ref(partition_manager),
           ss::sharded_parameter(
-            [bucket](
-              cloud_io::remote& remote) -> std::unique_ptr<iceberg::catalog> {
-                return datalake::coordinator::create_catalog(
-                  remote, *bucket, config::shard_local_cfg());
+            [bucket](cloud_io::remote& remote)
+              -> std::unique_ptr<datalake::coordinator::catalog_factory> {
+                return datalake::coordinator::get_catalog_factory(
+                  config::shard_local_cfg(), remote, *bucket);
             },
             std::ref(cloud_io)),
           std::ref(cloud_io),
@@ -1471,9 +1471,10 @@ void application::wire_up_runtime_services(
           &_datalake_coordinator_fe,
           &cloud_io,
           ss::sharded_parameter(
-            [bucket](cloud_io::remote& remote) {
-                return datalake::coordinator::create_catalog(
-                  remote, *bucket, config::shard_local_cfg());
+            [bucket](cloud_io::remote& remote)
+              -> std::unique_ptr<datalake::coordinator::catalog_factory> {
+                return datalake::coordinator::get_catalog_factory(
+                  config::shard_local_cfg(), remote, *bucket);
             },
             std::ref(cloud_io)),
           _schema_registry.get(),
@@ -2915,20 +2916,6 @@ void application::wire_up_and_start(::stop_signal& app_signal, bool test_mode) {
 
 void application::start_runtime_services(
   cluster::cluster_discovery& cd, ::stop_signal& app_signal) {
-    ssx::background = feature_table.invoke_on_all(
-      [this](features::feature_table& ft) {
-          return ft.await_feature_then(
-            features::feature::rpc_transport_unknown_errc, [this] {
-                if (ss::this_shard_id() == 0) {
-                    vlog(
-                      _log.debug, "All nodes support unknown RPC error codes");
-                }
-                // Redpanda versions <= v22.3.x don't properly parse error
-                // codes they don't know about.
-                _rpc.local().set_use_service_unavailable();
-            });
-      });
-
     // single instance
     node_status_backend.invoke_on_all(&cluster::node_status_backend::start)
       .get();
