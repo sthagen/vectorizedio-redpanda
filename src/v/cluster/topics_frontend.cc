@@ -34,6 +34,7 @@
 #include "config/configuration.h"
 #include "config/leaders_preference.h"
 #include "data_migration_types.h"
+#include "features/enterprise_feature_messages.h"
 #include "features/feature_table.h"
 #include "fwd.h"
 #include "model/errc.h"
@@ -428,8 +429,8 @@ ss::future<std::vector<topic_result>> topics_frontend::update_topic_properties(
                 && is_user_topic(update.tp_ns)) {
                   if (auto f = get_enterprise_features(_metadata_cache, update);
                       !f.empty()) {
-                      auto msg = ssx::sformat(
-                        "An enterprise license is required to enable {}.", f);
+                      auto msg
+                        = features::enterprise_error_message::topic_property(f);
                       vlog(clusterlog.warn, "{}", msg);
                       return ss::make_ready_future<topic_result>(topic_result(
                         update.tp_ns,
@@ -609,8 +610,7 @@ topic_result topics_frontend::validate_topic_configuration(
       && is_user_topic(assignable_config.cfg.tp_ns)) {
         if (auto f = get_enterprise_features(assignable_config.cfg);
             !f.empty()) {
-            auto msg = ssx::sformat(
-              "An enterprise license is required to enable {}.", f);
+            auto msg = features::enterprise_error_message::topic_property(f);
             vlog(clusterlog.warn, "{}", msg);
             return make_result(errc::topic_invalid_config, std::move(msg));
         }
@@ -1007,12 +1007,8 @@ ss::future<topic_result> topics_frontend::do_delete_topic(
     if (migrated_away) {
         mode = topic_lifecycle_transition_mode::delete_migrated;
         vlog(clusterlog.info, "Deleting migrated topic {}", tp_ns);
-    } else if (topic_meta.get_configuration()
-                 .properties.requires_remote_erase()) {
-        mode = topic_lifecycle_transition_mode::pending_gc;
-        vlog(clusterlog.info, "Created deletion marker for topic {}", tp_ns);
     } else {
-        mode = topic_lifecycle_transition_mode::oneshot_delete;
+        mode = topic_lifecycle_transition_mode::pending_gc;
         vlog(clusterlog.info, "Deleting topic {}", tp_ns);
     }
 
@@ -1044,7 +1040,9 @@ ss::future<topic_result> topics_frontend::do_delete_topic(
 }
 
 ss::future<topic_result> topics_frontend::purged_topic(
-  nt_revision topic, model::timeout_clock::duration timeout) {
+  nt_revision topic,
+  topic_purge_domain domain,
+  model::timeout_clock::duration timeout) {
     auto leader = _leaders.local().get_leader(model::controller_ntp);
 
     // no leader available
@@ -1055,26 +1053,43 @@ ss::future<topic_result> topics_frontend::purged_topic(
     // current node is a leader controller
     if (leader == _self) {
         return do_purged_topic(
-          std::move(topic), model::timeout_clock::now() + timeout);
+          std::move(topic), domain, model::timeout_clock::now() + timeout);
     } else {
         return dispatch_purged_topic_to_leader(
-          leader.value(), std::move(topic), timeout);
+          leader.value(), std::move(topic), domain, timeout);
     }
 }
 
 ss::future<topic_result> topics_frontend::do_purged_topic(
-  nt_revision topic, model::timeout_clock::time_point deadline) {
+  nt_revision topic,
+  topic_purge_domain domain,
+  model::timeout_clock::time_point deadline) {
     topic_lifecycle_transition_cmd cmd(
       topic.nt,
       topic_lifecycle_transition{
-        .topic = topic, .mode = topic_lifecycle_transition_mode::drop});
+        .topic = topic,
+        .mode = topic_lifecycle_transition_mode::purged,
+        .domain = domain});
 
-    if (!_topics.local().get_lifecycle_markers().contains(topic)) {
+    bool marker_exists = false;
+    switch (domain) {
+    case topic_purge_domain::cloud_storage:
+        marker_exists = _topics.local().get_lifecycle_markers().contains(topic);
+        break;
+    case topic_purge_domain::iceberg:
+        marker_exists = _topics.local().get_iceberg_tombstones().contains(
+          topic.nt);
+        break;
+    }
+
+    if (!marker_exists) {
         // Do not write to log if the marker is already gone
         vlog(
           clusterlog.info,
-          "Dropping duplicate purge request for lifecycle marker {}",
-          topic.nt);
+          "Dropping duplicate purge request for lifecycle marker {} in domain "
+          "{}",
+          topic.nt,
+          domain);
         co_return topic_result(std::move(topic.nt), errc::success);
     }
 
@@ -1150,6 +1165,7 @@ topics_frontend::dispatch_create_to_leader(
 ss::future<topic_result> topics_frontend::dispatch_purged_topic_to_leader(
   model::node_id leader,
   nt_revision topic,
+  topic_purge_domain domain,
   model::timeout_clock::duration timeout) {
     vlog(
       clusterlog.trace,
@@ -1163,10 +1179,13 @@ ss::future<topic_result> topics_frontend::dispatch_purged_topic_to_leader(
                  ss::this_shard_id(),
                  leader,
                  timeout,
-                 [topic, timeout](controller_client_protocol cp) mutable {
+                 [topic, timeout, domain](
+                   controller_client_protocol cp) mutable {
                      return cp.purged_topic(
                        purged_topic_request{
-                         .topic = std::move(topic), .timeout = timeout},
+                         .topic = std::move(topic),
+                         .timeout = timeout,
+                         .domain = domain},
                        rpc::client_opts(model::timeout_clock::now() + timeout));
                  })
                .then(&rpc::get_ctx_data<purged_topic_reply>);
@@ -1635,9 +1654,7 @@ ss::future<topic_result> topics_frontend::do_create_partition(
 
     if (_features.local().should_sanction() && is_user_topic(tp_cfg->tp_ns)) {
         if (auto f = get_enterprise_features(*tp_cfg); !f.empty()) {
-            auto msg = ssx::sformat(
-              "An enterprise license is required to create partitions with {}.",
-              f);
+            auto msg = features::enterprise_error_message::create_partition(f);
             vlog(clusterlog.warn, "{}", msg);
             co_return make_error_result(
               p_cfg.tp_ns, errc::topic_invalid_config, std::move(msg));

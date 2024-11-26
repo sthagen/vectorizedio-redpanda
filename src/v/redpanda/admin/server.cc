@@ -1746,11 +1746,10 @@ void config_multi_property_validation(
 }
 } // namespace
 
-void admin_server::check_license() const {
+void admin_server::check_license(const ss::sstring& msg) const {
     if (_controller->get_feature_table().local().should_sanction()) {
         throw ss::httpd::base_exception(
-          "Enterprise License Required",
-          ss::http::reply::status_type::forbidden);
+          msg, ss::http::reply::status_type::forbidden);
     }
 }
 
@@ -4329,7 +4328,8 @@ admin_server::delete_cloud_storage_lifecycle(
     cluster::nt_revision ntr{
       .nt = model::topic_namespace(model::kafka_namespace, model::topic{topic}),
       .initial_revision_id = revision};
-    auto r = co_await tp_frontend.local().purged_topic(ntr, 5s);
+    auto r = co_await tp_frontend.local().purged_topic(
+      ntr, cluster::topic_purge_domain::cloud_storage, 5s);
     co_await throw_on_error(*req, r.ec, model::controller_ntp);
 
     co_return ss::json::json_return_type(ss::json::json_void());
