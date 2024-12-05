@@ -271,6 +271,38 @@ crate.annotation(
 )
 
 # ====================================
+# OCI Base Images
+# ====================================
+bazel_dep(name = "rules_oci", version = "2.0.1", dev_dependency = True)
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+
+# Use a distroless docker image that only comes with the following:
+#
+# ca-certificates
+# /etc/passwd entry for a root user
+# /tmp directory
+# tzdata
+# glibc
+# libgcc1
+oci.pull(
+    name = "distroless_cc_debian12",
+    # This is the latest nonroot tag
+    digest = "sha256:594b5200fd1f06d17a877ebee16d4af84a9a7ab83c898632a2d5609c0593cbab",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
+)
+use_repo(
+    oci,
+    "distroless_cc_debian12",
+    "distroless_cc_debian12_linux_amd64",
+    "distroless_cc_debian12_linux_arm64_v8",
+)
+
+# ====================================
 # clang-tidy
 # ====================================
 bazel_dep(name = "bazel_clang_tidy", dev_dependency = True)
