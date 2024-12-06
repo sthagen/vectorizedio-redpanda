@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("//bazel:build.bzl", "redpanda_cc_binary", "redpanda_cc_library")
 
 redpanda_cc_library(
@@ -13,12 +14,6 @@ redpanda_cc_library(
         "monitor_unsafe.h",
     ],
     include_prefix = "redpanda",
-    # TODO(iceberg): Remove once arrow is bazel friendly
-    # and all the datalake components are ported over to
-    # bazel.
-    local_defines = [
-        "BAZEL_DISABLE_DATALAKE_FEATURE=1",
-    ],
     visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
@@ -37,6 +32,8 @@ redpanda_cc_library(
         "//src/v/crypto",
         #       "//src/v/datalake:manager",
         "//src/v/datalake:types",
+        "//src/v/datalake:cloud_data_io",
+        "//src/v/datalake:manager",
         "//src/v/datalake/coordinator:coordinator_manager",
         "//src/v/datalake/coordinator:frontend",
         "//src/v/datalake/coordinator:stm",
@@ -95,11 +92,34 @@ redpanda_cc_library(
     ],
 )
 
+# Enable or disable (thin) LTO for the redpanda binary (only)
+bool_flag(
+    name = "lto",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_lto",
+    flag_values = {
+        ":lto": "true",
+    },
+    visibility = ["//visibility:public"],
+)
+
 redpanda_cc_binary(
     name = "redpanda",
     srcs = [
         "main.cc",
     ],
+    linkopts =
+        select({
+            ":use_lto": [
+                "-flto=thin",
+                "-ffat-lto-objects",
+            ],
+            "//conditions:default": [
+            ],
+        }),
     visibility = ["//visibility:public"],
     deps = [
         ":application",
