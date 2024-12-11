@@ -64,8 +64,9 @@ class KafkaCliTools:
     Wrapper around the Kafka admin command line tools.
     """
 
-    # See tests/docker/Dockerfile to add new versions
-    VERSIONS = ("3.0.0", "2.7.0", "2.5.0", "2.4.1", "2.3.1")
+    # See tests/docker/ducktape-deps/kafka-tools to add new versions
+    VERSIONS = ("3.9.0", "3.8.0", "3.7.0", "3.0.0", "2.7.0", "2.5.0", "2.4.1",
+                "2.3.1")
 
     def __init__(self,
                  redpanda: RedpandaServiceForClients,
