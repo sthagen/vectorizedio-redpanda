@@ -9,6 +9,7 @@
 
 #include "pandaproxy/schema_registry/test/compatibility_protobuf.h"
 
+#include "bytes/iobuf_parser.h"
 #include "pandaproxy/schema_registry/error.h"
 #include "pandaproxy/schema_registry/exceptions.h"
 #include "pandaproxy/schema_registry/protobuf.h"
@@ -500,17 +501,21 @@ SEASTAR_THREAD_TEST_CASE(
       pps::compatibility_level::full_transitive, recursive, recursive));
 }
 
-auto sanitize(std::string_view raw_proto) {
-    simple_sharded_store s;
-    return pps::make_canonical_protobuf_schema(
-             s.store,
-             pps::unparsed_schema{
-               pps::subject{"foo"},
-               pps::unparsed_schema_definition{
-                 raw_proto, pps::schema_type::protobuf}})
-      .get()
-      .def()
-      .raw()();
+auto sanitize(
+  std::string_view raw_proto,
+  pps::protobuf_renderer_v2 proto_v2 = pps::protobuf_renderer_v2::no) {
+    simple_sharded_store s{proto_v2};
+    iobuf buf = pps::make_canonical_protobuf_schema(
+                  s.store,
+                  pps::unparsed_schema{
+                    pps::subject{"foo"},
+                    pps::unparsed_schema_definition{
+                      raw_proto, pps::schema_type::protobuf}})
+                  .get()
+                  .def()
+                  .raw()();
+    iobuf_parser parser{std::move(buf)};
+    return parser.read_string(parser.bytes_left());
 }
 
 constexpr auto foobar_proto = R"(syntax = "proto3";
@@ -693,6 +698,244 @@ message Bar {
   .google.protobuf.Any any = 2;
 }
 )");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize_imports) {
+    auto schema = R"(syntax = "proto3";
+package foo;
+// sanitize should maintain relative ordering of imports per group,
+// normalize should sort them
+import "google/protobuf/timestamp.proto";
+import weak "google/protobuf/any.proto";
+import "google/protobuf/api.proto";
+import public "google/protobuf/duration.proto";
+)";
+
+    BOOST_CHECK_EQUAL(
+      sanitize(schema, pps::protobuf_renderer_v2::yes), (R"(syntax = "proto3";
+package foo;
+
+import public "google/protobuf/duration.proto";
+import weak "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/api.proto";
+
+)"));
+}
+
+SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize_map) {
+    auto schema = R"(syntax = "proto3";
+package foo;
+import "google/protobuf/any.proto";
+message Value {
+  google.protobuf.Any any = 1;
+}
+message HasMap {
+  map<string, Value> map_string_value = 1;
+})";
+
+    BOOST_CHECK_EQUAL(
+      sanitize(schema, pps::protobuf_renderer_v2::yes), (R"(syntax = "proto3";
+package foo;
+
+import "google/protobuf/any.proto";
+
+message Value {
+  google.protobuf.Any any = 1;
+}
+message HasMap {
+  map<string, Value> map_string_value = 1;
+}
+
+)"));
+}
+
+SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize) {
+    auto schema = R"(
+syntax = "proto3";
+
+package foo;
+
+option java_package = "com.example.foo";
+option java_outer_classname = "FooService";
+option optimize_for = SPEED;
+option go_package = "foo.example.com/fooservice";
+option cc_enable_arenas = true;
+option objc_class_prefix = "FS";
+option csharp_namespace = "Foo.FooService";
+
+
+// public should come last
+import public "google/protobuf/duration.proto";
+// imports should be sorted
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/descriptor.proto";
+
+// Baz is lexicographically after Bar
+message Baz {
+  .google.protobuf.Any any = 1;
+}
+
+enum Numbers {
+  ZERO=0;
+  TWO = 2;
+  ONE=1;
+  ALIAS = 1 [deprecated = true];
+  reserved 6;
+  reserved 3 to 5;
+  reserved "THREE", "FOUR", "FIVE";
+  reserved "SIX";
+
+  option allow_alias = true;
+}
+
+
+/**
+ * Bar.timestamp type is not normalized
+ * Bar.any should come second
+ */
+message Bar {
+  .google.protobuf.Any any = 2;
+  google.protobuf.Timestamp timestamp = 1;
+
+  message NestedMessage {
+    string value = 1;
+  }
+
+  // reserved should be sorted
+  reserved 6;
+  reserved 3 to 5;
+
+  enum NestedEnum {
+    FOO = 0;
+    BAR = 1;
+  }
+
+  oneof string_or_byte {
+    string string = 20;
+    bytes bytes = 21;
+  }
+
+  oneof integral {
+    double double = 7;
+    float float = 8;
+    int32 int32 = 9;
+    int64 int64 = 10;
+    uint32 uint32 = 11;
+    uint64 uint64 = 12;
+    sint32 sint32 = 13;
+    sint64 sint64 = 14;
+    fixed32 fixed32 = 15;
+    fixed64 fixed64 = 16;
+    sfixed32 sfixed32 = 17;
+    sfixed64 sfixed64 = 18;
+    bool bool = 19 [deprecated = false, retention = RETENTION_SOURCE];
+  }
+
+  repeated bool repeated_bool = 22 [packed = true];
+  map<string, string> map_string_string = 23;
+  NestedEnum repeated_nested_enum = 24 [deprecated = false, retention = RETENTION_SOURCE];
+
+  message MessageOptions {
+    option message_set_wire_format = false;
+    option no_standard_descriptor_accessor = true;
+    option deprecated = true;
+  }
+
+}
+service FooService {
+  rpc Foo(Bar) returns (Baz);
+})";
+
+    BOOST_CHECK_EQUAL(
+      sanitize(schema, pps::protobuf_renderer_v2::yes), (R"(syntax = "proto3";
+package foo;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/descriptor.proto";
+import public "google/protobuf/duration.proto";
+
+option java_package = "com.example.foo";
+option java_outer_classname = "FooService";
+option optimize_for = SPEED;
+option go_package = "foo.example.com/fooservice";
+option cc_enable_arenas = true;
+option objc_class_prefix = "FS";
+option csharp_namespace = "Foo.FooService";
+
+message Baz {
+  .google.protobuf.Any any = 1;
+}
+message Bar {
+  reserved 6;
+  reserved 3 to 5;
+
+  .google.protobuf.Any any = 2;
+  google.protobuf.Timestamp timestamp = 1;
+  repeated bool repeated_bool = 22 [packed = true];
+  map<string, string> map_string_string = 23;
+  NestedEnum repeated_nested_enum = 24 [
+    deprecated = false,
+    retention = RETENTION_SOURCE
+  ];
+
+  oneof string_or_byte {
+    string string = 20;
+    bytes bytes = 21;
+  }
+  oneof integral {
+    double double = 7;
+    float float = 8;
+    int32 int32 = 9;
+    int64 int64 = 10;
+    uint32 uint32 = 11;
+    uint64 uint64 = 12;
+    sint32 sint32 = 13;
+    sint64 sint64 = 14;
+    fixed32 fixed32 = 15;
+    fixed64 fixed64 = 16;
+    sfixed32 sfixed32 = 17;
+    sfixed64 sfixed64 = 18;
+    bool bool = 19 [
+      deprecated = false,
+      retention = RETENTION_SOURCE
+    ];
+  }
+
+  message NestedMessage {
+    string value = 1;
+  }
+  message MessageOptions {
+    option message_set_wire_format = false;
+    option no_standard_descriptor_accessor = true;
+    option deprecated = true;
+  }
+  enum NestedEnum {
+    FOO = 0;
+    BAR = 1;
+  }
+}
+enum Numbers {
+  reserved 6;
+  reserved 3 to 5;
+  reserved "THREE";
+  reserved "FOUR";
+  reserved "FIVE";
+  reserved "SIX";
+  option allow_alias = true;
+  ZERO = 0;
+  TWO = 2;
+  ONE = 1;
+  ALIAS = 1 [deprecated = true];
+}
+
+service FooService {
+  rpc Foo (Bar) returns (Baz);
+}
+
+)"));
 }
 
 SEASTAR_THREAD_TEST_CASE(test_protobuf_compatibility_message_removed) {
