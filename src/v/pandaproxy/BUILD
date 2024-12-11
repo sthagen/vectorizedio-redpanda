@@ -296,6 +296,7 @@ redpanda_cc_library(
         "@abseil-cpp//absl/container:node_hash_map",
         "@avro",
         "@boost//:algorithm",
+        "@boost//:container",
         "@boost//:graph",
         "@boost//:lexical_cast",
         "@boost//:math",
