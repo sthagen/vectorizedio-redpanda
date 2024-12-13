@@ -43,12 +43,16 @@ from rptest.util import inject_remote_script
 BIG_FETCH = 104857600
 
 # How much memory to assign to redpanda per partition. Redpanda will be started
-# with MIB_PER_PARTITION * PARTITIONS_PER_SHARD * CORE_COUNT memory
-DEFAULT_MIB_PER_PARTITION = 4
+# with (MIB_PER_PARTITION * PARTITIONS_PER_SHARD * CORE_COUNT) / (PARTITIONS_MEMORY_ALLOCATION_PERCENT / 100) memory
+DEFAULT_MIB_PER_PARTITION = 0.2
 
 # How many partitions we will create per shard: this is the primary scaling
 # factor that controls how many partitions a given cluster will get.
-DEFAULT_PARTITIONS_PER_SHARD = 1000
+DEFAULT_PARTITIONS_PER_SHARD = 3000
+
+# How much memory is reserved for partitions
+# aka: topic_partitions_memory_allocation_percent config
+DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT = 15
 
 # Large volume of data to write. If tiered storage is enabled this is the
 # amount of data to retain total. Otherwise, this can be used as a large volume
@@ -810,7 +814,9 @@ class ManyPartitionsTest(PreallocNodesTest):
                                 replication_factor,
                                 mib_per_partition,
                                 topic_partitions_per_shard,
-                                tiered_storage_enabled=tiered_storage_enabled)
+                                tiered_storage_enabled=tiered_storage_enabled,
+                                partition_memory_reserve_percentage=
+                                DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT)
 
         # Run with one huge topic: it is more stressful for redpanda when clients
         # request the metadata for many partitions at once, and the simplest way
@@ -847,6 +853,8 @@ class ManyPartitionsTest(PreallocNodesTest):
             topic_partitions_per_shard,
             'topic_memory_per_partition':
             mib_per_partition * 1024 * 1024,
+            'topic_partitions_memory_allocation_percent':
+            DEFAULT_PARTITIONS_MEMORY_ALLOCATION_PERCENT,
         })
 
         self.redpanda.start()
