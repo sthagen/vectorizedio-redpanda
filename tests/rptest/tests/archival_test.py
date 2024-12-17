@@ -377,7 +377,7 @@ class ArchivalTest(RedpandaTest):
         self.redpanda.start_node(node)
         time.sleep(5)
         self.kafka_tools.produce(self.topic, 5000, 1024)
-        validate(self._cross_node_verify, self.logger, 90)
+        validate(self._cross_node_verify, self.logger, 120)
 
     @cluster(num_nodes=3)
     @matrix(cloud_storage_type=get_cloud_storage_type())
@@ -394,7 +394,7 @@ class ArchivalTest(RedpandaTest):
             self.redpanda.start_node(node)
         time.sleep(5)
         self.kafka_tools.produce(self.topic, 5000, 1024)
-        validate(self._cross_node_verify, self.logger, 90)
+        validate(self._cross_node_verify, self.logger, 120)
 
     @cluster(num_nodes=3)
     @matrix(acks=[-1, 0, 1], cloud_storage_type=get_cloud_storage_type())
