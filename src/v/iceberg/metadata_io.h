@@ -119,7 +119,12 @@ protected:
             co_return parse(std::move(buf));
         } catch (...) {
             auto ex = std::current_exception();
-            vlog(log.error, "Exception while parsing manifest: {}", ex);
+            vlog(
+              log.error,
+              "Exception while parsing {} (path: {}): {}",
+              display_str,
+              path,
+              ex);
             co_return errc::failed;
         }
     }
