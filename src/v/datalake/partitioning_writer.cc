@@ -19,19 +19,11 @@
 
 namespace datalake {
 
-namespace {
-const auto hourly_spec = hour_partition_spec();
-const auto default_schema = schemaless_struct_type();
-const auto default_accessors = iceberg::struct_accessor::from_struct_type(
-  default_schema);
-} // namespace
-
 ss::future<writer_error>
 partitioning_writer::add_data(iceberg::struct_value val, int64_t approx_size) {
     iceberg::partition_key pk;
     try {
-        pk = iceberg::partition_key::create(
-          val, default_accessors, hourly_spec);
+        pk = iceberg::partition_key::create(val, accessors_, spec_);
     } catch (...) {
         vlog(
           datalake_log.error,

@@ -122,6 +122,7 @@ simple_schema_manager::ensure_table_schema(
       table_info{
         .id = table_id_for_topic(t),
         .schema = std::move(s),
+        .partition_spec = hour_partition_spec(),
       });
 
     co_return std::nullopt;
@@ -136,6 +137,7 @@ simple_schema_manager::get_table_info(const model::topic& t) {
     co_return table_info{
       .id = it->second.id.copy(),
       .schema = it->second.schema.copy(),
+      .partition_spec = it->second.partition_spec.copy(),
     };
 }
 
@@ -217,9 +219,20 @@ catalog_schema_manager::get_table_info(const model::topic& topic) {
         co_return errc::failed;
     }
 
+    auto cur_spec = table.get_partition_spec(table.default_spec_id);
+    if (!cur_spec) {
+        vlog(
+          datalake_log.error,
+          "Cannot find default partition spec {} in table {}",
+          table.default_spec_id,
+          table_id);
+        co_return errc::failed;
+    }
+
     co_return table_info{
       .id = std::move(table_id),
       .schema = cur_schema->copy(),
+      .partition_spec = cur_spec->copy(),
     };
 }
 

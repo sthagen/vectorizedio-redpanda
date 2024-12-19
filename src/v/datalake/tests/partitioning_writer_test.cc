@@ -51,7 +51,8 @@ TEST_P(PartitioningWriterExtraColumnsTest, TestSchemaHappyPath) {
       false);
     auto field = field_type{default_type_with_columns(extra_columns)};
     auto& default_type = std::get<struct_type>(field);
-    partitioning_writer writer(*writer_factory, default_type.copy());
+    partitioning_writer writer(
+      *writer_factory, default_type.copy(), hour_partition_spec());
 
     // Create a bunch of records spread over multiple hours.
     static constexpr auto ms_per_hr = 3600 * 1000;
@@ -98,7 +99,8 @@ TEST(PartitioningWriterTest, TestWriterError) {
       true);
     auto field = field_type{default_type_with_columns(0)};
     auto& default_type = std::get<struct_type>(field);
-    partitioning_writer writer(*writer_factory, default_type.copy());
+    partitioning_writer writer(
+      *writer_factory, default_type.copy(), hour_partition_spec());
     auto err = writer
                  .add_data(
                    val_with_timestamp(field, model::timestamp::now()),
@@ -110,7 +112,8 @@ TEST(PartitioningWriterTest, TestWriterError) {
 TEST(PartitioningWriterTest, TestUnexpectedSchema) {
     auto writer_factory = std::make_unique<datalake::test_data_writer_factory>(
       false);
-    partitioning_writer writer(*writer_factory, default_type_with_columns(0));
+    partitioning_writer writer(
+      *writer_factory, default_type_with_columns(0), hour_partition_spec());
     auto unexpected_field_type = test_nested_schema_type();
     auto err = writer
                  .add_data(

@@ -200,7 +200,9 @@ record_multiplexer::operator()(model::record_batch batch) {
             auto [iter, _] = _writers.emplace(
               record_type.comps,
               std::make_unique<partitioning_writer>(
-                *_writer_factory, std::move(record_type.type)));
+                *_writer_factory,
+                std::move(record_type.type),
+                std::move(load_res.value().partition_spec)));
             writer_iter = iter;
         }
 

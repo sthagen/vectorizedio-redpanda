@@ -35,6 +35,7 @@ public:
     struct table_info {
         iceberg::table_identifier id;
         iceberg::schema schema;
+        iceberg::partition_spec partition_spec;
 
         // Fills the field IDs of the given type with those in the current
         // schema. Returns true on success.

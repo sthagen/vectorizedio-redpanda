@@ -30,9 +30,13 @@ namespace datalake {
 class partitioning_writer {
 public:
     explicit partitioning_writer(
-      parquet_file_writer_factory& factory, iceberg::struct_type type)
+      parquet_file_writer_factory& factory,
+      iceberg::struct_type type,
+      iceberg::partition_spec spec)
       : writer_factory_(factory)
-      , type_(std::move(type)) {}
+      , type_(std::move(type))
+      , accessors_(iceberg::struct_accessor::from_struct_type(type_))
+      , spec_(std::move(spec)) {}
 
     // Adds the given value to the writer corresponding to the value's
     // partition key.
@@ -53,6 +57,8 @@ private:
     // The Iceberg message type for the underlying writer. Expected to include
     // Redpanda-specific fields, e.g. a timestamp field for partitioning.
     const iceberg::struct_type type_;
+    iceberg::struct_accessor::ids_accessor_map_t accessors_;
+    iceberg::partition_spec spec_;
 
     // Map of partition keys to their corresponding data file writers.
     chunked_hash_map<
