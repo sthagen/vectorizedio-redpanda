@@ -47,6 +47,7 @@ v_cc_library(
     manifest_list_avro.cc
     merge_append_action.cc
     metadata_query.cc
+    partition.cc
     partition_key.cc
     partition_key_type.cc
     partition_json.cc

@@ -479,6 +479,9 @@ redpanda_cc_library(
 
 redpanda_cc_library(
     name = "partition",
+    srcs = [
+        "partition.cc",
+    ],
     hdrs = [
         "partition.h",
     ],
