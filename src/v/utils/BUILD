@@ -652,3 +652,40 @@ redpanda_cc_library(
         "@seastar",
     ],
 )
+
+redpanda_cc_library(
+    name = "s3_fifo",
+    hdrs = [
+        "s3_fifo.h",
+    ],
+    include_prefix = "utils",
+    deps = [
+        "@boost//:intrusive",
+        "@fmt",
+    ],
+)
+
+redpanda_cc_library(
+    name = "chunked_kv_cache",
+    hdrs = [
+        "chunked_kv_cache.h",
+    ],
+    include_prefix = "utils",
+    deps = [
+        "//src/v/container:chunked_hash_map",
+        "//src/v/utils:s3_fifo",
+        "@boost//:intrusive",
+    ],
+)
+
+redpanda_cc_library(
+    name = "null_output_stream",
+    hdrs = [
+        "null_output_stream.h",
+    ],
+    include_prefix = "utils",
+    deps = [
+        "//src/v/base",
+        "@seastar",
+    ],
+)
