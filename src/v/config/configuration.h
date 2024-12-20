@@ -696,6 +696,7 @@ struct configuration final : public config_store {
     property<bool> unsafe_enable_consumer_offsets_delete_retention;
 
     enum_property<tls_version> tls_min_version;
+    property<bool> tls_enable_renegotiation;
 
     // datalake configurations
     property<bool> iceberg_enabled;
