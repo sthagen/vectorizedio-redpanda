@@ -72,6 +72,20 @@ public:
     ss::future<find_coordinator_reply>
       find_coordinator(kafka::transactional_id);
 
+    // This is unsafe because it does not do any required checks to see
+    // if a particular transaction is in progress and is a candidate for abort.
+    // For example if a transaction is committed by the coordinator and pending
+    // commit on the group, using this escape hatch to abort the transaction
+    // can cause correctness issues. To be used with caution as an escape hatch
+    // for aborting transactions that the group has lost track of are ok to
+    // be aborted. This situation usually is indicative of a bug in the
+    // implementation.
+    ss::future<tx::errc> unsafe_abort_group_transaction(
+      kafka::group_id,
+      model::producer_identity,
+      model::tx_seq,
+      model::timeout_clock::duration);
+
     ss::future<> stop();
 
 private:
