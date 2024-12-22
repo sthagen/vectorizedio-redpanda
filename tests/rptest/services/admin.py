@@ -1563,6 +1563,10 @@ class Admin:
         path = f"debug/partition/{namespace}/{topic}/{partition}"
         return self._request("GET", path, node=node).json()
 
+    def get_producers_state(self, namespace, topic, partition, node=None):
+        path = f"debug/producers/{namespace}/{topic}/{partition}"
+        return self._request("GET", path, node=node).json()
+
     def get_local_storage_usage(self, node=None):
         """
         Get the local storage usage report.

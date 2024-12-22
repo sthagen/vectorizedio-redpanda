@@ -620,6 +620,8 @@ private:
     ss::future<ss::json::json_return_type>
       get_partition_state_handler(std::unique_ptr<ss::http::request>);
     ss::future<ss::json::json_return_type>
+      get_producers_state_handler(std::unique_ptr<ss::http::request>);
+    ss::future<ss::json::json_return_type>
       get_local_storage_usage_handler(std::unique_ptr<ss::http::request>);
     ss::future<ss::json::json_return_type>
       get_disk_stat_handler(std::unique_ptr<ss::http::request>);
