@@ -55,5 +55,8 @@ public:
 
     virtual ss::future<abort_group_tx_reply>
       abort_group_tx_locally(abort_group_tx_request) = 0;
+
+    virtual ss::future<get_producers_reply>
+      get_group_producers_locally(get_producers_request) = 0;
 };
 } // namespace cluster

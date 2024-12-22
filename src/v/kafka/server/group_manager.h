@@ -205,6 +205,9 @@ public:
 
     size_t attached_partitions_count() const { return _partitions.size(); }
 
+    ss::future<cluster::get_producers_reply>
+      get_group_producers_locally(cluster::get_producers_request);
+
 public:
     error_code validate_group_status(
       const model::ntp& ntp, const group_id& group, api_key api);

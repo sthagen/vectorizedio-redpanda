@@ -12,6 +12,7 @@
 
 #include "cluster/errc.h"
 #include "cluster/tx_errc.h"
+#include "container/fragmented_vector.h"
 #include "kafka/protocol/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
@@ -942,4 +943,134 @@ struct find_coordinator_request
 
     auto serde_fields() { return std::tie(tid); }
 };
+
+struct idempotent_request_info
+  : serde::envelope<
+      idempotent_request_info,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    int32_t first_sequence;
+    int32_t last_sequence;
+    model::term_id term;
+
+    friend bool
+    operator==(const idempotent_request_info&, const idempotent_request_info&)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const idempotent_request_info&);
+
+    auto serde_fields() {
+        return std::tie(first_sequence, last_sequence, term);
+    }
+};
+
+struct producer_state_info
+  : serde::envelope<
+      producer_state_info,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    model::producer_identity pid;
+    // idempotent request information only filled for data partitions
+    // that support idempotency.
+    chunked_vector<idempotent_request_info> inflight_requests;
+    chunked_vector<idempotent_request_info> finished_requests;
+    std::optional<model::timestamp> last_update;
+    // following fields only set for transactional producers
+    // if there is a transaction in progress.
+    std::optional<model::offset> tx_begin_offset;
+    std::optional<model::offset> tx_end_offset;
+    std::optional<model::tx_seq> tx_seq;
+    std::optional<model::timeout_clock::duration> tx_timeout;
+    std::optional<model::partition_id> coordinator_partition;
+    // only set for group transactions
+    std::optional<ss::sstring> group_id;
+
+    friend bool
+    operator==(const producer_state_info&, const producer_state_info&)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const producer_state_info& r);
+
+    auto serde_fields() {
+        return std::tie(
+          pid,
+          inflight_requests,
+          finished_requests,
+          last_update,
+          tx_begin_offset,
+          tx_end_offset,
+          tx_seq,
+          tx_timeout,
+          coordinator_partition,
+          group_id);
+    }
+};
+
+struct get_producers_reply
+  : serde::envelope<
+      get_producers_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    tx::errc error_code{};
+    chunked_vector<producer_state_info> producers;
+    // Not all producers are sent as a guard rail in extreme cases
+    // with too many producers, a separate count is sent that
+    // denotes the actual number while the vector is a subset.
+    size_t producer_count{0};
+
+    friend bool
+    operator==(const get_producers_reply&, const get_producers_reply&)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const get_producers_reply&);
+
+    auto serde_fields() {
+        return std::tie(error_code, producers, producer_count);
+    }
+};
+
+struct get_producers_request
+  : serde::envelope<
+      get_producers_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    get_producers_request() noexcept = default;
+
+    explicit get_producers_request(
+      model::ntp ntp,
+      model::timeout_clock::duration timeout,
+      size_t max_producers_to_include)
+      : ntp(std::move(ntp))
+      , timeout{timeout}
+      , max_producers_to_include(max_producers_to_include) {}
+
+    model::ntp ntp;
+    model::timeout_clock::duration timeout;
+    // Enforce a limit on max producers to respond to guard against
+    // edge cases.
+    size_t max_producers_to_include{0};
+
+    friend bool
+    operator==(const get_producers_request&, const get_producers_request&)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream& o, const get_producers_request&);
+
+    auto serde_fields() {
+        return std::tie(ntp, timeout, max_producers_to_include);
+    }
+};
+
 } // namespace cluster

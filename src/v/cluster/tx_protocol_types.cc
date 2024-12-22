@@ -236,4 +236,54 @@ std::ostream& operator<<(std::ostream& o, const try_abort_reply& r) {
       r.ec);
     return o;
 }
+
+std::ostream& operator<<(std::ostream& o, const idempotent_request_info& info) {
+    fmt::print(
+      o,
+      "{{ first: {}, last: {}, term: {} }}",
+      info.first_sequence,
+      info.last_sequence,
+      info.term);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const producer_state_info& info) {
+    fmt::print(
+      o,
+      "{{ pid: {}, inflight_requests: {}, finished: {}, begin offset: {}, end "
+      "offset: {}, sequence: {}, timeout: "
+      "{}, coordinator: {}, last_update: {}, group: {} }}",
+      info.pid,
+      info.inflight_requests,
+      info.finished_requests,
+      info.tx_begin_offset,
+      info.tx_end_offset,
+      info.tx_seq,
+      info.tx_timeout,
+      info.coordinator_partition,
+      info.last_update,
+      info.group_id);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const get_producers_reply& r) {
+    fmt::print(
+      o,
+      "{{ ec: {}, producers: {} , count: {} }}",
+      r.error_code,
+      r.producers,
+      r.producer_count);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const get_producers_request& r) {
+    fmt::print(
+      o,
+      "{{ ntp: {} timeout: {}, max_producers_to_include: {} }}",
+      r.ntp,
+      r.timeout,
+      r.max_producers_to_include);
+    return o;
+}
+
 } // namespace cluster

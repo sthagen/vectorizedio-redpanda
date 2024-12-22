@@ -58,6 +58,8 @@ public:
       model::timeout_clock::duration);
     ss::future<cluster::abort_group_tx_reply>
       abort_group_tx_locally(cluster::abort_group_tx_request);
+    ss::future<cluster::get_producers_reply>
+      get_group_producers_locally(cluster::get_producers_request);
 
 private:
     ss::sharded<cluster::metadata_cache>& _metadata_cache;
@@ -135,6 +137,11 @@ public:
     ss::future<cluster::abort_group_tx_reply>
     abort_group_tx_locally(cluster::abort_group_tx_request req) override {
         return _target.local().abort_group_tx_locally(std::move(req));
+    }
+
+    ss::future<cluster::get_producers_reply> get_group_producers_locally(
+      cluster::get_producers_request request) override {
+        return _target.local().get_group_producers_locally(std::move(request));
     }
 
 private:

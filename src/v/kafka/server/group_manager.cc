@@ -1798,4 +1798,96 @@ error_code group_manager::validate_group_status(
     return error_code::not_coordinator;
 }
 
+ss::future<cluster::get_producers_reply>
+group_manager::get_group_producers_locally(
+  cluster::get_producers_request request) {
+    const auto& ntp = request.ntp;
+    cluster::get_producers_reply reply;
+    auto it = _partitions.find(ntp);
+    if (it == _partitions.end() || !it->second->partition->is_leader()) {
+        reply.error_code = cluster::tx::errc::not_coordinator;
+        co_return reply;
+    }
+    auto attached_partition = *it;
+    reply.error_code = cluster::tx::errc::none;
+    // snapshot the list of groups attached to this partition
+    chunked_hash_map<group_id, group_ptr> groups;
+    std::copy_if(
+      _groups.begin(),
+      _groups.end(),
+      std::inserter(groups, groups.end()),
+      [&ntp](auto g_pair) {
+          const auto& [group_id, group] = g_pair;
+          return group->partition()->ntp() == ntp;
+      });
+    reply.producer_count = std::accumulate(
+      groups.begin(),
+      groups.end(),
+      size_t(0),
+      [](size_t acc, const auto& entry) {
+          return acc + entry.second->producers().size();
+      });
+    for (auto& [gid, group] : groups) {
+        if (reply.producers.size() >= request.max_producers_to_include) {
+            break;
+        }
+        if (group->in_state(group_state::dead)) {
+            continue;
+        }
+        auto partition = group->partition();
+        if (!partition) {
+            // unlikely, conservative check
+            continue;
+        }
+        for (const auto& [id, state] : group->producers()) {
+            if (reply.producers.size() >= request.max_producers_to_include) {
+                break;
+            }
+            cluster::producer_state_info producer_info;
+            producer_info.pid = {id, state.epoch};
+            producer_info.group_id = group->id()();
+            auto& tx = state.transaction;
+            if (tx) {
+                producer_info.tx_begin_offset = tx->begin_offset;
+                producer_info.tx_seq = tx->tx_seq;
+                producer_info.tx_timeout = tx->timeout;
+                auto time_since_last_update = model::timeout_clock::now()
+                                              - tx->last_update;
+                auto last_update_ts = model::timestamp_clock::now()
+                                      - time_since_last_update;
+                producer_info.last_update = model::timestamp{
+                  last_update_ts.time_since_epoch() / 1ms};
+                producer_info.coordinator_partition = tx->coordinator_partition;
+            }
+            reply.producers.push_back(std::move(producer_info));
+        }
+    }
+
+    // check if there any any additional (stale) groups being tracked by
+    // the stm, the list should be empty in most cases unless there is
+    // a divergence in state.
+    auto partition = attached_partition.second->partition;
+    auto stm
+      = partition->raft()->stm_manager()->get<kafka::group_tx_tracker_stm>();
+    if (!stm) {
+        co_return reply;
+    }
+    const auto& stm_txes = stm->inflight_transactions();
+    for (const auto& [gid, state] : stm_txes) {
+        if (groups.contains(gid)) {
+            continue;
+        }
+        // we don't enforce size limits here because this list is expected to be
+        // small. stale group found, report it to the dbug output.
+        for (const auto& [pid, state] : state.producer_states) {
+            reply.producers.push_back({
+              .pid = pid,
+              .tx_begin_offset = state.begin_offset,
+              .group_id = gid() + "-stale",
+            });
+        }
+    }
+    co_return reply;
+}
+
 } // namespace kafka
