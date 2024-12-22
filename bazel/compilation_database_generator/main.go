@@ -281,6 +281,7 @@ func GetCommands(extraArgs ...string) ([]CompileCommand, error) {
 		"--host_features=-parse_headers",
 	)
 	cmd.Args = append(cmd.Args, extraArgs...)
+	cmd.Stderr = os.Stderr
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("unable to connect to `bazel aquery` stdout: %w", err)
