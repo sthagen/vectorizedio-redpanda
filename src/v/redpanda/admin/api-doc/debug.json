@@ -381,6 +381,46 @@
             ]
         },
         {
+            "path": "/v1/debug/producers/{namespace}/{topic}/{partition}",
+            "operations": [
+                {
+                    "method": "GET",
+                    "summary": "Get low level debug information about producers producing to the input partition, queried from the leader of the partition.",
+                    "type": "partition_producers",
+                    "nickname": "get_partition_producers",
+                    "produces": [
+                        "application/json"
+                    ],
+                    "parameters": [
+                        {
+                            "name": "namespace",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "topic",
+                            "in": "path",
+                            "required": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "partition",
+                            "in": "path",
+                            "required": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "type": "long"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
             "path": "/v1/debug/set_storage_failure_injection_enabled",
             "operations": [
                 {
@@ -1172,6 +1212,101 @@
                         "type": "partition_replica_state"
                     },
                     "description": "All replicas of this partition"
+                }
+            }
+        },
+        "idempotent_producer_request_state": {
+            "id": "idempotent_producer_request_state",
+            "description": "Debug state of an idempotent producer request to a partition.",
+            "properties": {
+                "first_sequence": {
+                    "type": "int",
+                    "description": "Kafka first sequence of the request"
+                },
+                "last_sequence": {
+                    "type": "int",
+                    "description": "Kafka last sequence of the request"
+                },
+                "term": {
+                    "type": "long",
+                    "description": "Raft term of the idempotent request"
+                }
+            }
+        },
+        "partition_producer_state": {
+            "id": "partition_producer_state",
+            "description": "Debug state of a single producer producing to a partition ",
+            "properties": {
+                "id" : {
+                    "type": "long",
+                    "description": "ID of the producer, assigned by Redpanda."
+                },
+                "epoch": {
+                    "type": "int",
+                    "description": "Epoch of the producer, assigned by Redpanda."
+                },
+                "inflight_idempotent_requests": {
+                    "type": "array",
+                    "items": {
+                        "type": "idempotent_producer_request_state"
+                    },
+                    "description": "List of requests currently in flight."
+                },
+                "finished_idempotent_requests": {
+                    "type": "array",
+                    "items": {
+                        "type": "idempotent_producer_request_state"
+                    },
+                    "description": "List of finished requests."
+                },
+                "last_update_timestamp": {
+                    "type": "long",
+                    "description": "Last update timestamp for this producer."
+                },
+                "transaction_begin_offset": {
+                    "type": "long",
+                    "description": "First offset of the transaction."
+                },
+                "transaction_last_offset": {
+                    "type": "long",
+                    "description": "Last offset of the transaction."
+                },
+                "transaction_sequence": {
+                    "type": "int",
+                    "description": "Sequence number of the transaction."
+                },
+                "transaction_timeout_ms": {
+                    "type": "long",
+                    "description": "Transaction timeout in ms."
+                },
+                "transaction_coordinator_partition": {
+                    "type": "int",
+                    "description": "Transaction coordinator partition coordinating the transaction."
+                },
+                "transaction_group_id": {
+                    "type": "string",
+                    "description": "Group id of transaction, only relevant for group partitions."
+                }
+            }
+        },
+        "partition_producers": {
+            "id": "partition_producers",
+            "description": "Debug information about producers producing to a partition.",
+            "properties": {
+                "ntp": {
+                    "type": "string",
+                    "description": "Partition that is queried"
+                },
+                "total_producer_count": {
+                    "type": "long",
+                    "description": "Total number of producers as tracked by the partition."
+                },
+                "producers": {
+                    "type": "array",
+                    "items": {
+                        "type": "partition_producer_state"
+                    },
+                    "description": "Producers to this partition, a limit is enforced to avoid fetching too many producers. total_producer_count denotes actual number of producers tracked by the partition."
                 }
             }
         },
