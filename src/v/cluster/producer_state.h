@@ -70,6 +70,10 @@ public:
         }
     }
 
+    seq_t first_sequence() const { return _first_sequence; }
+    seq_t last_sequence() const { return _last_sequence; }
+    model::term_id term() const { return _term; }
+
     void set_value(request_result_t::value_type);
     void set_error(request_result_t::error_type);
     void mark_request_in_progress() { _state = request_state::in_progress; }
@@ -106,6 +110,14 @@ private:
 // Kafka clients only issue requests in batches of 5, the queue is fairly small
 // at all times.
 class requests {
+private:
+    static constexpr int32_t requests_cached_max = 5;
+    // chunk size of the request containers to avoid wastage.
+    static constexpr size_t chunk_size = std::bit_ceil(
+      static_cast<unsigned long>(requests_cached_max));
+
+    using request_queue = ss::chunked_fifo<request_ptr, chunk_size>;
+
 public:
     result<request_ptr> try_emplace(
       seq_t first, seq_t last, model::term_id current, bool reset_sequences);
@@ -118,17 +130,21 @@ public:
     bool operator==(const requests&) const;
     friend std::ostream& operator<<(std::ostream&, const requests&);
 
+    const request_queue& inflight_requests() const {
+        return _inflight_requests;
+    }
+
+    const request_queue& finished_requests() const {
+        return _finished_requests;
+    }
+
 private:
-    static constexpr int32_t requests_cached_max = 5;
-    // chunk size of the request containers to avoid wastage.
-    static constexpr size_t chunk_size = std::bit_ceil(
-      static_cast<unsigned long>(requests_cached_max));
     bool is_valid_sequence(seq_t incoming) const;
     std::optional<request_ptr> last_request() const;
     void gc_requests_from_older_terms(model::term_id current);
     void reset(request_result_t::error_type);
-    ss::chunked_fifo<request_ptr, chunk_size> _inflight_requests;
-    ss::chunked_fifo<request_ptr, chunk_size> _finished_requests;
+    request_queue _inflight_requests;
+    request_queue _finished_requests;
     friend producer_state;
 };
 
@@ -270,6 +286,8 @@ public:
     // fencing based approach to bump epochs as it requires aborting any in
     // progress transactions with older epoch.
     void reset_with_new_epoch(model::producer_epoch new_epoch);
+
+    const requests& idempotent_request_state() const { return _requests; }
 
 private:
     prefix_logger& _logger;
