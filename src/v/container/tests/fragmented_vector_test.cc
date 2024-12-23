@@ -553,4 +553,20 @@ TEST(ChunkedVector, ShrinkToFit) {
     EXPECT_EQ(vec.capacity(), 10);
 }
 
+TEST(ChunkedVector, FromRange) {
+    std::vector<int32_t> buffer;
+    buffer.reserve(10);
+    for (int i = 0; i < 10; ++i) {
+        buffer.push_back(i);
+    }
+
+    auto vec = chunked_vector<int32_t>(buffer);
+    EXPECT_THAT(vec, ElementsAreArray(buffer));
+}
+
+TEST(ChunkedVector, InPlaceSingleElement) {
+    auto v = chunked_vector<std::pair<ss::sstring, int32_t>>::single("a2", 3);
+    ASSERT_THAT(v, ElementsAre(std::make_pair("a2", 3)));
+}
+
 } // namespace

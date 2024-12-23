@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <iterator>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -119,6 +120,16 @@ public:
      */
     fragmented_vector(std::initializer_list<value_type> elems)
       : fragmented_vector(elems.begin(), elems.end()) {}
+    /**
+     * @brief Construct a new vector from a given range
+     */
+    template<typename Range>
+    requires std::ranges::sized_range<Range>
+    explicit fragmented_vector(Range range)
+      : fragmented_vector() {
+        reserve(std::ranges::size(range));
+        std::move(range.begin(), range.end(), std::back_inserter(*this));
+    }
 
     fragmented_vector& operator=(fragmented_vector&& other) noexcept {
         if (this != &other) {
@@ -479,6 +490,13 @@ public:
      * @brief Erases all elements from begin to the end of the vector.
      */
     void erase_to_end(const_iterator begin) { pop_back_n(cend() - begin); }
+
+    template<typename... Args>
+    static fragmented_vector single(Args&&... args) {
+        fragmented_vector v;
+        v.emplace_back(std::forward<Args>(args)...);
+        return v;
+    }
 
     friend std::ostream&
     operator<<(std::ostream& os, const fragmented_vector& v) {
