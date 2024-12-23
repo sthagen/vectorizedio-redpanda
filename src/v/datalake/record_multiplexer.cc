@@ -30,7 +30,8 @@ record_multiplexer::record_multiplexer(
   schema_manager& schema_mgr,
   type_resolver& type_resolver,
   record_translator& record_translator,
-  table_creator& table_creator)
+  table_creator& table_creator,
+  lazy_abort_source& as)
   : _log(datalake_log, fmt::format("{}", ntp))
   , _ntp(ntp)
   , _topic_revision(topic_revision)
@@ -38,10 +39,18 @@ record_multiplexer::record_multiplexer(
   , _schema_mgr(schema_mgr)
   , _type_resolver(type_resolver)
   , _record_translator(record_translator)
-  , _table_creator(table_creator) {}
+  , _table_creator(table_creator)
+  , _as(as) {}
 
 ss::future<ss::stop_iteration>
 record_multiplexer::operator()(model::record_batch batch) {
+    if (_as.abort_requested()) {
+        vlog(
+          _log.debug,
+          "Abort requested, stopping translation, reason: {}",
+          _as.abort_reason());
+        co_return ss::stop_iteration::yes;
+    }
     if (batch.compressed()) {
         batch = co_await storage::internal::decompress_batch(std::move(batch));
     }
@@ -50,6 +59,13 @@ record_multiplexer::operator()(model::record_batch batch) {
     auto it = model::record_batch_iterator::create(batch);
 
     while (it.has_next()) {
+        if (_as.abort_requested()) {
+            vlog(
+              _log.debug,
+              "Abort requested, stopping translation, reason: {}",
+              _as.abort_reason());
+            co_return ss::stop_iteration::yes;
+        }
         auto record = it.next();
         auto key = record.share_key_opt();
         auto val = record.share_value_opt();
