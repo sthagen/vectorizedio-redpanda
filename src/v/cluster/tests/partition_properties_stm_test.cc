@@ -118,8 +118,7 @@ struct partition_properties_stm_fixture : raft::raft_fixture {
                 .then([&](ss::circular_buffer<model::record_batch> batches) {
                     return leader_node.raft()
                       ->replicate(
-                        model::make_memory_record_batch_reader(
-                          std::move(batches)),
+                        chunked_vector<model::record_batch>(std::move(batches)),
                         raft::replicate_options(
                           raft::consistency_level::quorum_ack))
                       .then([](result<raft::replicate_result> res) {
