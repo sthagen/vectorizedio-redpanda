@@ -129,8 +129,12 @@ model::offset group_tx_tracker_stm::max_collectible_offset() {
 
 ss::future<raft::local_snapshot_applied>
 group_tx_tracker_stm::apply_local_snapshot(
-  raft::stm_snapshot_header, iobuf&& snap_buf) {
+  raft::stm_snapshot_header header, iobuf&& snap_buf) {
     auto holder = _gate.hold();
+    if (header.version != supported_local_snapshot_version) {
+        // fall back to applying from the log
+        co_return raft::local_snapshot_applied::no;
+    }
     iobuf_parser parser(std::move(snap_buf));
     auto snap = co_await serde::read_async<snapshot>(parser);
     _all_txs = std::move(snap.transactions);
@@ -147,8 +151,8 @@ group_tx_tracker_stm::take_local_snapshot(ssx::semaphore_units apply_units) {
     iobuf snap_buf;
     apply_units.return_all();
     co_await serde::write_async(snap_buf, snap);
-    // snapshot versioning handled via serde.
-    co_return raft::stm_snapshot::create(0, offset, std::move(snap_buf));
+    co_return raft::stm_snapshot::create(
+      supported_local_snapshot_version, offset, std::move(snap_buf));
 }
 
 ss::future<> group_tx_tracker_stm::apply_raft_snapshot(const iobuf&) {

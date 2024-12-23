@@ -126,6 +126,7 @@ public:
     const all_txs_t& inflight_transactions() const { return _all_txs; }
 
 private:
+    static constexpr int8_t supported_local_snapshot_version = 1;
     struct snapshot
       : serde::envelope<snapshot, serde::version<0>, serde::compat_version<0>> {
         all_txs_t transactions;
