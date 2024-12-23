@@ -28,6 +28,9 @@ namespace raft {
 inline constexpr const int8_t stm_snapshot_version_v0 = 0;
 inline constexpr const int8_t stm_snapshot_version = 1;
 
+using local_snapshot_applied
+  = ss::bool_class<struct local_snapshot_applied_tag>;
+
 struct stm_snapshot_header {
     int8_t version{0};
     int32_t snapshot_size{0};
@@ -221,9 +224,12 @@ protected:
     virtual ss::future<> do_apply(const model::record_batch& b) = 0;
 
     /**
-     * Called when local snapshot is applied to the state machine
+     * Called when local snapshot is applied to the state machine. The state
+     * machine may choose to reject the snapshot if it wishes to in which case
+     * it will be hydrated from the log.
      */
-    virtual ss::future<> apply_local_snapshot(stm_snapshot_header, iobuf&&) = 0;
+    virtual ss::future<local_snapshot_applied>
+    apply_local_snapshot(stm_snapshot_header, iobuf&&) = 0;
 
     /**
      * Called when a local snapshot is taken. Apply fiber is stalled until

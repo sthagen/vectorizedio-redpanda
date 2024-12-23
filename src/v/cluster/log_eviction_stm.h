@@ -109,7 +109,7 @@ public:
     ss::future<iobuf> take_snapshot(model::offset) final { co_return iobuf{}; }
 
 protected:
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) override;
 
     ss::future<raft::stm_snapshot>

@@ -89,12 +89,13 @@ ss::future<iobuf> partition_properties_stm::take_snapshot(model::offset o) {
       raft_snapshot{.writes_disabled = it->writes_disabled});
 }
 
-ss::future<> partition_properties_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied>
+partition_properties_stm::apply_local_snapshot(
   raft::stm_snapshot_header header, iobuf&& buffer) {
     vlog(_log.debug, "Applying local snapshot with offset {}", header.offset);
     auto snapshot = serde::from_iobuf<local_snapshot>(std::move(buffer));
     _state_snapshots = std::move(snapshot.state_updates);
-    co_return;
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot> partition_properties_stm::take_local_snapshot(

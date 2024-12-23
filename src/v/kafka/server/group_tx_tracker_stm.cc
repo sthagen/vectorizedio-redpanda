@@ -127,12 +127,14 @@ model::offset group_tx_tracker_stm::max_collectible_offset() {
     return result;
 }
 
-ss::future<> group_tx_tracker_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied>
+group_tx_tracker_stm::apply_local_snapshot(
   raft::stm_snapshot_header, iobuf&& snap_buf) {
     auto holder = _gate.hold();
     iobuf_parser parser(std::move(snap_buf));
     auto snap = co_await serde::read_async<snapshot>(parser);
     _all_txs = std::move(snap.transactions);
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>

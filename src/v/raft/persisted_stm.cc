@@ -545,17 +545,24 @@ ss::future<> persisted_stm_base<BaseT, T>::start() {
 
     if (maybe_snapshot) {
         stm_snapshot& snapshot = *maybe_snapshot;
-
         auto next_offset = model::next_offset(snapshot.header.offset);
         if (next_offset >= _raft->start_offset()) {
-            vlog(
-              _log.debug,
-              "start with applied snapshot, set_next {}",
-              next_offset);
-            co_await apply_local_snapshot(
+            auto snapshot_applied = co_await apply_local_snapshot(
               snapshot.header, std::move(snapshot.data));
-            BaseT::set_next(next_offset);
-            _last_snapshot_offset = snapshot.header.offset;
+            if (snapshot_applied == local_snapshot_applied::yes) {
+                vlog(
+                  _log.debug,
+                  "start with applied snapshot, set_next {}",
+                  next_offset);
+                _last_snapshot_offset = snapshot.header.offset;
+                BaseT::set_next(next_offset);
+            } else {
+                vlog(
+                  _log.warn,
+                  "local snapshot rejected by {}, will be recovered from the "
+                  "log",
+                  name());
+            }
         } else {
             // This can happen on an out-of-date replica that re-joins the group
             // after other replicas have already evicted logs to some offset

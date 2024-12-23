@@ -1684,7 +1684,7 @@ model::offset rm_stm::to_log_offset(kafka::offset k_offset) const {
     return model::offset(k_offset);
 }
 
-ss::future<>
+ss::future<raft::local_snapshot_applied>
 rm_stm::apply_local_snapshot(raft::stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
     auto units = co_await _state_lock.hold_write_lock();
 
@@ -1707,7 +1707,7 @@ rm_stm::apply_local_snapshot(raft::stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
         data = co_await serde::read_async<tx_snapshot_v6>(data_parser);
     } else {
         vlog(_ctx_log.error, "Ignored snapshot version {}", hdr.version);
-        co_return;
+        co_return raft::local_snapshot_applied::no;
     }
 
     _highest_producer_id = std::max(
@@ -1792,6 +1792,7 @@ rm_stm::apply_local_snapshot(raft::stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
               snapshot_opt.value());
         }
     }
+    co_return raft::local_snapshot_applied::yes;
 }
 
 uint8_t rm_stm::active_snapshot_version() {

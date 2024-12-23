@@ -262,7 +262,7 @@ private:
       tx::producer_ptr,
       std::optional<model::tx_seq>,
       model::timeout_clock::duration);
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) override;
     ss::future<raft::stm_snapshot>
     take_local_snapshot(ssx::semaphore_units apply_units) override;

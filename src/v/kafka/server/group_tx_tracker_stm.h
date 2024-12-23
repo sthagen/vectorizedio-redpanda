@@ -97,7 +97,7 @@ public:
 
     model::offset max_collectible_offset() override;
 
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&& bytes) override;
 
     ss::future<raft::stm_snapshot>

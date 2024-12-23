@@ -130,7 +130,7 @@ public:
           });
     }
 
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&& bytes) override {
         auto holder = _gate.hold();
         iobuf_parser parser(std::move(bytes));
@@ -144,6 +144,7 @@ public:
             }
         }
         _kvs = std::move(snap.kv_data);
+        co_return raft::local_snapshot_applied::yes;
     }
 
     ss::future<raft::stm_snapshot>

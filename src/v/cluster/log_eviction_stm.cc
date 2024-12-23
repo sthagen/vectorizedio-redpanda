@@ -441,14 +441,14 @@ ss::future<> log_eviction_stm::apply_raft_snapshot(const iobuf&) {
     co_return;
 }
 
-ss::future<> log_eviction_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied> log_eviction_stm::apply_local_snapshot(
   raft::stm_snapshot_header header, iobuf&& data) {
     auto snapshot = serde::from_iobuf<snapshot_data>(std::move(data));
     vlog(
       _log.info, "Applying snapshot {} at offset: {}", snapshot, header.offset);
 
     _delete_records_eviction_offset = snapshot.effective_start_offset;
-    return ss::now();
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>
