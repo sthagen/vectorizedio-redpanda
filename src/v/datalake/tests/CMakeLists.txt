@@ -10,7 +10,9 @@ v_cc_library(
   DEPS
     Avro::avro
     Seastar::seastar
+    protobuf::libprotobuf
     v::avro_test_utils
+    v::protobuf_test_utils
     v::schema
     v::schema_test_fixture
     v::storage
@@ -33,22 +35,7 @@ rp_test(
   ARGS "-- -c 1"
 )
 
-rp_test(
-  UNIT_TEST
-  GTEST
-  BINARY_NAME gtest_arrow_writer
-  SOURCES arrow_writer_test.cc
-  LIBRARIES
-    v::application
-    v::features
-    v::gtest_main
-    v::kafka_test_utils
-    v::datalake_writer
-    v::model_test_utils
-    v::iceberg_test_utils
-  LABELS datalake
-  ARGS "-- -c 1"
-)
+
 
 rp_test(
   FIXTURE_TEST
@@ -56,7 +43,6 @@ rp_test(
   BINARY_NAME datalake
   SOURCES
     record_schema_resolver_test.cc
-    parquet_writer_test.cc
     partitioning_writer_test.cc
   LIBRARIES
     v::bytes
@@ -177,19 +163,6 @@ target_include_directories(v_datalake_test_proto_cc_files
 rp_test(
   UNIT_TEST
   GTEST
-  BINARY_NAME batching_parquet_writer
-  SOURCES batching_parquet_writer_test.cc
-  LIBRARIES
-    v::gtest_main
-    v::datalake_writer
-    v::iceberg_test_utils
-  LABELS datalake
-  ARGS "-- -c 1"
-)
-
-rp_test(
-  UNIT_TEST
-  GTEST
   BINARY_NAME local_parquet_file_writer
   SOURCES local_parquet_file_writer_test.cc
   LIBRARIES
@@ -230,4 +203,21 @@ rp_test(
     v::avro_test_utils
   LABELS datalake
   ARGS "-- -c 1"
+)
+
+rp_test(
+  BENCHMARK_TEST
+  BINARY_NAME record_multiplexer
+  SOURCES record_multiplexer_bench.cc
+  LIBRARIES
+    Seastar::seastar_perf_testing
+    Boost::unit_test_framework
+    v::cloud_io_utils
+    v::application
+    v::datalake_test_utils
+    v::iceberg_test_utils
+    v::schema
+    v::s3_imposter
+  ARGS "-c 1 --duration=1 --runs=1 --memory=4G"
+  LABELS datalake
 )

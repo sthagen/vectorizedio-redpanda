@@ -187,6 +187,7 @@ redpanda_cc_library(
     deps = [
         "//src/v/base",
         "//src/v/container:intrusive",
+        "//src/v/metrics",
         "//src/v/ssx:semaphore",
         "//src/v/utils:named_type",
         "@seastar",
@@ -419,6 +420,7 @@ redpanda_cc_library(
         "//src/v/utils:mutex",
         "//src/v/utils:named_type",
         "//src/v/utils:notification_list",
+        "//src/v/utils:null_output_stream",
         "//src/v/utils:prefix_logger",
         "//src/v/utils:stream_provider",
         "//src/v/utils:to_string",

@@ -93,12 +93,22 @@ datalake_manager::datalake_manager(
   , _sg(sg)
   , _effective_max_translator_buffered_data(
       std::min(memory_limit, max_translator_buffered_data))
-  , _parallel_translations(std::make_unique<ssx::semaphore>(
-      size_t(
-        std::floor(memory_limit / _effective_max_translator_buffered_data)),
-      "datalake_parallel_translations"))
   , _iceberg_commit_interval(
-      config::shard_local_cfg().iceberg_catalog_commit_interval_ms.bind()) {}
+      config::shard_local_cfg().iceberg_catalog_commit_interval_ms.bind()) {
+    vassert(memory_limit > 0, "Memory limit must be greater than 0");
+    auto max_parallel = static_cast<size_t>(
+      std::floor(memory_limit / _effective_max_translator_buffered_data));
+    vlog(
+      datalake_log.debug,
+      "Creating datalake manager with memory limit: {}, effective max "
+      "translator buffered data: {} and max parallel translations: {}",
+      memory_limit,
+      _effective_max_translator_buffered_data,
+      max_parallel);
+
+    _parallel_translations = std::make_unique<ssx::semaphore>(
+      size_t(max_parallel), "datalake_parallel_translations");
+}
 datalake_manager::~datalake_manager() = default;
 
 ss::future<> datalake_manager::start() {
@@ -116,9 +126,7 @@ ss::future<> datalake_manager::start() {
       = _partition_mgr->local().register_unmanage_notification(
         model::kafka_namespace, [this](model::topic_partition_view tp) {
             model::ntp ntp{model::kafka_namespace, tp.topic, tp.partition};
-            ssx::spawn_with_gate(_gate, [this, ntp = std::move(ntp)] {
-                return stop_translator(ntp);
-            });
+            stop_translator(ntp);
         });
     // Handle leadership changes
     auto leadership_registration
@@ -207,9 +215,7 @@ void datalake_manager::on_group_notification(const model::ntp& ntp) {
                             == model::iceberg_mode::disabled;
     if (!partition->is_leader() || iceberg_disabled) {
         if (it != _translators.end()) {
-            ssx::spawn_with_gate(_gate, [this, partition] {
-                return stop_translator(partition->ntp());
-            });
+            stop_translator(partition->ntp());
         }
         return;
     }
@@ -250,14 +256,23 @@ void datalake_manager::start_translator(
     _translators.emplace(partition->ntp(), std::move(translator));
 }
 
-ss::future<> datalake_manager::stop_translator(const model::ntp& ntp) {
+void datalake_manager::stop_translator(const model::ntp& ntp) {
+    if (_gate.is_closed()) {
+        // Cleanup should be deferred to stop().
+        return;
+    }
     auto it = _translators.find(ntp);
     if (it == _translators.end()) {
-        co_return;
+        return;
     }
-    auto translator = std::move(it->second);
+    auto t = std::move(it->second);
     _translators.erase(it);
-    co_await translator->stop();
+    ssx::spawn_with_gate(_gate, [t = std::move(t)]() mutable {
+        // Keep 't' alive by capturing it into the finally below. Use the raw
+        // pointer here to avoid a user-after-move.
+        auto* t_ptr = t.get();
+        return t_ptr->stop().finally([_ = std::move(t)] {});
+    });
 }
 
 } // namespace datalake

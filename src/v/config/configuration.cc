@@ -1340,7 +1340,7 @@ configuration::configuration()
       {.needs_restart = needs_restart::no,
        .example = "1",
        .visibility = visibility::tunable},
-      10)
+      1)
   , segment_fallocation_step(
       *this,
       "segment_fallocation_step",
@@ -1500,7 +1500,7 @@ configuration::configuration()
       std::vector<ss::sstring>{"GSSAPI", "OAUTHBEARER"},
       "sasl_mechanisms",
       "A list of supported SASL mechanisms. Accepted values: `SCRAM`, "
-      "`GSSAPI`, `OAUTHBEARER`.",
+      "`GSSAPI`, `OAUTHBEARER`, `PLAIN`.",
       meta{
         .needs_restart = needs_restart::no,
         .visibility = visibility::user,
@@ -3682,7 +3682,6 @@ configuration::configuration()
        tls_version::v1_3})
   , iceberg_enabled(
       *this,
-      true,
       "iceberg_enabled",
       "Enables the translation of topic data into Iceberg tables. Setting "
       "iceberg_enabled to true activates the feature at the cluster level, but "

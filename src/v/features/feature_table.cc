@@ -62,8 +62,6 @@ std::string_view to_string_view(feature f) {
         return "broker_time_based_retention";
     case feature::wasm_transforms:
         return "wasm_transforms";
-    case feature::raft_config_serde:
-        return "raft_config_serde";
     case feature::fast_partition_reconfiguration:
         return "fast_partition_reconfiguration";
     case feature::disabling_partitions:
@@ -98,6 +96,8 @@ std::string_view to_string_view(feature f) {
         return "shadow_indexing_split_topic_property_update";
     case feature::datalake_iceberg:
         return "datalake_iceberg";
+    case feature::raft_symmetric_reconfiguration_cancel:
+        return "raft_symmetric_reconfiguration_cancel";
 
     /*
      * testing features
@@ -197,7 +197,7 @@ bool is_major_version_upgrade(
 static std::array test_extra_schema{
   // For testing, a feature that does not auto-activate
   feature_spec{
-    cluster::cluster_version{2001},
+    TEST_VERSION,
     "__test_alpha",
     feature::test_alpha,
     feature_spec::available_policy::explicit_only,
@@ -205,7 +205,7 @@ static std::array test_extra_schema{
 
   // For testing, a feature that auto-activates
   feature_spec{
-    cluster::cluster_version{2001},
+    TEST_VERSION,
     "__test_bravo",
     feature::test_bravo,
     feature_spec::available_policy::always,
@@ -213,7 +213,7 @@ static std::array test_extra_schema{
 
   // For testing, a feature that auto-activates
   feature_spec{
-    cluster::cluster_version{2001},
+    TEST_VERSION,
     "__test_charlie",
     feature::test_charlie,
     feature_spec::available_policy::new_clusters_only,

@@ -12,6 +12,7 @@ redpanda_cc_library(
         ":logger",
         ":table_definition",
         "//src/v/base",
+        "//src/v/iceberg:compatibility",
         "//src/v/iceberg:field_collecting_visitor",
         "//src/v/iceberg:schema",
         "//src/v/iceberg:transaction",
@@ -293,7 +294,7 @@ redpanda_cc_library(
         "cloud_data_io.h",
     ],
     include_prefix = "datalake",
-    visibility = [":__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = [
         ":base_types",
         ":logger",

@@ -4,12 +4,13 @@ common --extra_toolchains=@llvm_18_toolchain//:all
 common --@toolchains_llvm//toolchain/config:libunwind=False
 common --@toolchains_llvm//toolchain/config:compiler-rt=False
 build --linkopt --unwindlib=libgcc
+build --linkopt -stdlib=libc++
 
 common:clang-19 --extra_toolchains=@llvm_19_toolchain//:all
 
 build:system-clang --extra_toolchains=@local_config_cc_toolchains//:all
 build:system-clang --action_env=BAZEL_COMPILER=clang
-build:system-clang --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build:system-clang --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
 build:system-clang --linkopt -fuse-ld=lld
 # use a compiler name that doesn't symlink to ccache
 build:system-clang-18 --config=system-clang
@@ -47,6 +48,7 @@ build:sanitizer --linkopt -fsanitize=address,undefined,vptr,function
 build:sanitizer --linkopt --rtlib=compiler-rt
 build:sanitizer --linkopt -fsanitize-link-c++-runtime
 build:sanitizer --copt -O1
+build:sanitizer --//bazel:has_sanitizers=True
 # seastar has to be run with system allocator when using sanitizers
 build:sanitizer --@seastar//:system_allocator=True
 # krb5 is a foreign cc build and needs explicit list of sanitizers to build the shared library
@@ -89,10 +91,27 @@ build:secure --config=relro
 build:release --compilation_mode opt
 build:release --config=secure
 build:release --copt -mllvm --copt -inline-threshold=2500
-build:release --linkopt=-flto
 build:release --@seastar//:stack_guards=False
+build:release --//src/v/redpanda:lto=True
+build:release --copt -flto=thin --copt -ffat-lto-objects
 
 build:stamp --stamp --workspace_status_command=./bazel/stamp_vars.sh
+
+# =================================
+# Coverage
+# =================================
+coverage --config=coverage
+build:coverage --action_env=BAZEL_USE_LLVM_NATIVE_COVERAGE=1
+build:coverage --action_env=GCOV=llvm-profdata
+build:coverage --copt=-DNDEBUG
+build:coverage --define=dynamic_link_tests=true
+build:coverage --combined_report=lcov
+build:coverage --experimental_use_llvm_covmap
+build:coverage --experimental_generate_llvm_lcov
+build:coverage --experimental_split_coverage_postprocessing
+build:coverage --experimental_fetch_all_coverage_outputs
+build:coverage --collect_code_coverage
+build:coverage --instrumentation_filter="^//src/v[/:]"
 
 # =================================
 # Testing

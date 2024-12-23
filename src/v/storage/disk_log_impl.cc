@@ -58,6 +58,7 @@
 #include <fmt/format.h>
 #include <roaring/roaring.hh>
 
+#include <chrono>
 #include <exception>
 #include <iterator>
 #include <optional>
@@ -522,7 +523,7 @@ segment_set disk_log_impl::find_sliding_range(
           config().ntp(),
           _last_compaction_window_start_offset.value(),
           _segs.front()->offsets().get_base_offset());
-
+        _probe->add_sliding_window_round_complete();
         _last_compaction_window_start_offset.reset();
     }
 
@@ -551,11 +552,8 @@ segment_set disk_log_impl::find_sliding_range(
 
         buf.emplace_back(seg);
     }
-    segment_set segs(std::move(buf));
-    if (segs.empty()) {
-        return segs;
-    }
 
+    segment_set segs(std::move(buf));
     return segs;
 }
 
@@ -616,7 +614,7 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
         // compacted.
         auto seg = segs.front();
         co_await internal::mark_segment_as_finished_window_compaction(
-          seg, true);
+          seg, true, *_probe);
         segs.pop_front();
     }
     if (segs.empty()) {
@@ -662,6 +660,10 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
           "[{}] failed to build offset map. Stopping compaction: {}",
           config().ntp(),
           std::current_exception());
+        // Reset the sliding window start offset so that compaction may still
+        // make progress in the future. Otherwise, we will fail to build the
+        // offset map for the same segment over and over.
+        _last_compaction_window_start_offset.reset();
         co_return false;
     }
     vlog(
@@ -687,7 +689,7 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
           "{}, resetting sliding window start offset",
           config().ntp(),
           idx_start_offset);
-
+        _probe->add_sliding_window_round_complete();
         next_window_start_offset.reset();
     }
 
@@ -707,7 +709,7 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
             // entirely comprised of non-data batches. Mark it as compacted so
             // we can progress through compactions.
             co_await internal::mark_segment_as_finished_window_compaction(
-              seg, is_clean_compacted);
+              seg, is_clean_compacted, *_probe);
 
             vlog(
               gclog.debug,
@@ -722,7 +724,7 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
             // All data records are already compacted away. Skip to avoid a
             // needless rewrite.
             co_await internal::mark_segment_as_finished_window_compaction(
-              seg, is_clean_compacted);
+              seg, is_clean_compacted, *_probe);
 
             vlog(
               gclog.trace,
@@ -822,7 +824,7 @@ ss::future<bool> disk_log_impl::sliding_window_compact(
         // Mark the segment as completed window compaction, and possibly set the
         // clean_compact_timestamp in it's index.
         co_await internal::mark_segment_as_finished_window_compaction(
-          seg, is_clean_compacted);
+          seg, is_clean_compacted, *_probe);
 
         co_await seg->index().flush();
         co_await ss::rename_file(
@@ -1747,7 +1749,7 @@ void disk_log_impl::bg_checkpoint_offset_translator() {
 ss::future<> disk_log_impl::force_roll(ss::io_priority_class iopc) {
     auto roll_lock_holder = co_await _segments_rolling_lock.get_units();
     auto t = term();
-    auto next_offset = offsets().dirty_offset + model::offset(1);
+    auto next_offset = model::next_offset(offsets().dirty_offset);
     if (_segs.empty()) {
         co_return co_await new_segment(next_offset, t, iopc);
     }
@@ -1819,13 +1821,36 @@ ss::future<> disk_log_impl::apply_segment_ms() {
     auto& local_config = config::shard_local_cfg();
     // clamp user provided value with (hopefully sane) server min and max
     // values, this should protect against overflow UB
-    if (
-      first_write_ts.value()
-        + std::clamp(
+    const auto clamped_seg_ms = std::clamp(
+      seg_ms.value(),
+      local_config.log_segment_ms_min(),
+      local_config.log_segment_ms_max());
+
+    static constexpr auto rate_limit = std::chrono::minutes(5);
+    thread_local static ss::logger::rate_limit rate(rate_limit);
+    if (seg_ms < clamped_seg_ms) {
+        stlog.log(
+          ss::log_level::warn,
+          rate,
+          "Configured segment.ms={} is lower than the configured cluster "
+          "bound {}={}",
           seg_ms.value(),
-          local_config.log_segment_ms_min(),
-          local_config.log_segment_ms_max())
-      > ss::lowres_clock::now()) {
+          local_config.log_segment_ms_min.name(),
+          local_config.log_segment_ms_min());
+    }
+
+    if (seg_ms > clamped_seg_ms) {
+        stlog.log(
+          ss::log_level::warn,
+          rate,
+          "Configured segment.ms={} is higher than the configured cluster "
+          "bound {}={}",
+          seg_ms.value(),
+          local_config.log_segment_ms_max.name(),
+          local_config.log_segment_ms_max());
+    }
+
+    if (first_write_ts.value() + clamped_seg_ms > ss::lowres_clock::now()) {
         // skip, time hasn't expired
         co_return;
     }

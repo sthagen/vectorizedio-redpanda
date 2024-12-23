@@ -142,6 +142,7 @@ void follower_index_metadata::reset() {
     last_successful_received_seq = follower_req_seq{0};
     inflight_append_request_count = 0;
     last_sent_protocol_meta.reset();
+    follower_state_change.broadcast();
 }
 
 std::ostream& operator<<(std::ostream& o, const vnode& id) {
@@ -246,14 +247,16 @@ std::ostream& operator<<(std::ostream& o, const protocol_metadata& m) {
     fmt::print(
       o,
       "{{group: {}, commit_index: {}, term: {}, prev_log_index: {}, "
-      "prev_log_term: {}, last_visible_index: {}, dirty_offset: {}}}",
+      "prev_log_term: {}, last_visible_index: {}, dirty_offset: {}, "
+      "prev_log_delta: {}}}",
       m.group,
       m.commit_index,
       m.term,
       m.prev_log_index,
       m.prev_log_term,
       m.last_visible_index,
-      m.dirty_offset);
+      m.dirty_offset,
+      m.prev_log_delta);
     return o;
 }
 

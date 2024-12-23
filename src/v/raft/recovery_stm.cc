@@ -48,8 +48,9 @@ recovery_stm::recovery_stm(
   , _ctxlog(
       raftlog,
       ssx::sformat(
-        "[follower: {}] [group_id:{}, {}]",
+        "[follower: {}, term: {}] [group_id:{}, {}]",
         _node_id,
+        _term,
         _ptr->group(),
         _ptr->ntp()))
   , _memory_quota(quota) {}
@@ -566,7 +567,9 @@ ss::future<> recovery_stm::replicate(
         .prev_log_index = prev_log_idx,
         .prev_log_term = prev_log_term,
         .last_visible_index = last_visible_idx,
-        .dirty_offset = lstats.dirty_offset},
+        .dirty_offset = lstats.dirty_offset,
+        .prev_log_delta = _ptr->get_offset_delta(lstats, prev_log_idx),
+      },
       std::move(reader),
       range_size,
       flush);

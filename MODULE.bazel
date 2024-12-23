@@ -41,7 +41,16 @@ bazel_dep(name = "googletest", version = "1.15.2")
 bazel_dep(name = "liburing", version = "2.5")
 bazel_dep(name = "lz4", version = "1.9.4")
 bazel_dep(name = "platforms", version = "0.0.10")
-bazel_dep(name = "protobuf", version = "27.3")
+bazel_dep(name = "protobuf", version = "29.0")
+single_version_override(
+    module_name = "protobuf",
+    patch_strip = 1,
+    # this patch is in upstream protobuf, so should be in an upcoming release.
+    patches = [
+        "//bazel/thirdparty:protobuf_capture_warning.patch",
+    ],
+)
+
 bazel_dep(name = "re2", version = "2024-07-02")
 bazel_dep(name = "rules_foreign_cc", version = "0.12.0")
 bazel_dep(name = "rules_go", version = "0.50.1")
@@ -114,7 +123,7 @@ single_version_override(
 # NOTE: We build our toolchains on ubuntu:jammy so you're going to need a distro at least that old.
 llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
 
-CXX_STANDARD = "c++20"
+CXX_STANDARD = "c++23"
 
 llvm.toolchain(
     name = "llvm_19_toolchain",

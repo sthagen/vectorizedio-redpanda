@@ -1106,7 +1106,7 @@ ss::future<std::error_code> consensus::change_configuration(Func&& f) {
               return ss::make_ready_future<std::error_code>(
                 errc::configuration_change_in_progress);
           }
-          maybe_upgrade_configuration_to_v4(latest_cfg);
+          try_updating_configuration_version(latest_cfg);
           result<group_configuration> res = f(std::move(latest_cfg));
           if (res) {
               if (res.value().revision_id() < config().revision_id()) {
@@ -1176,29 +1176,30 @@ ss::future<std::error_code> consensus::add_group_member(
   model::revision_id new_revision,
   std::optional<model::offset> learner_start_offset) {
     vlog(_ctxlog.trace, "Adding member: {}", node);
-    return change_configuration([node, new_revision, learner_start_offset](
-                                  group_configuration current) mutable {
-        using ret_t = result<group_configuration>;
-        if (current.contains(node)) {
-            return ret_t{errc::node_already_exists};
-        }
-        current.set_version(raft::group_configuration::v_5);
-        current.add(node, new_revision, learner_start_offset);
+    return change_configuration(
+      [this, node, new_revision, learner_start_offset](
+        group_configuration current) mutable {
+          using ret_t = result<group_configuration>;
+          if (current.contains(node)) {
+              return ret_t{errc::node_already_exists};
+          }
+          try_updating_configuration_version(current);
+          current.add(node, new_revision, learner_start_offset);
 
-        return ret_t{std::move(current)};
-    });
+          return ret_t{std::move(current)};
+      });
 }
 
 ss::future<std::error_code>
 consensus::remove_member(vnode node, model::revision_id new_revision) {
     vlog(_ctxlog.trace, "Removing member: {}", node);
     return change_configuration(
-      [node, new_revision](group_configuration current) {
+      [this, node, new_revision](group_configuration current) {
           using ret_t = result<group_configuration>;
           if (!current.contains(node)) {
               return ret_t{errc::node_does_not_exists};
           }
-          current.set_version(raft::group_configuration::v_5);
+          try_updating_configuration_version(current);
           current.remove(node, new_revision);
 
           if (current.current_config().voters.empty()) {
@@ -1216,7 +1217,7 @@ ss::future<std::error_code> consensus::replace_configuration(
       [this, nodes = std::move(nodes), new_revision, learner_start_offset](
         group_configuration current) mutable {
           auto old = current;
-          current.set_version(raft::group_configuration::v_5);
+          try_updating_configuration_version(current);
           current.replace(nodes, new_revision, learner_start_offset);
           vlog(
             _ctxlog.debug,
@@ -1354,15 +1355,7 @@ ss::future<std::error_code> consensus::force_replace_configuration_locally(
         auto units = co_await _op_lock.get_units();
         auto new_cfg = group_configuration(
           std::move(voters), std::move(learners), new_revision);
-        if (
-          new_cfg.version() == group_configuration::v_5
-          && use_serde_configuration()) {
-            vlog(
-              _ctxlog.debug,
-              "Upgrading configuration {} version to 6",
-              new_cfg);
-            new_cfg.set_version(group_configuration::v_6);
-        }
+        try_updating_configuration_version(new_cfg);
         vlog(_ctxlog.info, "Force replacing configuration with: {}", new_cfg);
 
         update_follower_stats(new_cfg);
@@ -1373,6 +1366,29 @@ ss::future<std::error_code> consensus::force_replace_configuration_locally(
         co_return errc::shutting_down;
     }
     co_return errc::success;
+}
+
+void consensus::try_updating_configuration_version(group_configuration& cfg) {
+    maybe_upgrade_configuration_to_v4(cfg);
+
+    auto version = cfg.version();
+    if (
+      version >= group_configuration::v_4
+      && version < group_configuration::v_7) {
+        version = supports_symmetric_reconfiguration_cancel()
+                      && cfg.get_state() == configuration_state::simple
+                    ? group_configuration::v_7
+                    : group_configuration::v_6;
+        if (version == cfg.version()) {
+            return;
+        }
+        vlog(
+          _ctxlog.debug,
+          "Upgrading configuration {} version to {}",
+          cfg,
+          version);
+        cfg.set_version(version);
+    }
 }
 
 ss::future<> consensus::start(
@@ -2185,7 +2201,7 @@ consensus::do_append_entries(append_entries_request&& r) {
             // the leader vote timeout
             _hbeat = clock_type::now();
         });
-
+        validate_offset_translator_delta(request_metadata, lstats);
         storage::append_result ofs = co_await disk_append(
           std::move(r).release_batches(), update_last_quorum_index::no);
         auto last_visible = std::min(
@@ -2231,6 +2247,31 @@ consensus::do_append_entries(append_entries_request&& r) {
           std::current_exception());
         reply.result = reply_result::failure;
         co_return reply;
+    }
+}
+
+void consensus::validate_offset_translator_delta(
+  const protocol_metadata& meta, const storage::offset_stats& lstats) {
+    // do not validate if prev_log_delta is not set
+    if (meta.prev_log_delta < model::offset_delta{0}) {
+        return;
+    }
+    /**
+     * If request contain valid information and it is about to be appended
+     * to the log validate the offset translator delta consistency.
+     */
+    const auto last_delta = get_offset_delta(lstats, meta.prev_log_index);
+    if (
+      last_delta >= model::offset_delta{0}
+      && last_delta != meta.prev_log_delta) {
+        vlog(
+          _ctxlog.error,
+          "Offset translator state inconsistency detected. Received "
+          "append entries request {} with last offset delta different "
+          "than expected: {}",
+          meta,
+          last_delta);
+        _probe->offset_translator_inconsistency_error();
     }
 }
 
@@ -2618,14 +2659,7 @@ ss::future<std::error_code> consensus::replicate_configuration(
     vlog(_ctxlog.debug, "Replicating group configuration {}", cfg);
     return ss::with_gate(
       _bg, [this, u = std::move(u), cfg = std::move(cfg)]() mutable {
-          maybe_upgrade_configuration_to_v4(cfg);
-          if (
-            cfg.version() == group_configuration::v_5
-            && use_serde_configuration()) {
-              vlog(
-                _ctxlog.debug, "Upgrading configuration {} version to 6", cfg);
-              cfg.set_version(group_configuration::v_6);
-          }
+          try_updating_configuration_version(cfg);
 
           auto batches = details::serialize_configuration_as_batches(
             std::move(cfg));
@@ -2914,7 +2948,18 @@ protocol_metadata consensus::meta() const {
       .prev_log_index = lstats.dirty_offset,
       .prev_log_term = prev_log_term,
       .last_visible_index = last_visible_index(),
-      .dirty_offset = lstats.dirty_offset};
+      .dirty_offset = lstats.dirty_offset,
+      .prev_log_delta = get_offset_delta(lstats, lstats.dirty_offset),
+    };
+}
+
+model::offset_delta consensus::get_offset_delta(
+  const storage::offset_stats& lstats, model::offset offset) const {
+    if (offset < model::offset{0} || offset < lstats.start_offset) {
+        return model::offset_delta{};
+    }
+
+    return _log->offset_delta(offset);
 }
 
 void consensus::update_node_append_timestamp(vnode id) {

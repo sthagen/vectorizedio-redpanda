@@ -72,6 +72,7 @@ class KafkaCliTools:
                  version: str | None = None,
                  user: str | None = None,
                  passwd: str | None = None,
+                 algorithm: str | None = 'SCRAM-SHA-256',
                  protocol: str = 'SASL_PLAINTEXT',
                  oauth_cfg: OAuthConfig | None = None):
         self._redpanda = redpanda
@@ -94,7 +95,7 @@ class KafkaCliTools:
             if user:
                 security = security.override(user,
                                              passwd,
-                                             'SCRAM-SHA-256',
+                                             algorithm,
                                              tls_enabled=None)
 
             if sasl := security.simple_credentials():
@@ -152,6 +153,10 @@ sasl.login.callback.handler.class=io.strimzi.kafka.oauth.client.JaasClientOauthL
             args += ["--config", f"retention.ms={spec.retention_ms}"]
         if spec.max_message_bytes:
             args += ["--config", f"max.message.bytes={spec.max_message_bytes}"]
+        if spec.delete_retention_ms:
+            args += [
+                "--config", f"delete.retention.ms={spec.delete_retention_ms}"
+            ]
         return self._run("kafka-topics.sh", args, desc="create_topic")
 
     def create_topic_partitions(self, topic: str, partitions: int):

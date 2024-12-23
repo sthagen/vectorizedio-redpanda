@@ -130,6 +130,53 @@ def _redpanda_cc_test(
         local_defines = local_defines,
     )
 
+def _redpanda_cc_fuzz_test(
+        name,
+        timeout,
+        srcs = [],
+        defines = [],
+        deps = [],
+        custom_args = [],
+        env = {},
+        data = []):
+    """
+    Helper to define a Redpanda C++ fuzzing test.
+
+    Args:
+      name: name of the test
+      timeout: same as native cc_test
+      srcs: test source files
+      defines: definitions of object-like macros
+      deps: test dependencies
+      custom_args: arguments from cc_test users
+      env: environment variables
+      data: data file dependencies
+    """
+    native.cc_test(
+        name = name,
+        timeout = timeout,
+        srcs = srcs,
+        defines = defines,
+        deps = deps,
+        copts = redpanda_copts(),
+        args = custom_args,
+        features = [
+            "layering_check",
+        ],
+        tags = [
+            "fuzz",
+        ],
+        env = env,
+        data = data,
+        linkopts = [
+            "-fsanitize=fuzzer",
+        ],
+        target_compatible_with = select({
+            "//bazel:enable_fuzz_testing": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+
 def _redpanda_cc_unit_test(cpu, memory, **kwargs):
     extra_args = [
         "--unsafe-bypass-fsync 1",
@@ -231,6 +278,26 @@ def redpanda_cc_bench(
         ],
     )
 
+def redpanda_cc_fuzz_test(
+        name,
+        timeout,
+        srcs = [],
+        defines = [],
+        deps = [],
+        args = [],
+        env = {},
+        data = []):
+    _redpanda_cc_fuzz_test(
+        data = data,
+        env = env,
+        name = name,
+        timeout = timeout,
+        srcs = srcs,
+        defines = defines,
+        deps = deps,
+        custom_args = args,
+    )
+
 def redpanda_cc_btest_no_seastar(
         name,
         timeout,
@@ -249,7 +316,10 @@ def redpanda_cc_btest_no_seastar(
         srcs = srcs,
         defines = defines,
         copts = redpanda_copts(),
-        deps = ["@boost//:test.so"] + deps,
+        deps = [
+            "//src/v/test_utils:boost_result_redirect",
+            "@boost//:test.so",
+        ] + deps,
     )
 
 def redpanda_test_cc_library(
