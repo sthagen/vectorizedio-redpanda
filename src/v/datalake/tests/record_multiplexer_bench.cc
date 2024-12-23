@@ -269,7 +269,8 @@ public:
       : _schema_mgr(catalog)
       , _type_resolver(registry)
       , _record_gen(&registry)
-      , _table_creator(_type_resolver, _schema_mgr) {}
+      , _table_creator(_type_resolver, _schema_mgr)
+      , _as([] { return std::nullopt; }) {}
 
     template<typename T>
     requires std::same_as<T, ::testing::protobuf_generator_config>
@@ -314,6 +315,7 @@ private:
     datalake::default_translator _translator;
     datalake::direct_table_creator _table_creator;
     chunked_vector<model::record_batch> _batch_data;
+    lazy_abort_source _as;
 
     const model::ntp ntp{
       model::ns{"rp"}, model::topic{"t"}, model::partition_id{0}};
@@ -327,7 +329,8 @@ private:
           _schema_mgr,
           _type_resolver,
           _translator,
-          _table_creator);
+          _table_creator,
+          _as);
     }
 
     ss::future<>

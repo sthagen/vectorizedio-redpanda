@@ -99,7 +99,8 @@ public:
     RecordMultiplexerTestBase()
       : schema_mgr(catalog)
       , type_resolver(registry)
-      , t_creator(type_resolver, schema_mgr) {}
+      , t_creator(type_resolver, schema_mgr)
+      , as([] { return std::nullopt; }) {}
 
     // Runs the multiplexer on records generated with cb() based on the test
     // parameters.
@@ -138,7 +139,8 @@ public:
           schema_mgr,
           type_resolver,
           translator,
-          t_creator);
+          t_creator,
+          as);
         auto res = reader.consume(std::move(mux), model::no_timeout).get();
         if (expect_error) {
             EXPECT_TRUE(res.has_error());
@@ -176,6 +178,7 @@ public:
     catalog_schema_manager schema_mgr;
     record_schema_resolver type_resolver;
     direct_table_creator t_creator;
+    lazy_abort_source as;
 
     static constexpr records_param default_param = {
       .records_per_batch = 1,

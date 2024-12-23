@@ -38,6 +38,7 @@ const model::ntp
   ntp(model::ns{"rp"}, model::topic{"t"}, model::partition_id{0});
 const model::revision_id rev{123};
 default_translator translator;
+lazy_abort_source as([] { return std::nullopt; });
 } // namespace
 
 TEST(DatalakeMultiplexerTest, TestMultiplexer) {
@@ -53,7 +54,8 @@ TEST(DatalakeMultiplexerTest, TestMultiplexer) {
       simple_schema_mgr,
       bin_resolver,
       translator,
-      t_creator);
+      t_creator,
+      as);
 
     model::test::record_batch_spec batch_spec;
     batch_spec.records = record_count;
@@ -93,7 +95,8 @@ TEST(DatalakeMultiplexerTest, TestMultiplexerWriteError) {
       simple_schema_mgr,
       bin_resolver,
       translator,
-      t_creator);
+      t_creator,
+      as);
 
     model::test::record_batch_spec batch_spec;
     batch_spec.records = record_count;
@@ -134,7 +137,8 @@ TEST(DatalakeMultiplexerTest, WritesDataFiles) {
       simple_schema_mgr,
       bin_resolver,
       translator,
-      t_creator);
+      t_creator,
+      as);
 
     model::test::record_batch_spec batch_spec;
     batch_spec.records = record_count;
@@ -251,7 +255,8 @@ TEST_F(RecordMultiplexerParquetTest, TestSimple) {
       schema_mgr,
       type_resolver,
       translator,
-      t_creator);
+      t_creator,
+      as);
     auto res = reader.consume(std::move(mux), model::no_timeout).get();
     ASSERT_FALSE(res.has_error()) << res.error();
     EXPECT_EQ(res.value().start_offset(), start_offset());
