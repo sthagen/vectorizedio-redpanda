@@ -2586,12 +2586,20 @@ ss::future<error_code> group::remove() {
         co_return error_code::group_id_not_found;
 
     case group_state::empty:
-        set_state(group_state::dead);
         break;
 
     default:
         co_return error_code::non_empty_group;
     }
+
+    // check if there are any transactions in progress
+    // tombstoning a group with open transactions will result
+    // in hanging transactions in the log.
+    if (has_transactions_in_progress()) {
+        co_return error_code::non_empty_group;
+    }
+
+    set_state(group_state::dead);
 
     // build offset tombstones
     storage::record_batch_builder builder(
@@ -3560,14 +3568,18 @@ group::get_expired_offsets(std::chrono::seconds retention_period) {
     }
 }
 
+bool group::has_transactions_in_progress() const {
+    return std::any_of(
+      _producers.begin(),
+      _producers.end(),
+      [](const producers_map::value_type& p) {
+          return p.second.transaction != nullptr;
+      });
+}
+
 bool group::has_offsets() const {
     return !_offsets.empty() || !_pending_offset_commits.empty()
-           || std::any_of(
-             _producers.begin(),
-             _producers.end(),
-             [](const producers_map::value_type& p) {
-                 return p.second.transaction != nullptr;
-             });
+           || has_transactions_in_progress();
 }
 
 std::vector<model::topic_partition>

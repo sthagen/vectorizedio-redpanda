@@ -845,6 +845,8 @@ private:
 
     bool has_offsets() const;
 
+    bool has_transactions_in_progress() const;
+
     bool has_pending_transaction(const model::topic_partition& tp) {
         if (std::any_of(
               _pending_offset_commits.begin(),

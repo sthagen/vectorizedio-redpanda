@@ -295,6 +295,45 @@ class TransactionsTest(RedpandaTest, TransactionsMixin):
             self.logger.info(f"Read {len(records)} from node {node.name}")
 
     @cluster(num_nodes=3)
+    def group_deletion_with_ongoing_transaction_test(self):
+        self.redpanda.set_cluster_config(
+            {"group_new_member_join_timeout": 5000})
+        self.generate_data(self.input_t, self.max_records)
+
+        group_name = "test_group"
+
+        producer = ck.Producer({
+            'bootstrap.servers': self.redpanda.brokers(),
+            'transactional.id': 'group_deletion_test_id',
+        })
+
+        group_name = "test"
+        consumer = ck.Consumer({
+            'bootstrap.servers': self.redpanda.brokers(),
+            'group.id': group_name,
+            'auto.offset.reset': 'earliest',
+            'enable.auto.commit': False,
+        })
+
+        consumer.subscribe([self.input_t])
+        _ = self.consume(consumer)
+        producer.init_transactions()
+        producer.begin_transaction()
+        producer.send_offsets_to_transaction(
+            consumer.position(consumer.assignment()),
+            consumer.consumer_group_metadata())
+        producer.flush()
+        # leave the consumer group
+        consumer.close()
+        # Attempt to delete the group, should fail
+        rpk = RpkTool(self.redpanda)
+        out = rpk.group_delete(group=group_name)
+        assert "NON_EMPTY_GROUP" in out, f"Group deletion should fail with inprogress transaction: {out}"
+        producer.commit_transaction()
+        out = rpk.group_delete(group=group_name)
+        assert "OK" in out, f"Group deletion expected to succeed after committing transaction: {out}"
+
+    @cluster(num_nodes=3)
     def rejoin_member_test(self):
         self.redpanda.set_cluster_config(
             {"group_new_member_join_timeout": 5000})
