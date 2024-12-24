@@ -19,15 +19,17 @@ group_tx_tracker_stm::group_tx_tracker_stm(
   ss::sharded<features::feature_table>& feature_table)
   : raft::persisted_stm<>("group_tx_tracker_stm.snapshot", logger, raft)
   , group_data_parser<group_tx_tracker_stm>()
-  , _feature_table(feature_table) {}
+  , _feature_table(feature_table)
+  , _serializer(make_consumer_offsets_serializer()) {}
 
 void group_tx_tracker_stm::maybe_add_tx_begin_offset(
   kafka::group_id group, model::producer_identity pid, model::offset offset) {
-    auto [it, inserted] = _all_txs.try_emplace(group, pid, offset);
-    if (!inserted) {
-        // group already exists
-        it->second.maybe_add_tx_begin(pid, offset);
+    auto it = _all_txs.find(group);
+    if (it == _all_txs.end()) {
+        vlog(klog.debug, "[{}] group not found, ignoring fence", group);
+        return;
     }
+    it->second.maybe_add_tx_begin(pid, offset);
 }
 
 void group_tx_tracker_stm::maybe_end_tx(
@@ -43,9 +45,6 @@ void group_tx_tracker_stm::maybe_end_tx(
     }
     group_data.begin_offsets.erase(p_it->second);
     group_data.producer_to_begin.erase(p_it);
-    if (group_data.producer_to_begin.empty()) {
-        _all_txs.erase(group);
-    }
 }
 
 ss::future<> group_tx_tracker_stm::do_apply(const model::record_batch& b) {
@@ -97,20 +96,42 @@ ss::future<iobuf> group_tx_tracker_stm::take_snapshot(model::offset) {
     return ss::make_ready_future<iobuf>(iobuf());
 }
 
-ss::future<> group_tx_tracker_stm::handle_raft_data(model::record_batch) {
-    // No transactional data, ignore
-    return ss::now();
+ss::future<> group_tx_tracker_stm::handle_raft_data(model::record_batch batch) {
+    co_await model::for_each_record(batch, [this](model::record& r) {
+        auto record_type = _serializer.get_metadata_type(r.key().copy());
+        switch (record_type) {
+        case offset_commit:
+        case noop:
+            return;
+        case group_metadata:
+            handle_group_metadata(
+              _serializer.decode_group_metadata(std::move(r)));
+            return;
+        }
+        __builtin_unreachable();
+    });
+}
+
+void group_tx_tracker_stm::handle_group_metadata(group_metadata_kv md) {
+    if (md.value) {
+        vlog(klog.trace, "[group: {}] update", md.key.group_id);
+        // A group may checkpoint periodically as the member's state changes,
+        // here we retain the group state if the group already exists.
+        _all_txs.try_emplace(md.key.group_id, per_group_state{});
+    } else {
+        vlog(klog.trace, "[group: {}] tombstone", md.key.group_id);
+        // A tombstone indicates all the group state can be purged and
+        // any transactions can be ignored. Although care must be taken
+        // to ensure there are no open transactions before tombstoning
+        // a group in the main state machine.
+        _all_txs.erase(md.key.group_id);
+    }
 }
 
 ss::future<> group_tx_tracker_stm::handle_tx_offsets(
-  model::record_batch_header header, kafka::group_tx::offsets_metadata data) {
-    // in case the fence got truncated, try to start the transaction from
-    // this point on. This is not possible today but may help if delete
-    // retention is implemented for consumer topics.
-    maybe_add_tx_begin_offset(
-      std::move(data.group_id),
-      model::producer_identity{header.producer_id, header.producer_epoch},
-      header.base_offset);
+  model::record_batch_header, kafka::group_tx::offsets_metadata) {
+    // Transaction boundaries are determined by fence/commit or abort
+    // batches
     return ss::now();
 }
 
