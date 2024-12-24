@@ -346,6 +346,7 @@ redpanda_cc_library(
         ":table_creator",
         "//src/v/base",
         "//src/v/storage:parser_utils",
+        "//src/v/utils:lazy_abort_source",
         "//src/v/utils:prefix_logger",
     ],
     include_prefix = "datalake",

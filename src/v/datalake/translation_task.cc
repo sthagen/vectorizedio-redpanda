@@ -63,7 +63,8 @@ translation_task::translate(
       *_schema_mgr,
       *_type_resolver,
       *_record_translator,
-      *_table_creator);
+      *_table_creator,
+      lazy_as);
     // Write local files
     auto mux_result = co_await std::move(reader).consume(
       std::move(mux), _read_timeout + model::timeout_clock::now());
