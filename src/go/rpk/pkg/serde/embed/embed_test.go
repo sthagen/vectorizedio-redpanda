@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,7 +13,7 @@ import (
 func TestEmbeddedFiles(t *testing.T) {
 	t.Run("Test Embedded files in rpk, equal to Redpanda", func(t *testing.T) {
 		// /src/v/pandaproxy/schema_registry/protobuf
-		redpandaProtoFS := os.DirFS("../../../../../v/pandaproxy/schema_registry/protobuf/")
+		redpandaProtoFS := os.DirFS("../../../../../v/pandaproxy/schema_registry/protobuf")
 		redpandaMap := make(map[string]string)
 		err := fs.WalkDir(redpandaProtoFS, ".", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -23,7 +24,8 @@ func TestEmbeddedFiles(t *testing.T) {
 			}
 			data, err := fs.ReadFile(redpandaProtoFS, path)
 			if err == nil {
-				redpandaMap[path] = string(data)
+				trimedPath := strings.TrimPrefix(path, "_virtual_imports/schema_registry_protos/")
+				redpandaMap[trimedPath] = string(data)
 			}
 			return nil
 		})

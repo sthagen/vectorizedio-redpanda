@@ -32,7 +32,7 @@ go_test(
     name = "embed_test",
     size = "small",
     srcs = ["embed_test.go"],
-    data = ["//src/v/pandaproxy:schema_registry_protos"],
+    data = ["//src/v/pandaproxy/schema_registry/protobuf:schema_registry_protos"],
     embed = [":embed"],
     deps = ["@com_github_stretchr_testify//require"],
 )

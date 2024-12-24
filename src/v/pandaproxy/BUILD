@@ -1,4 +1,3 @@
-load("@rules_proto//proto:defs.bzl", "proto_library")
 load("//bazel:build.bzl", "redpanda_cc_library")
 load("//bazel/thirdparty:seastar.bzl", "seastar_cc_swagger_library")
 
@@ -10,39 +9,6 @@ seastar_cc_swagger_library(
 seastar_cc_swagger_library(
     name = "schema_registry_swagger",
     src = "api/api-doc/schema_registry.json",
-)
-
-proto_library(
-    name = "schema_registry_protos",
-    srcs = [
-        "schema_registry/protobuf/confluent/meta.proto",
-        "schema_registry/protobuf/confluent/types/decimal.proto",
-        "schema_registry/protobuf/google/type/calendar_period.proto",
-        "schema_registry/protobuf/google/type/color.proto",
-        "schema_registry/protobuf/google/type/date.proto",
-        "schema_registry/protobuf/google/type/datetime.proto",
-        "schema_registry/protobuf/google/type/dayofweek.proto",
-        "schema_registry/protobuf/google/type/decimal.proto",
-        "schema_registry/protobuf/google/type/expr.proto",
-        "schema_registry/protobuf/google/type/fraction.proto",
-        "schema_registry/protobuf/google/type/interval.proto",
-        "schema_registry/protobuf/google/type/latlng.proto",
-        "schema_registry/protobuf/google/type/localized_text.proto",
-        "schema_registry/protobuf/google/type/money.proto",
-        "schema_registry/protobuf/google/type/month.proto",
-        "schema_registry/protobuf/google/type/phone_number.proto",
-        "schema_registry/protobuf/google/type/postal_address.proto",
-        "schema_registry/protobuf/google/type/quaternion.proto",
-        "schema_registry/protobuf/google/type/timeofday.proto",
-    ],
-    visibility = ["//src/go/rpk/pkg/serde:__subpackages__"],
-    deps = [
-        "@protobuf//:any_proto",
-        "@protobuf//:descriptor_proto",
-        "@protobuf//:duration_proto",
-        "@protobuf//:timestamp_proto",
-        "@protobuf//:wrappers_proto",
-    ],
 )
 
 cc_proto_library(
@@ -120,11 +86,6 @@ cc_proto_library(
     deps = [
         "@protobuf//:any_proto",
     ],
-)
-
-cc_proto_library(
-    name = "schema_registry_cc_proto",
-    deps = [":schema_registry_protos"],
 )
 
 redpanda_cc_library(
@@ -233,7 +194,6 @@ redpanda_cc_library(
         ":empty_cc_proto",
         ":field_mask_cc_proto",
         ":rest_swagger",
-        ":schema_registry_cc_proto",
         ":schema_registry_swagger",
         ":source_context_cc_proto",
         ":struct_cc_proto",
@@ -266,6 +226,7 @@ redpanda_cc_library(
         "//src/v/metrics",
         "//src/v/model",
         "//src/v/net",
+        "//src/v/pandaproxy/schema_registry/protobuf:schema_registry_cc_proto",
         "//src/v/random:time_jitter",
         "//src/v/reflection:type_traits",
         "//src/v/rpc",
