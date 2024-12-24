@@ -10,6 +10,7 @@
 package config
 
 import (
+	"connectrpc.com/connect"
 	"errors"
 	"fmt"
 	"os"
@@ -359,6 +360,16 @@ func (p *RpkProfile) ActualConfig() (*RpkYaml, bool) {
 		return nil, false
 	}
 	return p.c.ActualRpkYaml()
+}
+
+// DataplaneClient creates a publicapi.DataPlaneClientSet with the information
+// loaded in the profile.
+func (p *RpkProfile) DataplaneClient(opts ...connect.ClientOption) (*publicapi.DataPlaneClientSet, error) {
+	url, err := p.CloudCluster.CheckClusterURL()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get cluster information from your profile: %v", err)
+	}
+	return publicapi.NewDataPlaneClientSet(url, p.CurrentAuth().AuthToken, opts...)
 }
 
 // HasClientCredentials returns if both ClientID and ClientSecret are non-empty.

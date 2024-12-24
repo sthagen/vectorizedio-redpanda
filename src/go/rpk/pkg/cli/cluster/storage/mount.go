@@ -66,8 +66,8 @@ with my-new-topic as the new topic name
 				if an != "" && strings.ToLower(an) != "kafka" {
 					out.Die("Failed to parse '--to' flag: namespace %q not allowed. Only kafka topics can be mounted in Redpanda Cloud clusters", an)
 				}
-				cl, err := createDataplaneClient(p)
-				out.MaybeDieErr(err)
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
 
 				topicMount := &dataplanev1alpha2.MountTopicsRequest_TopicMount{
 					SourceTopicReference: t,
