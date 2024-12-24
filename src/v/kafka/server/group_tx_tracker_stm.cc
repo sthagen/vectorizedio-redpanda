@@ -14,9 +14,12 @@
 namespace kafka {
 
 group_tx_tracker_stm::group_tx_tracker_stm(
-  ss::logger& logger, raft::consensus* raft)
+  ss::logger& logger,
+  raft::consensus* raft,
+  ss::sharded<features::feature_table>& feature_table)
   : raft::persisted_stm<>("group_tx_tracker_stm.snapshot", logger, raft)
-  , group_data_parser<group_tx_tracker_stm>() {}
+  , group_data_parser<group_tx_tracker_stm>()
+  , _feature_table(feature_table) {}
 
 void group_tx_tracker_stm::maybe_add_tx_begin_offset(
   kafka::group_id group, model::producer_identity pid, model::offset offset) {
@@ -166,9 +169,15 @@ bool group_tx_tracker_stm_factory::is_applicable_for(
     return ntp.ns == model::kafka_consumer_offsets_nt.ns
            && ntp.tp.topic == model::kafka_consumer_offsets_nt.tp;
 }
+
+group_tx_tracker_stm_factory::group_tx_tracker_stm_factory(
+  ss::sharded<features::feature_table>& feature_table)
+  : _feature_table(feature_table) {}
+
 void group_tx_tracker_stm_factory::create(
   raft::state_machine_manager_builder& builder, raft::consensus* raft) {
-    auto stm = builder.create_stm<kafka::group_tx_tracker_stm>(klog, raft);
+    auto stm = builder.create_stm<kafka::group_tx_tracker_stm>(
+      klog, raft, _feature_table);
     raft->log()->stm_manager()->add_stm(stm);
 }
 

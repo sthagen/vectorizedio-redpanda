@@ -27,7 +27,8 @@ class group_tx_tracker_stm final
 public:
     static constexpr std::string_view name = "group_tx_tracker_stm";
 
-    group_tx_tracker_stm(ss::logger&, raft::consensus*);
+    group_tx_tracker_stm(
+      ss::logger&, raft::consensus*, ss::sharded<features::feature_table>&);
 
     storage::stm_type type() override {
         return storage::stm_type::consumer_offsets_transactional;
@@ -110,13 +111,19 @@ private:
     void maybe_end_tx(kafka::group_id, model::producer_identity);
 
     all_txs_t _all_txs;
+
+    ss::sharded<features::feature_table>& _feature_table;
 };
 
 class group_tx_tracker_stm_factory : public cluster::state_machine_factory {
 public:
-    group_tx_tracker_stm_factory() = default;
+    explicit group_tx_tracker_stm_factory(
+      ss::sharded<features::feature_table>&);
     bool is_applicable_for(const storage::ntp_config&) const final;
     void create(raft::state_machine_manager_builder&, raft::consensus*) final;
+
+private:
+    ss::sharded<features::feature_table>& _feature_table;
 };
 
 } // namespace kafka

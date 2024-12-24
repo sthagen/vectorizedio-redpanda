@@ -2949,7 +2949,8 @@ void application::start_runtime_services(
             cloud_storage_api,
             feature_table,
             controller->get_topics_state());
-          pm.register_factory<kafka::group_tx_tracker_stm_factory>();
+          pm.register_factory<kafka::group_tx_tracker_stm_factory>(
+            feature_table);
           pm.register_factory<cluster::partition_properties_stm_factory>(
             storage.local().kvs(),
             config::shard_local_cfg().rm_sync_timeout_ms.bind());

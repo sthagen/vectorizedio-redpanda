@@ -209,7 +209,7 @@ struct cg_recovery_test_fixture : seastar_test {
     model::record_batch make_tx_fence_batch(
       const model::producer_identity& pid, group_tx::fence_metadata cmd) {
         return make_tx_batch(
-          model::record_batch_type::tx_fence,
+          model::record_batch_type::group_fence_tx,
           group::fence_control_record_version,
           pid,
           std::move(cmd));
