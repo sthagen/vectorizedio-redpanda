@@ -276,12 +276,22 @@ copy_data_segment_reducer::filter(model::record_batch batch) {
 
 ss::future<ss::stop_iteration> copy_data_segment_reducer::filter_and_append(
   model::compression original, model::record_batch b) {
+    ++_stats.batches_processed;
     using stop_t = ss::stop_iteration;
+    const auto record_count_before = b.record_count();
     auto to_copy = co_await filter(std::move(b));
     if (to_copy == std::nullopt) {
+        ++_stats.batches_discarded;
+        _stats.records_discarded += record_count_before;
         co_return stop_t::no;
     }
+    const auto records_to_remove = record_count_before
+                                   - to_copy->record_count();
+    _stats.records_discarded += records_to_remove;
     bool compactible_batch = is_compactible(to_copy.value());
+    if (!compactible_batch) {
+        ++_stats.non_compactible_batches;
+    }
     if (_compacted_idx && compactible_batch) {
         co_await model::for_each_record(
           to_copy.value(),

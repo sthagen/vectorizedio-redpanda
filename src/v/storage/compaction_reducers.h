@@ -121,6 +121,31 @@ class copy_data_segment_reducer : public compaction_reducer {
 public:
     using filter_t = ss::noncopyable_function<ss::future<bool>(
       const model::record_batch&, const model::record&, bool)>;
+    struct stats {
+        // Total number of batches passed to this reducer.
+        size_t batches_processed{0};
+        // Number of batches that were completely removed.
+        size_t batches_discarded{0};
+        // Number of records removed by this reducer, including batches that
+        // were entirely removed.
+        size_t records_discarded{0};
+        // Number of batches that were ignored because they are not
+        // of a compactible type.
+        size_t non_compactible_batches{0};
+
+        friend std::ostream& operator<<(std::ostream& os, const stats& s) {
+            fmt::print(
+              os,
+              "{{ batches_processed: {}, batches_discarded: {}, "
+              "records_discarded: {}, non_compactible_batches: {} }}",
+              s.batches_processed,
+              s.batches_discarded,
+              s.records_discarded,
+              s.non_compactible_batches);
+            return os;
+        }
+    };
+
     copy_data_segment_reducer(
       filter_t f,
       segment_appender* a,
@@ -180,6 +205,8 @@ private:
     /// Allows the reducer to stop early, e.g. in case the partition is being
     /// shut down.
     ss::abort_source* _as;
+
+    stats _stats;
 };
 
 class index_rebuilder_reducer : public compaction_reducer {
