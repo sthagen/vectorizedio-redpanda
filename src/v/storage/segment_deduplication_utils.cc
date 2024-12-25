@@ -235,10 +235,25 @@ ss::future<index_state> deduplicate_segment(
       inject_reader_failure,
       cfg.asrc);
 
-    auto new_idx = co_await std::move(rdr).consume(
+    auto res = co_await std::move(rdr).consume(
       std::move(copy_reducer), model::no_timeout);
+    const auto& stats = res.reducer_stats;
+    if (stats.has_removed_data()) {
+        vlog(
+          gclog.info,
+          "Windowed compaction filtering removing data from {}: {}",
+          seg->filename(),
+          stats);
+    } else {
+        vlog(
+          gclog.debug,
+          "Windowed compaction filtering not removing any records from {}: {}",
+          seg->filename(),
+          stats);
+    }
 
     // restore broker timestamp and clean compact timestamp
+    auto& new_idx = res.new_idx;
     new_idx.broker_timestamp = seg->index().broker_timestamp();
     new_idx.clean_compact_timestamp = seg->index().clean_compact_timestamp();
 
@@ -251,7 +266,7 @@ ss::future<index_state> deduplicate_segment(
         probe.add_segment_marked_tombstone_free();
     }
 
-    co_return new_idx;
+    co_return std::move(new_idx);
 }
 
 } // namespace storage

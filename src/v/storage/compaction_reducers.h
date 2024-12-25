@@ -133,6 +133,11 @@ public:
         // of a compactible type.
         size_t non_compactible_batches{0};
 
+        // Returns whether any data was removed by this reducer.
+        bool has_removed_data() const {
+            return batches_discarded > 0 || records_discarded > 0;
+        }
+
         friend std::ostream& operator<<(std::ostream& os, const stats& s) {
             fmt::print(
               os,
@@ -144,6 +149,10 @@ public:
               s.non_compactible_batches);
             return os;
         }
+    };
+    struct idx_and_stats {
+        index_state new_idx;
+        stats reducer_stats;
     };
 
     copy_data_segment_reducer(
@@ -165,7 +174,7 @@ public:
       , _as(as) {}
 
     ss::future<ss::stop_iteration> operator()(model::record_batch);
-    storage::index_state end_of_stream() { return std::move(_idx); }
+    idx_and_stats end_of_stream() { return {std::move(_idx), _stats}; }
 
 private:
     ss::future<ss::stop_iteration>
