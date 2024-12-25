@@ -2140,8 +2140,10 @@ class RedpandaServiceCloud(KubeServiceMixin, RedpandaServiceABC):
         if metrics_endpoint == MetricsEndpoint.PUBLIC_METRICS:
             text = self._cloud_cluster.get_public_metrics()
         else:
+            # operator V2 clusters use HTTPS for all the things
+            p = '-k https' if self.is_operator_v2_cluster() else 'http'
             text = self.kubectl.exec(
-                'curl -f -s -S http://localhost:9644/metrics', pod.name)
+                f'curl -f -s -S {p}://localhost:9644/metrics', pod.name)
         return text_string_to_metric_families(text)
 
     def metrics_sample(
