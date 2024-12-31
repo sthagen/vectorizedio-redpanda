@@ -63,6 +63,12 @@ class DatalakeVerifier():
         # number of messages buffered in memory
         self._msg_semaphore = threading.Semaphore(5000)
         self._num_msgs_pending_verification = 0
+        # Signalled when enough messages are batched so query
+        # thread can perform verification. Larger batches results
+        # in fewer SQL queries and hence faster verification
+        self._msgs_batched = threading.Condition()
+        self._query_batch_size = 1000
+        self._query_batch_wait_timeout_s = 3
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._rpk = RpkTool(self.redpanda)
         # errors found during verification
@@ -114,6 +120,9 @@ class DatalakeVerifier():
             with self._lock:
                 self._num_msgs_pending_verification += 1
                 self._consumed_messages[msg.partition()].append(msg)
+                if self._num_msgs_pending_verification >= self._query_batch_size:
+                    with self._msgs_batched:
+                        self._msgs_batched.notify()
                 self._max_consumed_offsets[msg.partition()] = max(
                     self._max_consumed_offsets.get(msg.partition(), -1),
                     msg.offset())
@@ -167,6 +176,10 @@ class DatalakeVerifier():
         self.logger.info("Starting query thread")
         while not self._stop.is_set():
             try:
+                with self._msgs_batched:
+                    # Wait for enough data to be batched or a timeout.
+                    self._msgs_batched.wait(
+                        timeout=self._query_batch_wait_timeout_s)
                 partitions = self.update_and_get_fetch_positions()
 
                 for partition, next_consume_offset in partitions.items():
