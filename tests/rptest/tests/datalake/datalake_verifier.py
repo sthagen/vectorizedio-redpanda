@@ -62,7 +62,7 @@ class DatalakeVerifier():
         self._stop = threading.Event()
         # number of messages buffered in memory
         self._msg_semaphore = threading.Semaphore(5000)
-        self._total_msgs_cnt = 0
+        self._num_msgs_pending_verification = 0
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._rpk = RpkTool(self.redpanda)
         # errors found during verification
@@ -112,11 +112,7 @@ class DatalakeVerifier():
                 continue
 
             with self._lock:
-                self._total_msgs_cnt += 1
-                if self._total_msgs_cnt % 100 == 0:
-                    self.logger.debug(
-                        f"Consumed message partition: {msg.partition()} at offset {msg.offset()}"
-                    )
+                self._num_msgs_pending_verification += 1
                 self._consumed_messages[msg.partition()].append(msg)
                 self._max_consumed_offsets[msg.partition()] = max(
                     self._max_consumed_offsets.get(msg.partition(), -1),
@@ -164,6 +160,7 @@ class DatalakeVerifier():
             )
             return
         self._consumed_messages[partition].pop(0)
+        self._num_msgs_pending_verification -= 1
         self._msg_semaphore.release()
 
     def _query_thread(self):
