@@ -31,6 +31,7 @@ v_cc_library(
     action.cc
     catalog.cc
     compatibility.cc
+    compatibility_types.cc
     datatypes.cc
     datatypes_json.cc
     filesystem_catalog.cc

@@ -122,13 +122,23 @@ redpanda_cc_library(
 
 redpanda_cc_library(
     name = "compatibility_types",
-    srcs = [],
+    srcs = [
+        "compatibility_types.cc",
+    ],
     hdrs = [
         "compatibility_types.h",
     ],
     include_prefix = "iceberg",
     visibility = ["//visibility:public"],
     deps = [
+        ":datatypes",
+        "//src/v/base",
+        "//src/v/ssx:sformat",
+        "@fmt",
+        "@seastar",
+    ],
+)
+
         "//src/v/base",
         "@seastar",
     ],
