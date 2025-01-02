@@ -169,17 +169,18 @@ void group_recovery_consumer::handle_record(model::record r) {
 }
 
 void group_recovery_consumer::handle_group_metadata(group_metadata_kv md) {
-    vlog(klog.trace, "[group: {}] recovered group metadata", md.key.group_id);
-
     if (md.value) {
         // until we switch over to a compacted topic or use raft snapshots,
         // always take the latest entry in the log.
+        vlog(
+          klog.trace, "[group: {}] recovered group metadata", md.key.group_id);
 
         auto [group_it, _] = _state.groups.try_emplace(
           md.key.group_id, group_stm());
         group_it->second.overwrite_metadata(std::move(*md.value));
     } else {
         // tombstone
+        vlog(klog.trace, "[group: {}] recovered tombstone", md.key.group_id);
         _state.groups.erase(md.key.group_id);
     }
 }
