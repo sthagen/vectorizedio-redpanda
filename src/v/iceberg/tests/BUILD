@@ -649,3 +649,19 @@ redpanda_cc_bench(
         "@seastar//:benchmark",
     ],
 )
+
+redpanda_cc_bench(
+    name = "compatibility_bench",
+    timeout = "short",
+    srcs = [
+        "compatibility_bench.cc",
+    ],
+    cpu = 1,
+    deps = [
+        ":test_schemas",
+        "//src/v/iceberg:compatibility",
+        "//src/v/iceberg:datatypes",
+        "//src/v/iceberg:field_collecting_visitor",
+        "@seastar//:benchmark",
+    ],
+)

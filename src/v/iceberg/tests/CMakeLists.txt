@@ -85,3 +85,13 @@ rp_test(
     Seastar::seastar_perf_testing
     v::iceberg
 )
+
+rp_test(
+  BENCHMARK_TEST
+  BINARY_NAME iceberg_compatibility
+  SOURCES compatibility_bench.cc
+  LIBRARIES
+    Seastar::seastar_perf_testing
+    v::iceberg
+    v::iceberg_test_utils
+)
