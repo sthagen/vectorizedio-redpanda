@@ -74,27 +74,46 @@ public:
     ss::future<> handle_version_fence(features::feature_table::version_fence);
 
 private:
+    struct producer_tx_state
+      : serde::envelope<
+          producer_tx_state,
+          serde::version<0>,
+          serde::compat_version<0>> {
+        model::record_batch_type fence_type;
+        model::offset begin_offset;
+        model::timestamp batch_ts;
+        model::timeout_clock::duration timeout;
+
+        auto serde_fields() {
+            return std::tie(fence_type, begin_offset, batch_ts, timeout);
+        }
+    };
     struct per_group_state
       : serde::envelope<
           per_group_state,
-          serde::version<0>,
+          serde::version<1>,
           serde::compat_version<0>> {
         per_group_state() = default;
 
-        per_group_state(model::producer_identity pid, model::offset offset) {
-            maybe_add_tx_begin(pid, offset);
-        }
-
-        void
-        maybe_add_tx_begin(model::producer_identity pid, model::offset offset);
+        void maybe_add_tx_begin(
+          model::record_batch_type fence_type,
+          model::producer_identity pid,
+          model::offset offset,
+          model::timestamp begin_ts,
+          model::timeout_clock::duration tx_timeout);
 
         absl::btree_set<model::offset> begin_offsets;
 
+        // deprecated
         absl::btree_map<model::producer_identity, model::offset>
-          producer_to_begin;
+          producer_to_begin_deprecated;
+
+        absl::btree_map<model::producer_identity, producer_tx_state>
+          producer_states;
 
         auto serde_fields() {
-            return std::tie(begin_offsets, producer_to_begin);
+            return std::tie(
+              begin_offsets, producer_to_begin_deprecated, producer_states);
         }
     };
     using all_txs_t = absl::btree_map<kafka::group_id, per_group_state>;
@@ -108,9 +127,14 @@ private:
     void handle_group_metadata(group_metadata_kv);
 
     void maybe_add_tx_begin_offset(
-      kafka::group_id, model::producer_identity, model::offset);
+      model::record_batch_type fence_type,
+      kafka::group_id,
+      model::producer_identity,
+      model::offset,
+      model::timestamp begin_ts,
+      model::timeout_clock::duration tx_timeout);
 
-    void maybe_end_tx(kafka::group_id, model::producer_identity);
+    void maybe_end_tx(kafka::group_id, model::producer_identity, model::offset);
 
     all_txs_t _all_txs;
 

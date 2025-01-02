@@ -23,28 +23,53 @@ group_tx_tracker_stm::group_tx_tracker_stm(
   , _serializer(make_consumer_offsets_serializer()) {}
 
 void group_tx_tracker_stm::maybe_add_tx_begin_offset(
-  kafka::group_id group, model::producer_identity pid, model::offset offset) {
+  model::record_batch_type fence_type,
+  kafka::group_id group,
+  model::producer_identity pid,
+  model::offset offset,
+  model::timestamp ts,
+  model::timeout_clock::duration tx_timeout) {
     auto it = _all_txs.find(group);
     if (it == _all_txs.end()) {
-        vlog(klog.debug, "[{}] group not found, ignoring fence", group);
+        vlog(
+          klog.debug,
+          "[{}] group not found, ignoring fence of type: {} at offset: {}",
+          group,
+          fence_type,
+          offset);
         return;
     }
-    it->second.maybe_add_tx_begin(pid, offset);
+    it->second.maybe_add_tx_begin(fence_type, pid, offset, ts, tx_timeout);
 }
 
 void group_tx_tracker_stm::maybe_end_tx(
-  kafka::group_id group, model::producer_identity pid) {
+  kafka::group_id group, model::producer_identity pid, model::offset offset) {
     auto it = _all_txs.find(group);
     if (it == _all_txs.end()) {
+        vlog(
+          klog.debug,
+          "[{}] group not found, ignoring end transaction for pid: {} at "
+          "offset: {}",
+          group,
+          pid,
+          offset);
         return;
     }
     auto& group_data = it->second;
-    auto p_it = group_data.producer_to_begin.find(pid);
-    if (p_it == group_data.producer_to_begin.end()) {
+    auto p_it = group_data.producer_states.find(pid);
+    if (p_it == group_data.producer_states.end()) {
+        vlog(
+          klog.debug,
+          "[{}] ignoring end transaction, no in progress transaction for pid: "
+          "{} at offset: {}",
+          group,
+          pid,
+          offset);
         return;
     }
-    group_data.begin_offsets.erase(p_it->second);
-    group_data.producer_to_begin.erase(p_it);
+    group_data.begin_offsets.erase(p_it->second.begin_offset);
+    group_data.producer_states.erase(p_it);
+    group_data.producer_to_begin_deprecated.erase(pid);
 }
 
 ss::future<> group_tx_tracker_stm::do_apply(const model::record_batch& b) {
@@ -137,28 +162,41 @@ ss::future<> group_tx_tracker_stm::handle_tx_offsets(
 
 ss::future<> group_tx_tracker_stm::handle_fence_v0(
   model::record_batch_header header, kafka::group_tx::fence_metadata_v0 fence) {
+    // fence_v0 has no timeout, use a max permissible timeout.
+    // fence_v0 has been deprecated for long, this is not a problem in practice
+    auto timeout = std::chrono::duration_cast<model::timeout_clock::duration>(
+      config::shard_local_cfg().transaction_max_timeout_ms());
     maybe_add_tx_begin_offset(
+      header.type,
       std::move(fence.group_id),
       model::producer_identity{header.producer_id, header.producer_epoch},
-      header.base_offset);
+      header.base_offset,
+      header.max_timestamp,
+      timeout);
     return ss::now();
 }
 
 ss::future<> group_tx_tracker_stm::handle_fence_v1(
   model::record_batch_header header, kafka::group_tx::fence_metadata_v1 fence) {
     maybe_add_tx_begin_offset(
+      header.type,
       std::move(fence.group_id),
       model::producer_identity{header.producer_id, header.producer_epoch},
-      header.base_offset);
+      header.base_offset,
+      header.max_timestamp,
+      fence.transaction_timeout_ms);
     return ss::now();
 }
 
 ss::future<> group_tx_tracker_stm::handle_fence(
   model::record_batch_header header, kafka::group_tx::fence_metadata fence) {
     maybe_add_tx_begin_offset(
+      header.type,
       std::move(fence.group_id),
       model::producer_identity{header.producer_id, header.producer_epoch},
-      header.base_offset);
+      header.base_offset,
+      header.max_timestamp,
+      fence.transaction_timeout_ms);
     return ss::now();
 }
 
@@ -166,7 +204,8 @@ ss::future<> group_tx_tracker_stm::handle_abort(
   model::record_batch_header header, kafka::group_tx::abort_metadata data) {
     maybe_end_tx(
       std::move(data.group_id),
-      model::producer_identity{header.producer_id, header.producer_epoch});
+      model::producer_identity{header.producer_id, header.producer_epoch},
+      header.base_offset);
     return ss::now();
 }
 
@@ -174,7 +213,7 @@ ss::future<> group_tx_tracker_stm::handle_commit(
   model::record_batch_header header, kafka::group_tx::commit_metadata data) {
     auto pid = model::producer_identity{
       header.producer_id, header.producer_epoch};
-    maybe_end_tx(std::move(data.group_id), pid);
+    maybe_end_tx(std::move(data.group_id), pid, header.base_offset);
     return ss::now();
 }
 
@@ -203,11 +242,21 @@ void group_tx_tracker_stm_factory::create(
 }
 
 void group_tx_tracker_stm::per_group_state::maybe_add_tx_begin(
-  model::producer_identity pid, model::offset offset) {
-    auto it = producer_to_begin.find(pid);
-    if (it == producer_to_begin.end()) {
+  model::record_batch_type fence_type,
+  model::producer_identity pid,
+  model::offset offset,
+  model::timestamp begin_ts,
+  model::timeout_clock::duration tx_timeout) {
+    auto it = producer_states.find(pid);
+    if (it == producer_states.end()) {
         begin_offsets.emplace(offset);
-        producer_to_begin[pid] = offset;
+        producer_states[pid] = {
+          .fence_type = fence_type,
+          .begin_offset = offset,
+          .batch_ts = begin_ts,
+          .timeout = tx_timeout};
+        producer_to_begin_deprecated[pid] = offset;
     }
 }
+
 } // namespace kafka
