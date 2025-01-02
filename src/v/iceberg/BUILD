@@ -139,6 +139,20 @@ redpanda_cc_library(
     ],
 )
 
+redpanda_cc_library(
+    name = "compatibility_utils",
+    srcs = [],
+    hdrs = [
+        "compatibility_utils.h",
+    ],
+    include_prefix = "iceberg",
+    visibility = [
+        "//src/v/iceberg:__subpackages__",
+    ],
+    deps = [
+        ":compatibility_types",
+        ":datatypes",
+        ":field_collecting_visitor",
         "//src/v/base",
         "@seastar",
     ],

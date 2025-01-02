@@ -618,11 +618,14 @@ redpanda_cc_gtest(
     timeout = "short",
     srcs = [
         "compatibility_test.cc",
+        "compatibility_utils_test.cc",
     ],
     cpu = 1,
     deps = [
+        ":test_schemas",
         "//src/v/iceberg:compatibility",
         "//src/v/iceberg:compatibility_types",
+        "//src/v/iceberg:compatibility_utils",
         "//src/v/iceberg:datatypes",
         "//src/v/iceberg:field_collecting_visitor",
         "//src/v/test_utils:gtest",

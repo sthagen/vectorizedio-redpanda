@@ -20,6 +20,7 @@ rp_test(
   BINARY_NAME iceberg_compatibility
   SOURCES
     compatibility_test.cc
+    compatibility_utils_test.cc
   LIBRARIES
     v::gtest_main
     v::iceberg_test_utils
