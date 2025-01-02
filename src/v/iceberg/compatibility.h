@@ -10,18 +10,12 @@
 #pragma once
 
 #include "base/outcome.h"
+#include "iceberg/compatibility_types.h"
 #include "iceberg/datatypes.h"
 
 #include <seastar/util/bool_class.hh>
 
 namespace iceberg {
-
-enum class compat_errc {
-    mismatch,
-};
-
-using type_promoted = ss::bool_class<struct type_promoted_tag>;
-using type_check_result = checked<type_promoted, compat_errc>;
 
 /**
    check_types - Performs a basic type check between two Iceberg field types,

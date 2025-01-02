@@ -622,6 +622,7 @@ redpanda_cc_gtest(
     cpu = 1,
     deps = [
         "//src/v/iceberg:compatibility",
+        "//src/v/iceberg:compatibility_types",
         "//src/v/iceberg:datatypes",
         "//src/v/iceberg:field_collecting_visitor",
         "//src/v/test_utils:gtest",
