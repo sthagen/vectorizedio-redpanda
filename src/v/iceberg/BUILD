@@ -170,6 +170,7 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":compatibility_types",
+        ":compatibility_utils",
         ":datatypes",
         "//src/v/base",
         "@abseil-cpp//absl/container:btree",

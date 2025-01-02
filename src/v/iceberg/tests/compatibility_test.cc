@@ -960,3 +960,69 @@ public:
     }
     auto& any_change() { return GetParam().any_change; }
 };
+
+struct AnnotateStructTest : public StructCompatibilityTestBase {};
+
+INSTANTIATE_TEST_SUITE_P(
+  StructEvolutionTest,
+  AnnotateStructTest,
+  ::testing::ValuesIn(valid_plus_errs(
+    invalid_cases | std::views::filter([](const auto& tc) {
+        return tc.err.assume_error() != schema_evolution_errc::type_mismatch
+               && tc.err.assume_error()
+                    != schema_evolution_errc::new_required_field;
+    }))));
+
+TEST_P(AnnotateStructTest, AnnotationWorksAndDetectsStructuralErrors) {
+    // generate a schema per the test case
+    auto original_schema_struct = generator();
+
+    // manually update a copy of the schema in some way, also specified by the
+    // test case
+    auto type = update(original_schema_struct);
+
+    {
+        // transforming self -> self returns no change
+        auto c1 = type.copy();
+        auto c2 = type.copy();
+        auto annotate_res = annotate_schema_transform(c1, c2);
+        if (
+          !err().has_error()
+          || err().error() != schema_evolution_errc::ambiguous) {
+            ASSERT_FALSE(annotate_res.has_error());
+            EXPECT_EQ(annotate_res.value().total(), 0);
+        }
+    }
+
+    // check that annotation works or errors as expected
+    auto annotate_res = annotate_schema_transform(original_schema_struct, type);
+    ASSERT_EQ(annotate_res.has_error(), err().has_error())
+      << (annotate_res.has_error()
+            ? fmt::format("Unexpected error: {}", annotate_res.error())
+            : fmt::format("Expected {}", err().error()));
+
+    if (annotate_res.has_error()) {
+        EXPECT_EQ(annotate_res.error(), err().error());
+        return;
+    }
+    // if no annotation errors, check that every field in the destination
+    // type was marked
+    auto res = for_each_field(type, [](const nested_field* f) {
+        ASSERT_TRUE(f->has_evolution_metadata());
+        EXPECT_TRUE(
+          std::holds_alternative<nested_field::src_info>(f->meta)
+          || std::holds_alternative<nested_field::is_new>(f->meta))
+          << fmt::format("Unexpected meta variant index: {}", f->meta.index());
+    });
+    EXPECT_FALSE(res.has_error());
+
+    // and that every field in the source struct was marked
+    // note that source fields are marked removed::yes or removed::no to
+    // indicate removal.
+    res = for_each_field(original_schema_struct, [](const nested_field* f) {
+        ASSERT_TRUE(f->has_evolution_metadata());
+        EXPECT_TRUE(std::holds_alternative<nested_field::removed>(f->meta))
+          << fmt::format("Unexpected meta variant index: {}", f->meta.index());
+    });
+    EXPECT_FALSE(res.has_error());
+}
