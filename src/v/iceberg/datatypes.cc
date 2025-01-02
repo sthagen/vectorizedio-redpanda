@@ -352,7 +352,7 @@ map_type map_type::create(
 }
 
 nested_field_ptr nested_field::copy() const {
-    return nested_field::create(id, name, required, make_copy(type));
+    return nested_field::create(id, name, required, make_copy(type), meta);
 };
 
 } // namespace iceberg
