@@ -99,6 +99,8 @@ use_repo(non_module_dependencies, "seastar")
 use_repo(non_module_dependencies, "unordered_dense")
 use_repo(non_module_dependencies, "wasmtime")
 use_repo(non_module_dependencies, "xxhash")
+use_repo(non_module_dependencies, "x86_64_sysroot")
+use_repo(non_module_dependencies, "aarch64_sysroot")
 
 bazel_dep(name = "toolchains_llvm", version = "1.1.2")
 single_version_override(
@@ -131,6 +133,16 @@ llvm.toolchain(
         "linux-x86_64": ["http://redpanda-core-toolchain.s3-website-us-east-1.amazonaws.com/llvm-19.1.1-ubuntu-22.04-x86_64.tar.gz"],
     },
 )
+llvm.sysroot(
+    name = "llvm_19_toolchain",
+    label = "@x86_64_sysroot//:sysroot",
+    targets = ["linux-x86_64"],
+)
+llvm.sysroot(
+    name = "llvm_19_toolchain",
+    label = "@aarch64_sysroot//:sysroot",
+    targets = ["linux-aarch64"],
+)
 use_repo(llvm, "llvm_19_toolchain", "llvm_19_toolchain_llvm")
 
 register_toolchains("@llvm_19_toolchain//:all")
@@ -147,6 +159,16 @@ llvm.toolchain(
         "linux-aarch64": ["http://redpanda-core-toolchain.s3-website-us-east-1.amazonaws.com/llvm-18.1.8-ubuntu-22.04-aarch64.tar.gz"],
         "linux-x86_64": ["http://redpanda-core-toolchain.s3-website-us-east-1.amazonaws.com/pgo/llvm-18.1.8-ubuntu-22.04-x86_64.tar.gz"],
     },
+)
+llvm.sysroot(
+    name = "llvm_18_toolchain",
+    label = "@x86_64_sysroot//:sysroot",
+    targets = ["linux-x86_64"],
+)
+llvm.sysroot(
+    name = "llvm_18_toolchain",
+    label = "@aarch64_sysroot//:sysroot",
+    targets = ["linux-aarch64"],
 )
 use_repo(llvm, "llvm_18_toolchain", "llvm_18_toolchain_llvm")
 

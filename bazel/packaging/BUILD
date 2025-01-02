@@ -102,7 +102,7 @@ pkg_tar(
     name = "redpanda_image_writable_dirs",
     empty_dirs = [
         "/etc/redpanda",
-        "/var/lib/redpanda",
+        "/var/lib/redpanda/data",
     ],
     mode = "0o755",
     owner = NONROOT_USER + "." + NONROOT_USER,

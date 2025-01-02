@@ -216,7 +216,7 @@
   "moduleExtensions": {
     "//bazel:extensions.bzl%non_module_dependencies": {
       "general": {
-        "bzlTransitiveDigest": "HVHZRxHddAfQ0vBrAdVSY8sKmokWh0Mo4YHA2eYHDR4=",
+        "bzlTransitiveDigest": "81IeyYMOu4p1oDSk/Tc4LcX0R41gfnPjfTP56+NuI14=",
         "usagesDigest": "8eEn6X1e7HKkx2OPWUwQBOEnT9TIkMhEcXbu/wRjGno=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -442,6 +442,28 @@
               "sha256": "716fbe4fc85ecd36488afbbc635b59b5ab6aba5ed3b69d4a32a46eae5a453d38",
               "strip_prefix": "xxHash-bbb27a5efb85b92a0486cf361a8635715a53f6ba",
               "url": "https://github.com/Cyan4973/xxHash/archive/bbb27a5efb85b92a0486cf361a8635715a53f6ba.tar.gz"
+            }
+          },
+          "x86_64_sysroot": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\nfilegroup(\n  name = \"sysroot\",\n  srcs = glob([\"*/**\"]),\n  visibility = [\"//visibility:public\"],\n)",
+              "sha256": "b7544f6931531eababde47d8723362bc9b3c9de8ef7d9a5d1d62d2e614904d5b",
+              "urls": [
+                "http://redpanda-core-toolchain.s3-website-us-east-1.amazonaws.com/sysroot-ubuntu-22.04-x86_64-2025-01-03.tar.gz"
+              ]
+            }
+          },
+          "aarch64_sysroot": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\nfilegroup(\n  name = \"sysroot\",\n  srcs = glob([\"*/**\"]),\n  visibility = [\"//visibility:public\"],\n)",
+              "sha256": "a2d8c3ce82c70f884281db846e756f5877f2c77964cbfb1ba6b954e1f759e2ed",
+              "urls": [
+                "http://redpanda-core-toolchain.s3-website-us-east-1.amazonaws.com/sysroot-ubuntu-22.04-aarch64-2025-01-03.tar.gz"
+              ]
             }
           }
         },
@@ -17940,7 +17962,7 @@
     "@@toolchains_llvm~//toolchain/extensions:llvm.bzl%llvm": {
       "general": {
         "bzlTransitiveDigest": "y9h5L2NtWbogyWSOJgqnUaU50MTPWAW+waelXSirMVg=",
-        "usagesDigest": "vaOqtBKVYh0KUH0biytmgYkovSqWiLA9X1XBqLx7yw8=",
+        "usagesDigest": "zvCu5vCx2QCye7gaA3ii4ndd+o35O4MDmegRrMm3Ogg=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -18001,7 +18023,10 @@
               "target_settings": {},
               "unfiltered_compile_flags": {},
               "toolchain_roots": {},
-              "sysroot": {}
+              "sysroot": {
+                "linux-x86_64": "'@@_main~non_module_dependencies~x86_64_sysroot//:sysroot'",
+                "linux-aarch64": "'@@_main~non_module_dependencies~aarch64_sysroot//:sysroot'"
+              }
             }
           },
           "llvm_18_toolchain_llvm": {
@@ -18060,7 +18085,10 @@
               "target_settings": {},
               "unfiltered_compile_flags": {},
               "toolchain_roots": {},
-              "sysroot": {}
+              "sysroot": {
+                "linux-x86_64": "'@@_main~non_module_dependencies~x86_64_sysroot//:sysroot'",
+                "linux-aarch64": "'@@_main~non_module_dependencies~aarch64_sysroot//:sysroot'"
+              }
             }
           }
         },

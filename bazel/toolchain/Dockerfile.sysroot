@@ -1,0 +1,37 @@
+FROM ubuntu:jammy AS pkgs
+
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y \
+    libc6 \
+    libc6-dev \
+    libc6-dbg \
+    libgcc-12-dev \
+    valgrind \
+    xfslibs-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy required glibc files
+RUN mkdir -p /output/pkgs/{usr/,}lib/$(uname -m)-linux-gnu /output/pkgs/usr/include /output/pkgs/lib64 \
+    && cp -r /usr/lib/*-linux-gnu/ld-linux-*.so* /output/pkgs/lib64/ \
+    && cp -r /usr/lib/*-linux-gnu/libc.{a,so}* /output/pkgs/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libc_nonshared.a* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libm.{a,so}* /output/pkgs/lib/$(uname -m)-linux-gnu/ \
+    && (if test $(uname -m) = "x86_64"; then cp -r /usr/lib/x86_64-linux-gnu/libmvec.{a,so}* /output/pkgs/lib/x86_64-linux-gnu/; fi) \
+    && cp -r /usr/lib/*-linux-gnu/libdl.{a,so}* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/librt.{a,so}* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libutil.{a,so}* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libpthread.{a,so}* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libgcc_s.so* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/*crt*.o /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/*-linux-gnu/libatomic.so* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/gcc/*-linux-gnu/12/*.o /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/lib/gcc/*-linux-gnu/12/libgcc*.{a,so}* /output/pkgs/usr/lib/$(uname -m)-linux-gnu/ \
+    && cp -r /usr/include/* /output/pkgs/usr/include/
+
+FROM scratch
+
+COPY --from=pkgs /output/pkgs /
+
+
