@@ -89,4 +89,30 @@ annotate_schema_transform(const struct_type& source, const struct_type& dest);
  */
 schema_transform_result validate_schema_transform(struct_type& dest);
 
+/**
+ * evolve_schema - Prepares dest for insertion into table metadata.
+ *
+ * Annotate dest with source metadata, evaluate the annotations, and
+ * return whether the table schema needs an update.
+ *
+ * Preconditions:
+ *   - Both input structs are un-annotated. That is, none of their
+ *     fields have the optional ::meta filled in.
+ *
+ * Postconditions:
+ *   - All fields in dest are either assigned a unique ID carried over
+ *     from source, or are marked as "new" (i.e. needing a unique ID
+ *     assigned before insertion into metadata)
+ *   - Each field in source is annotated with metadata indicating whether
+ *     it has a compatible counterpart in dest.
+ *
+ * @param source - The source (i.e original) schema
+ * @param dest   - the proposed schema (probably extracted from some incoming
+ *                 record)
+ *
+ * @return Whether the schema changed from source->dest, or an error
+ */
+schema_evolution_result
+evolve_schema(const struct_type& source, struct_type& dest);
+
 } // namespace iceberg

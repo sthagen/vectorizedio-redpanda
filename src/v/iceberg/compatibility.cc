@@ -414,4 +414,23 @@ schema_transform_result validate_schema_transform(struct_type& dest) {
     return state;
 }
 
+schema_evolution_result
+evolve_schema(const struct_type& source, struct_type& dest) {
+    bool any_change = false;
+    if (auto annotate_res = annotate_schema_transform(source, dest);
+        annotate_res.has_error()) {
+        return annotate_res.error();
+    } else {
+        any_change = any_change || annotate_res.value().total() > 0;
+    }
+
+    if (auto validate_res = validate_schema_transform(dest);
+        validate_res.has_error()) {
+        return validate_res.error();
+    } else {
+        any_change = any_change || validate_res.value().total() > 0;
+    }
+    return schema_changed{any_change};
+}
+
 } // namespace iceberg

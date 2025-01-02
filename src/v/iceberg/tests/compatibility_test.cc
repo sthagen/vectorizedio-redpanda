@@ -1085,3 +1085,40 @@ TEST_P(ValidateAnnotationTest, ValidateCatchesTypeErrors) {
 
     EXPECT_FALSE(res.has_error());
 }
+
+struct StructEvoCompatibilityTest : public StructCompatibilityTestBase {};
+
+INSTANTIATE_TEST_SUITE_P(
+  StructEvolutionTest,
+  StructEvoCompatibilityTest,
+  ::testing::ValuesIn(valid_plus_errs(invalid_cases)));
+
+TEST_P(StructEvoCompatibilityTest, CanEvolveStructsAndDetectErrors) {
+    // generate a schema per the test case
+    auto original_schema_struct = generator();
+
+    // manually update a copy of the schema in some way, also specified by the
+    // test case
+    auto type = update(original_schema_struct);
+
+    // try to evolve the original schema into the new and update the latter
+    // accordingly. check against expectations (both success and expected
+    // qualities of the result)
+    auto evolve_res = evolve_schema(original_schema_struct, type);
+    ASSERT_EQ(evolve_res.has_error(), err().has_error())
+      << (evolve_res.has_error()
+            ? fmt::format("Unexpected error: {}", evolve_res.error())
+            : fmt::format(
+                "Expected {} got {}", err().error(), evolve_res.value()));
+    if (evolve_res.has_error()) {
+        ASSERT_EQ(evolve_res.error(), err().error());
+        return;
+    }
+
+    // check expected value for whether the schema changed
+    ASSERT_EQ(evolve_res.value(), any_change());
+
+    // Full validation step for struct evolution result
+    ASSERT_TRUE(validator(original_schema_struct, type)) << fmt::format(
+      "Original: {}\nEvolved: {}", original_schema_struct, evolve_res.value());
+}
