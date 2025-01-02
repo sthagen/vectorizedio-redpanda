@@ -1364,6 +1364,20 @@ ss::future<std::error_code> controller_backend::create_partition(
               = storage::topic_recovery_enabled::yes;
             rtp.emplace(remote_rev, cfg.partition_count);
         }
+        /**
+         * Reset remote topic properties if a topic is recovered from tiered
+         * storage and current node is joining replica set. A node is joining
+         * replica set if its initial nodes set is empty.
+         */
+        if (initial_nodes.empty() && rtp.has_value()) {
+            // reset remote topic properties
+            vlog(
+              clusterlog.info,
+              "[{}] Disabling remote recovery while creating partition "
+              "replica. Current node is added to the replica set as learner.",
+              ntp);
+            rtp.reset();
+        }
         // we use offset as an rev as it is always increasing and it
         // increases while ntp is being created again
         try {
