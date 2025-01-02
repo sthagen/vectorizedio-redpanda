@@ -470,38 +470,42 @@ func saveDataDirStructure(ps *stepParams, y *config.RedpandaYaml) step {
 // Writes the config file to the bundle, redacting SASL credentials.
 func saveConfig(ps *stepParams, y *config.RedpandaYaml) step {
 	return func() error {
+		yCp, err := createRedpandaConfigCopy(y)
+		if err != nil {
+			return err
+		}
 		// Redact SASL credentials
 		redacted := "(REDACTED)"
-		if y.Rpk.KafkaAPI.SASL != nil {
-			y.Rpk.KafkaAPI.SASL.User = redacted
-			y.Rpk.KafkaAPI.SASL.Password = redacted
+		if yCp.Rpk.KafkaAPI.SASL != nil {
+			yCp.Rpk.KafkaAPI.SASL.User = redacted
+			yCp.Rpk.KafkaAPI.SASL.Password = redacted
 		}
 		// We want to redact any blindly decoded parameters.
-		redactOtherMap(y.Other)
-		redactOtherMap(y.Redpanda.Other)
-		redactServerTLSSlice(y.Redpanda.KafkaAPITLS)
-		redactServerTLSSlice(y.Redpanda.AdminAPITLS)
-		if y.SchemaRegistry != nil {
-			for _, server := range y.SchemaRegistry.SchemaRegistryAPITLS {
+		redactOtherMap(yCp.Other)
+		redactOtherMap(yCp.Redpanda.Other)
+		redactServerTLSSlice(yCp.Redpanda.KafkaAPITLS)
+		redactServerTLSSlice(yCp.Redpanda.AdminAPITLS)
+		if yCp.SchemaRegistry != nil {
+			for _, server := range yCp.SchemaRegistry.SchemaRegistryAPITLS {
 				redactOtherMap(server.Other)
 			}
 		}
-		if y.Pandaproxy != nil {
-			redactOtherMap(y.Pandaproxy.Other)
-			redactServerTLSSlice(y.Pandaproxy.PandaproxyAPITLS)
+		if yCp.Pandaproxy != nil {
+			redactOtherMap(yCp.Pandaproxy.Other)
+			redactServerTLSSlice(yCp.Pandaproxy.PandaproxyAPITLS)
 		}
-		if y.PandaproxyClient != nil {
-			redactOtherMap(y.PandaproxyClient.Other)
-			y.PandaproxyClient.SCRAMPassword = &redacted
-			y.PandaproxyClient.SCRAMUsername = &redacted
+		if yCp.PandaproxyClient != nil {
+			redactOtherMap(yCp.PandaproxyClient.Other)
+			yCp.PandaproxyClient.SCRAMPassword = &redacted
+			yCp.PandaproxyClient.SCRAMUsername = &redacted
 		}
-		if y.SchemaRegistryClient != nil {
-			redactOtherMap(y.SchemaRegistryClient.Other)
-			y.SchemaRegistryClient.SCRAMPassword = &redacted
-			y.SchemaRegistryClient.SCRAMUsername = &redacted
+		if yCp.SchemaRegistryClient != nil {
+			redactOtherMap(yCp.SchemaRegistryClient.Other)
+			yCp.SchemaRegistryClient.SCRAMPassword = &redacted
+			yCp.SchemaRegistryClient.SCRAMUsername = &redacted
 		}
 
-		bs, err := yaml.Marshal(y)
+		bs, err := yaml.Marshal(yCp)
 		if err != nil {
 			return fmt.Errorf("couldn't encode the redpanda config as YAML: %w", err)
 		}
@@ -519,6 +523,19 @@ func redactOtherMap(other map[string]interface{}) {
 	for k := range other {
 		other[k] = "(REDACTED)"
 	}
+}
+
+func createRedpandaConfigCopy(y *config.RedpandaYaml) (*config.RedpandaYaml, error) {
+	bs, err := yaml.Marshal(y)
+	if err != nil {
+		return nil, fmt.Errorf("unable to serialize the loaded redpanda config as YAML: %v", err)
+	}
+	var cp config.RedpandaYaml
+	err = yaml.Unmarshal(bs, &cp)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode the redpanda config: %v", err)
+	}
+	return &cp, nil
 }
 
 // Saves the contents of '/proc/cpuinfo'.
