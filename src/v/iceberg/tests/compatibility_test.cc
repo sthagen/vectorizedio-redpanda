@@ -8,17 +8,126 @@
 // by the Apache License, Version 2.0
 
 #include "iceberg/compatibility.h"
+#include "iceberg/compatibility_types.h"
+#include "iceberg/compatibility_utils.h"
 #include "iceberg/datatypes.h"
+#include "random/generators.h"
 
+#include <absl/container/btree_map.h>
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <iostream>
+#include <unordered_set>
 #include <vector>
 
 using namespace iceberg;
 
 namespace {
+
+void reset_field_ids(struct_type& type) {
+    std::ignore = for_each_field(type, [](nested_field* f) {
+        f->id = nested_field::id_t{0};
+        f->meta = std::nullopt;
+    });
+}
+
+/**
+ * Less strict than an equality check.
+ *   - Collects the fields for each param in sorted order by ID
+ *   - Checks that IDs are unique in both input structs
+ *   - Checks that input structs have the same number of fields
+ *   - Checks that corresponding (by ID) lhs fields are equivalent to rhs
+ *     fields, matching name, type, nullability
+ */
+bool structs_equivalent(const struct_type& lhs, const struct_type& rhs) {
+    using field_map_t
+      = absl::btree_map<nested_field::id_t, const nested_field*>;
+
+    auto collect_fields =
+      [](const struct_type& s) -> std::pair<field_map_t, bool> {
+        field_map_t fields;
+        bool unique_ids = true;
+        std::ignore = for_each_field(
+          s, [&fields, &unique_ids](const nested_field* f) {
+              auto res = fields.emplace(f->id, f);
+              unique_ids = unique_ids && res.second;
+          });
+        return std::make_pair(std::move(fields), unique_ids);
+    };
+
+    auto [lhs_fields, lhs_uniq] = collect_fields(lhs);
+    auto [rhs_fields, rhs_uniq] = collect_fields(rhs);
+
+    if (!lhs_uniq || !rhs_uniq) {
+        return false;
+    }
+    if (lhs_fields.size() != rhs_fields.size()) {
+        return false;
+    }
+
+    static constexpr auto fields_equivalent =
+      [](const nested_field* lf, const nested_field* rf) {
+          if (
+            lf->id != rf->id || lf->name != rf->name
+            || lf->required != rf->required) {
+              return false;
+          }
+          auto res = check_types(lf->type, rf->type);
+          return !res.has_error() && res.value() == type_promoted::no;
+      };
+
+    return std::ranges::all_of(lhs_fields, [&rhs_fields](const auto lhs_pr) {
+        auto rhs_it = rhs_fields.find(lhs_pr.first);
+        if (rhs_it == rhs_fields.end()) {
+            return false;
+        }
+        return fields_equivalent(lhs_pr.second, rhs_it->second);
+    });
+}
+
+struct unique_id_generator {
+    static constexpr int max = 100000;
+
+    nested_field::id_t get_one() {
+        int id = random_generators::get_int(1, max);
+        while (used.contains(id)) {
+            id = random_generators::get_int(1, max);
+        }
+        used.insert(id);
+        return nested_field::id_t{id};
+    }
+    std::unordered_set<int> used;
+};
+
+bool updated(const nested_field& src, const nested_field& dest) {
+    return std::holds_alternative<nested_field::src_info>(dest.meta)
+           && std::get<nested_field::src_info>(dest.meta).id == dest.id
+           && dest.id == src.id;
+}
+
+bool updated(const nested_field& dest) {
+    return std::holds_alternative<nested_field::src_info>(dest.meta);
+}
+
+bool added(const nested_field& f) {
+    return std::holds_alternative<nested_field::is_new>(f.meta);
+}
+
+bool removed(const nested_field& f) {
+    return std::holds_alternative<nested_field::removed>(f.meta)
+           && std::get<nested_field::removed>(f.meta)
+                == nested_field::removed::yes;
+}
+
+template<typename T>
+T& get(const nested_field_ptr& f) {
+    vassert(
+      std::holds_alternative<T>(f->type),
+      "Unexpected variant type: {}",
+      f->type.index());
+    return std::get<T>(f->type);
+}
 
 using compat = ss::bool_class<struct compat_tag>;
 
@@ -145,16 +254,19 @@ std::vector<field_test_case> generate_test_cases() {
     return test_data;
 }
 
+template<typename T>
 struct CompatibilityTest
   : ::testing::Test
-  , testing::WithParamInterface<field_test_case> {};
+  , testing::WithParamInterface<T> {};
+
+using PrimitiveCompatibilityTest = CompatibilityTest<field_test_case>;
 
 INSTANTIATE_TEST_SUITE_P(
   PrimitiveTypeCompatibilityTest,
-  CompatibilityTest,
+  PrimitiveCompatibilityTest,
   ::testing::ValuesIn(generate_test_cases()));
 
-TEST_P(CompatibilityTest, CompatibleTypesAreCompatible) {
+TEST_P(PrimitiveCompatibilityTest, CompatibleTypesAreCompatible) {
     const auto& p = GetParam();
 
     auto res = check_types(p.source, p.dest);
@@ -165,3 +277,51 @@ TEST_P(CompatibilityTest, CompatibleTypesAreCompatible) {
         ASSERT_EQ(res.value(), p.expected.value());
     }
 }
+
+namespace {
+
+struct_type nested_test_struct() {
+    unique_id_generator ids{};
+
+    struct_type nested_struct;
+    struct_type key_struct;
+    key_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(), "baz", field_required::yes, int_type{}));
+
+    struct_type nested_value_struct;
+    nested_value_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(), "nmv1", field_required::yes, int_type{}));
+    nested_value_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(), "nmv2", field_required::yes, string_type{}));
+
+    nested_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(),
+      "quux",
+      field_required::yes,
+      map_type::create(
+        ids.get_one(),
+        std::move(key_struct),
+        ids.get_one(),
+        field_required::yes,
+        map_type::create(
+          ids.get_one(),
+          string_type{},
+          ids.get_one(),
+          field_required::yes,
+          std::move(nested_value_struct)))));
+
+    struct_type location_struct;
+    location_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(), "latitude", field_required::yes, float_type{}));
+    location_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(), "longitude", field_required::yes, float_type{}));
+    nested_struct.fields.emplace_back(nested_field::create(
+      ids.get_one(),
+      "location",
+      field_required::yes,
+      list_type::create(
+        ids.get_one(), field_required::yes, std::move(location_struct))));
+
+    return nested_struct;
+}
+} // namespace
