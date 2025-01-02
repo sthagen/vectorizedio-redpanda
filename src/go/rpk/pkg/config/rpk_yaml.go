@@ -10,7 +10,6 @@
 package config
 
 import (
-	"connectrpc.com/connect"
 	"errors"
 	"fmt"
 	"os"
@@ -18,12 +17,12 @@ import (
 	"reflect"
 	"time"
 
+	"connectrpc.com/connect"
+	rpkos "github.com/redpanda-data/redpanda/src/go/rpk/pkg/os"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/publicapi"
 	"github.com/spf13/afero"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
-
-	rpkos "github.com/redpanda-data/redpanda/src/go/rpk/pkg/os"
 )
 
 // DefaultRpkYamlPath returns the OS equivalent of ~/.config/rpk/rpk.yaml, if

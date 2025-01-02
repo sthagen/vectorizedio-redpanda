@@ -10,6 +10,9 @@
 package user
 
 import (
+	"strings"
+
+	dataplanev1alpha2 "buf.build/gen/go/redpandadata/dataplane/protocolbuffers/go/redpanda/api/dataplane/v1alpha2"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -38,4 +41,12 @@ true" in the redpanda section of your redpanda.yaml.
 		newUpdateCommand(fs, p),
 	)
 	return cmd
+}
+
+func stringToDataplaneMechanism(mechanism string) dataplanev1alpha2.SASLMechanism {
+	m := "SASL_MECHANISM_" + strings.ReplaceAll(strings.ToUpper(mechanism), "-", "_")
+	if sm, ok := dataplanev1alpha2.SASLMechanism_value[m]; ok {
+		return dataplanev1alpha2.SASLMechanism(sm)
+	}
+	return dataplanev1alpha2.SASLMechanism_SASL_MECHANISM_UNSPECIFIED
 }
