@@ -69,4 +69,24 @@ check_types(const iceberg::field_type& src, const iceberg::field_type& dest);
 schema_transform_result
 annotate_schema_transform(const struct_type& source, const struct_type& dest);
 
+/**
+ * validate_schema_transform - Finish evaluating backwards compatibility of
+ * some schema with another. Makes any required changes to 'dest' and enforces
+ * rules around field nullability ("requiredness"").
+ *
+ * Visit each field in the destination struct again,
+ * this time checking nullability invariants and assigning final column IDs to
+ * fields mapped from the source structs.
+ *
+ * Preconditions:
+ *   - 'dest' has been fed though 'annotate_schema_transform' already, along
+ *     with a source schema.
+ *
+ * @param dest - the proposed schema (probably extracted from some incoming
+ *               record)
+ *
+ * @return schema_transform_state (indicating success), or an error code
+ */
+schema_transform_result validate_schema_transform(struct_type& dest);
+
 } // namespace iceberg

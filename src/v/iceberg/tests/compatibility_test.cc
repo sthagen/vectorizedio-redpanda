@@ -1026,3 +1026,62 @@ TEST_P(AnnotateStructTest, AnnotationWorksAndDetectsStructuralErrors) {
     });
     EXPECT_FALSE(res.has_error());
 }
+
+struct ValidateAnnotationTest : public StructCompatibilityTestBase {};
+
+INSTANTIATE_TEST_SUITE_P(
+  StructEvolutionTest,
+  ValidateAnnotationTest,
+  ::testing::ValuesIn(valid_plus_errs(
+    invalid_cases | std::views::filter([](const auto& tc) {
+        return tc.err.assume_error() == schema_evolution_errc::type_mismatch
+               || tc.err.assume_error()
+                    == schema_evolution_errc::new_required_field;
+    }))));
+
+TEST_P(ValidateAnnotationTest, ValidateCatchesTypeErrors) {
+    // generate a schema per the test case
+    auto original_schema_struct = generator();
+
+    // manually update a copy of the schema in some way, also specified by the
+    // test case
+    auto type = update(original_schema_struct);
+
+    {
+        // transforming self -> self returns no change
+        auto c1 = type.copy();
+        auto c2 = type.copy();
+        auto annotate_res = annotate_schema_transform(c1, c2);
+        ASSERT_FALSE(annotate_res.has_error());
+        auto validate_res = validate_schema_transform(c2);
+        ASSERT_FALSE(validate_res.has_error())
+          << fmt::format("Unexpected error: {}", validate_res.error());
+        EXPECT_EQ(validate_res.value().total(), 0);
+    }
+
+    // For this subset of cases we expect annotate to pass
+    auto annotate_res = annotate_schema_transform(original_schema_struct, type);
+    ASSERT_FALSE(annotate_res.has_error());
+
+    // but validate may fail
+    auto validate_res = validate_schema_transform(type);
+    ASSERT_EQ(validate_res.has_error(), err().has_error())
+      << (validate_res.has_error()
+            ? fmt::format("Unexpected error: {}", validate_res.error())
+            : fmt::format("Expected {}", err().error()));
+
+    if (validate_res.has_error()) {
+        EXPECT_EQ(validate_res.error(), err().error());
+        return;
+    }
+
+    // If validate passed, every field in the destination struct should either
+    // have a nonzero ID assigned OR be marked as new.
+    auto res = for_each_field(type, [](const nested_field* f) {
+        ASSERT_TRUE(f->has_evolution_metadata());
+        EXPECT_TRUE(
+          f->id() > 0 || std::holds_alternative<nested_field::is_new>(f->meta));
+    });
+
+    EXPECT_FALSE(res.has_error());
+}

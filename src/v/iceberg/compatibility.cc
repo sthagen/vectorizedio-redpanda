@@ -323,6 +323,66 @@ public:
     }
 };
 
+/**
+ * validate_transform_visitor - validate evolution_metadata for some nested
+ * field and assign field ID as appropriate. Note new fields and promoted types
+ * on the input schema_transform_state.
+ *
+ * Considerations:
+ *   - Adding a required column is allowed by the Iceberg spec but omitted
+ *     here. We may implement it in the future.
+ *   - Changing an optional column to required is not allowed, per spec.
+ *   - The type check on src_info is for primitive types only. The annotation
+ *     step checks structural type compatibility.
+ *   - Assigning a fresh ID to a new column requires table metadata context,
+ *     so that computation is deferred to a subsequent step..
+ *   - TODO: support for initial-default and write-default
+ */
+struct validate_transform_visitor {
+    explicit validate_transform_visitor(
+      nested_field* f, schema_transform_state& state)
+      : f_(f)
+      , state_(&state) {}
+    schema_errc_result operator()(const nested_field::src_info& src) {
+        bool promoted = false;
+        if (src.type.has_value()) {
+            if (auto ct_res = check_types(src.type.value(), f_->type);
+                ct_res.has_error()) {
+                return schema_evolution_errc::type_mismatch;
+            } else if (ct_res.value() == type_promoted::yes) {
+                promoted = true;
+            }
+        }
+        if (
+          src.required == field_required::no
+          && f_->required == field_required::yes) {
+            return schema_evolution_errc::new_required_field;
+        } else if (src.required != f_->required) {
+            promoted = true;
+        }
+        *state_ += schema_transform_state{.n_promoted = promoted ? 1ul : 0ul};
+        f_->id = src.id;
+        return std::nullopt;
+    }
+
+    schema_errc_result operator()(const nested_field::is_new&) {
+        if (f_->required == field_required::yes) {
+            return schema_evolution_errc::new_required_field;
+        }
+        *state_ += schema_transform_state{.n_added = 1};
+        return std::nullopt;
+    }
+
+    template<typename T>
+    schema_errc_result operator()(const T&) {
+        return schema_evolution_errc::invalid_state;
+    }
+
+private:
+    nested_field* f_;
+    schema_transform_state* state_;
+};
+
 } // namespace
 
 type_check_result
@@ -336,6 +396,22 @@ check_types(const iceberg::field_type& src, const iceberg::field_type& dest) {
 schema_transform_result
 annotate_schema_transform(const struct_type& source, const struct_type& dest) {
     return annotate_schema_visitor{}.visit(source, dest);
+}
+
+schema_transform_result validate_schema_transform(struct_type& dest) {
+    schema_transform_state state{};
+    if (auto res = for_each_field(
+          dest,
+          [&state](nested_field* f) {
+              vassert(
+                f->has_evolution_metadata(),
+                "Should have visited every destination field");
+              return std::visit(validate_transform_visitor{f, state}, f->meta);
+          });
+        res.has_error()) {
+        return res.error();
+    }
+    return state;
 }
 
 } // namespace iceberg
