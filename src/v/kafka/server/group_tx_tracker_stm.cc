@@ -22,6 +22,11 @@ group_tx_tracker_stm::group_tx_tracker_stm(
   , _feature_table(feature_table)
   , _serializer(make_consumer_offsets_serializer()) {}
 
+ss::future<> group_tx_tracker_stm::stop() {
+    _as.request_abort();
+    return raft::persisted_stm<>::stop();
+}
+
 void group_tx_tracker_stm::maybe_add_tx_begin_offset(
   model::record_batch_type fence_type,
   kafka::group_id group,
@@ -75,6 +80,18 @@ void group_tx_tracker_stm::maybe_end_tx(
 
 ss::future<> group_tx_tracker_stm::do_apply(const model::record_batch& b) {
     auto holder = _gate.hold();
+    // fast path, check without a scheduling point.
+    if (unlikely(!_feature_table.local().is_active(
+          features::feature::group_tx_fence_dedicated_batch_type))) {
+        // This is only relevant for upgrades from 24.1.x to 24.2.x where a
+        // mixed mode cluster has this feature disabled until the upgrade is
+        // done. Holding off stm updates ensures that max_collectible offset
+        // does not progress for the duration of the upgrade, which is ok since
+        // group compaction was not considering any control batches in 24.1.x,
+        // so nothing was being compacted.
+        co_await _feature_table.local().await_feature(
+          features::feature::group_tx_fence_dedicated_batch_type, _as);
+    }
     co_await parse(b.copy());
 }
 

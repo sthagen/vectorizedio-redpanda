@@ -73,6 +73,8 @@ public:
       model::record_batch_header, kafka::group_tx::commit_metadata);
     ss::future<> handle_version_fence(features::feature_table::version_fence);
 
+    ss::future<> stop() final;
+
 private:
     struct producer_tx_state
       : serde::envelope<
@@ -143,6 +145,7 @@ private:
 
     ss::sharded<features::feature_table>& _feature_table;
     group_metadata_serializer _serializer;
+    ss::abort_source _as;
 };
 
 class group_tx_tracker_stm_factory : public cluster::state_machine_factory {
