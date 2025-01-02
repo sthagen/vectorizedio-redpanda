@@ -338,6 +338,13 @@ consensus::success_reply consensus::update_follower_index(
         // current node may change it.
         return success_reply::yes;
     }
+
+    if (unlikely(r.value().result == reply_result::follower_busy)) {
+        // ignore this response, timed out on the receiver node
+        vlog(_ctxlog.trace, "Follower busy on node {}", node.id());
+        return success_reply::no;
+    }
+
     const auto& config = _configuration_manager.get_latest();
     if (!config.contains(node)) {
         // We might have sent an append_entries just before removing
@@ -371,12 +378,6 @@ consensus::success_reply consensus::update_follower_index(
           "node_id (received: {}, expected: {})",
           reply.node_id.id(),
           physical_node);
-        return success_reply::no;
-    }
-
-    if (unlikely(reply.result == reply_result::timeout)) {
-        // ignore this response, timed out on the receiver node
-        vlog(_ctxlog.trace, "Append entries request timedout at node {}", node);
         return success_reply::no;
     }
     if (unlikely(reply.result == reply_result::group_unavailable)) {
