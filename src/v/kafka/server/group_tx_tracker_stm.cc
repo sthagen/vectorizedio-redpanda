@@ -39,7 +39,8 @@ void group_tx_tracker_stm::maybe_add_tx_begin_offset(
           offset);
         return;
     }
-    it->second.maybe_add_tx_begin(fence_type, pid, offset, ts, tx_timeout);
+    it->second.maybe_add_tx_begin(
+      group, fence_type, pid, offset, ts, tx_timeout);
 }
 
 void group_tx_tracker_stm::maybe_end_tx(
@@ -242,6 +243,7 @@ void group_tx_tracker_stm_factory::create(
 }
 
 void group_tx_tracker_stm::per_group_state::maybe_add_tx_begin(
+  const kafka::group_id& group,
   model::record_batch_type fence_type,
   model::producer_identity pid,
   model::offset offset,
@@ -249,14 +251,59 @@ void group_tx_tracker_stm::per_group_state::maybe_add_tx_begin(
   model::timeout_clock::duration tx_timeout) {
     auto it = producer_states.find(pid);
     if (it == producer_states.end()) {
-        begin_offsets.emplace(offset);
-        producer_states[pid] = {
+        auto p_state = producer_tx_state{
           .fence_type = fence_type,
           .begin_offset = offset,
           .batch_ts = begin_ts,
           .timeout = tx_timeout};
+        if (p_state.expired_deprecated_fence_tx()) {
+            vlog(
+              klog.debug,
+              "[{}] Ignoring stale tx_fence batch at offset: {}, considering "
+              "it expired",
+              group,
+              offset);
+            return;
+        }
+        vlog(
+          klog.debug,
+          "[{}] Adding begin tx : {}, pid: {} at offset: {}, ts: {} with "
+          "timeout: {}",
+          group,
+          fence_type,
+          pid,
+          offset,
+          begin_ts,
+          tx_timeout);
+        begin_offsets.emplace(offset);
+        producer_states[pid] = p_state;
         producer_to_begin_deprecated[pid] = offset;
     }
+}
+
+bool group_tx_tracker_stm::producer_tx_state::expired_deprecated_fence_tx()
+  const {
+    // A bug in 24.2.0 resulted in a situation where tx_fence
+    // batches were retained _after_ compaction while their corresponding
+    // data/commit/abort batches were compacted away. This applied to
+    // only group transactions that used tx_fence to begin the
+    // transaction.
+    // After this buggy compaction, these uncleaned tx_fence batches are
+    // accounted as open transactions when computing
+    // max_collectible_offset thus blocking further compaction after
+    // upgrade to 24.2.x.
+    if (fence_type != model::record_batch_type::tx_fence) {
+        return false;
+    }
+    // note: this is a heuristic to ignore any transactions that have long been
+    // expired and we do not want them to block max collectible offset.
+    // clamp the timeout, incase timeout is unset
+    auto max_timeout
+      = std::chrono::duration_cast<model::timeout_clock::duration>(
+        2 * config::shard_local_cfg().transaction_max_timeout_ms());
+    auto clamped_timeout = std::min(max_timeout, 2 * timeout);
+    return model::timestamp_clock::now()
+           > model::to_time_point(batch_ts) + clamped_timeout;
 }
 
 } // namespace kafka
