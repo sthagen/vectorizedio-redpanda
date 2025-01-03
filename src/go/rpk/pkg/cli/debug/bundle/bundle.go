@@ -276,6 +276,8 @@ BARE-METAL
  - dmidecode: The DMI table contents. Only included if this command is run
    as root.
 
+ - System load average: As reported by 'uptime'
+
 KUBERNETES
 
  - Kubernetes Resources: Kubernetes manifests for all resources in the given 

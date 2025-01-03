@@ -158,6 +158,7 @@ func executeBundle(ctx context.Context, bp bundleParams) error {
 		saveSyslog(ps),
 		saveTopOutput(ctx, ps),
 		saveUname(ctx, ps),
+		saveUptime(ctx, ps),
 		saveVmstat(ctx, ps),
 	}
 
@@ -829,6 +830,13 @@ func saveFree(ctx context.Context, ps *stepParams) step {
 			filepath.Join(linuxUtilsRoot, "free.txt"),
 			"free",
 		)
+	}
+}
+
+// Saves the output of `uptime`.
+func saveUptime(ctx context.Context, ps *stepParams) step {
+	return func() error {
+		return writeCommandOutputToZip(ctx, ps, filepath.Join(linuxUtilsRoot, "uptime.txt"), "uptime")
 	}
 }
 
