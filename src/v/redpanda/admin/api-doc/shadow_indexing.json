@@ -201,9 +201,25 @@
         {
           "method": "POST",
           "summary": "Invoke trimming on the local cache of tiered storage objects",
+          "description": "This operation will trim the local cache of tiered storage objects. If no parameters are included, this endpoint by default trims the cache to the maximum cache size given by the cluster config. Use the 'bytes' and 'objects' parameters to specify the number of bytes and objects to retain in the cache.",
           "operationId": "cloud_storage_cache_trim",
           "nickname": "post_cloud_storage_cache_trim",
-          "parameters": []
+          "parameters": [
+            {
+              "name": "objects",
+              "in": "query",
+              "required": false,
+              "type": "integer",
+              "description": "Target number of objects to retain in the cache"
+            },
+            {
+              "name": "bytes",
+              "in": "query",
+              "required": false,
+              "type": "integer",
+              "description": "Target number of bytes to retain in the cache"
+            }
+          ]
         }
       ]
     },
