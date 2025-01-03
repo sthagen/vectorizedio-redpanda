@@ -13,8 +13,6 @@
 
 #include "base/seastarx.h"
 #include "cluster/fwd.h"
-#include "config/client_group_byte_rate_quota.h"
-#include "config/property.h"
 #include "utils/named_type.h"
 
 #include <seastar/core/sharded.hh>
@@ -84,18 +82,14 @@ std::ostream& operator<<(std::ostream&, const client_quota_request_ctx&);
 enum class client_quota_rule {
     not_applicable,
     kafka_client_default,
-    cluster_client_default,
     kafka_client_prefix,
-    cluster_client_prefix,
     kafka_client_id
 };
 
 inline constexpr std::array all_client_quota_rules = {
   client_quota_rule::not_applicable,
   client_quota_rule::kafka_client_default,
-  client_quota_rule::cluster_client_default,
   client_quota_rule::kafka_client_prefix,
-  client_quota_rule::cluster_client_prefix,
   client_quota_rule::kafka_client_id};
 
 std::ostream& operator<<(std::ostream&, client_quota_rule);
@@ -145,27 +139,10 @@ public:
     bool is_empty() const;
 
 private:
-    using quota_config
-      = std::unordered_map<ss::sstring, config::client_group_quota>;
-
-    using config_callback = std::function<void(void)>;
-
-    const quota_config& get_quota_config(client_quota_type qt) const;
-    std::optional<uint64_t> get_default_config(client_quota_type qt) const;
-
     client_quota_value get_client_quota_value(
       const tracker_key& quota_id, client_quota_type qt) const;
 
-    void maybe_log_deprecated_configs_nag() const;
-
     ss::sharded<cluster::client_quota::store>& _quota_store;
-
-    std::vector<config_callback> _config_callbacks;
-    config::binding<uint32_t> _default_target_produce_tp_rate;
-    config::binding<std::optional<uint32_t>> _default_target_fetch_tp_rate;
-    config::binding<std::optional<uint32_t>> _target_partition_mutation_quota;
-    config::binding<quota_config> _target_produce_tp_rate_per_client_group;
-    config::binding<quota_config> _target_fetch_tp_rate_per_client_group;
 };
 
 } // namespace kafka

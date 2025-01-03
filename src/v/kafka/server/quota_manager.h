@@ -11,7 +11,6 @@
 
 #pragma once
 #include "base/seastarx.h"
-#include "config/client_group_byte_rate_quota.h"
 #include "config/property.h"
 #include "container/chunked_hash_map.h"
 #include "kafka/server/atomic_token_bucket.h"
@@ -127,9 +126,6 @@ public:
 private:
     using quota_mutation_callback_t
       = ss::noncopyable_function<clock::duration(client_quota&)>;
-
-    using quota_config
-      = std::unordered_map<ss::sstring, config::client_group_quota>;
 
     class client_quotas_probe;
 
