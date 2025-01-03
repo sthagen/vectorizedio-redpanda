@@ -20,9 +20,30 @@ group_tx_tracker_stm::group_tx_tracker_stm(
   : raft::persisted_stm<>("group_tx_tracker_stm.snapshot", logger, raft)
   , group_data_parser<group_tx_tracker_stm>()
   , _feature_table(feature_table)
-  , _serializer(make_consumer_offsets_serializer()) {}
+  , _serializer(make_consumer_offsets_serializer()) {
+    _stale_tx_fence_gc_timer.set_callback([this] {
+        ssx::spawn_with_gate(
+          _gate, [this] { return gc_expired_tx_fence_transactions(); });
+    });
+    _stale_tx_fence_gc_timer.arm_periodic(tx_fence_gc_frequency);
+}
+
+ss::future<> group_tx_tracker_stm::gc_expired_tx_fence_transactions() {
+    auto holder = _gate.hold();
+    auto it = _all_txs.begin();
+    while (it != _all_txs.end()) {
+        it->second.gc_expired_tx_fence_transactions();
+        ++it;
+        if (ss::need_preempt() && it != _all_txs.end()) {
+            auto key_checkpoint = it->first;
+            co_await ss::yield();
+            it = _all_txs.lower_bound(key_checkpoint);
+        }
+    }
+}
 
 ss::future<> group_tx_tracker_stm::stop() {
+    _stale_tx_fence_gc_timer.cancel();
     _as.request_abort();
     return raft::persisted_stm<>::stop();
 }
@@ -295,6 +316,24 @@ void group_tx_tracker_stm::per_group_state::maybe_add_tx_begin(
         begin_offsets.emplace(offset);
         producer_states[pid] = p_state;
         producer_to_begin_deprecated[pid] = offset;
+    }
+}
+
+void group_tx_tracker_stm::per_group_state::gc_expired_tx_fence_transactions() {
+    auto it = producer_states.begin();
+    while (it != producer_states.end()) {
+        if (it->second.expired_deprecated_fence_tx()) {
+            vlog(
+              klog.warn,
+              "Expiring stale tx_fence based begin tx at offset: {} for "
+              "producer: {}",
+              it->second.begin_offset,
+              it->first);
+            begin_offsets.erase(it->second.begin_offset);
+            it = producer_states.erase(it);
+            continue;
+        }
+        ++it;
     }
 }
 

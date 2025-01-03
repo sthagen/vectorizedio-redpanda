@@ -116,6 +116,8 @@ private:
         absl::btree_map<model::producer_identity, producer_tx_state>
           producer_states;
 
+        void gc_expired_tx_fence_transactions();
+
         auto serde_fields() {
             return std::tie(
               begin_offsets, producer_to_begin_deprecated, producer_states);
@@ -130,6 +132,8 @@ private:
     };
 
     void handle_group_metadata(group_metadata_kv);
+
+    ss::future<> gc_expired_tx_fence_transactions();
 
     void maybe_add_tx_begin_offset(
       model::record_batch_type fence_type,
@@ -146,6 +150,8 @@ private:
     ss::sharded<features::feature_table>& _feature_table;
     group_metadata_serializer _serializer;
     ss::abort_source _as;
+    static constexpr ss::lowres_clock::duration tx_fence_gc_frequency{1h};
+    ss::timer<ss::lowres_clock> _stale_tx_fence_gc_timer;
 };
 
 class group_tx_tracker_stm_factory : public cluster::state_machine_factory {
