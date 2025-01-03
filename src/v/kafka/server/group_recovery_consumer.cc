@@ -71,7 +71,8 @@ ss::future<> group_recovery_consumer::handle_fence_v1(
       pid.get_epoch(),
       data.tx_seq,
       data.transaction_timeout_ms,
-      model::partition_id(0));
+      model::partition_id(0),
+      header.base_offset);
     co_return;
 }
 
@@ -79,6 +80,18 @@ ss::future<> group_recovery_consumer::handle_fence(
   model::record_batch_header header, kafka::group_tx::fence_metadata data) {
     auto pid = model::producer_identity{
       header.producer_id, header.producer_epoch};
+    auto group_it = _state.groups.find(data.group_id);
+    if (group_it == _state.groups.end()) {
+        vlog(
+          klog.trace,
+          "[group: {}] group does not exist, ignoring tx fence version: {} for "
+          "producer: {} - {}",
+          data.group_id,
+          group::fence_control_record_version,
+          pid,
+          data);
+        co_return;
+    }
     vlog(
       klog.trace,
       "[group: {}] recovered tx fence version: {} for producer: {} - {}",
@@ -86,36 +99,55 @@ ss::future<> group_recovery_consumer::handle_fence(
       group::fence_control_record_version,
       pid,
       data);
-    auto [group_it, _] = _state.groups.try_emplace(data.group_id);
     group_it->second.try_set_fence(
       pid.get_id(),
       pid.get_epoch(),
       data.tx_seq,
       data.transaction_timeout_ms,
-      data.tm_partition);
+      data.tm_partition,
+      header.base_offset);
     co_return;
 }
 
 ss::future<> group_recovery_consumer::handle_abort(
   model::record_batch_header header, kafka::group_tx::abort_metadata data) {
+    auto pid = model::producer_identity{
+      header.producer_id, header.producer_epoch};
+    auto group_it = _state.groups.find(data.group_id);
+    if (group_it == _state.groups.end()) {
+        vlog(
+          klog.trace,
+          "[group: {}] group does not exist, ignoring abort for "
+          "producer: {} - sequence {}",
+          data.group_id,
+          pid,
+          data.tx_seq);
+        co_return;
+    }
     vlog(
       klog.trace,
       "[group: {}] recovered abort tx_seq: {}",
       data.group_id,
       data.tx_seq);
-    auto pid = model::producer_identity{
-      header.producer_id, header.producer_epoch};
-    auto [group_it, _] = _state.groups.try_emplace(data.group_id);
     group_it->second.abort(pid, data.tx_seq);
     co_return;
 }
 
 ss::future<> group_recovery_consumer::handle_commit(
   model::record_batch_header header, kafka::group_tx::commit_metadata data) {
-    vlog(klog.trace, "[group: {}] recovered commit tx", data.group_id);
     auto pid = model::producer_identity{
       header.producer_id, header.producer_epoch};
-    auto [group_it, _] = _state.groups.try_emplace(data.group_id);
+    auto group_it = _state.groups.find(data.group_id);
+    if (group_it == _state.groups.end()) {
+        vlog(
+          klog.trace,
+          "[group: {}] group does not exist, ignoring commit for "
+          "producer: {}",
+          data.group_id,
+          pid);
+        co_return;
+    }
+    vlog(klog.trace, "[group: {}] recovered commit tx", data.group_id);
     group_it->second.commit(pid);
     co_return;
 }
@@ -167,17 +199,18 @@ void group_recovery_consumer::handle_record(model::record r) {
 }
 
 void group_recovery_consumer::handle_group_metadata(group_metadata_kv md) {
-    vlog(klog.trace, "[group: {}] recovered group metadata", md.key.group_id);
-
     if (md.value) {
         // until we switch over to a compacted topic or use raft snapshots,
         // always take the latest entry in the log.
+        vlog(
+          klog.trace, "[group: {}] recovered group metadata", md.key.group_id);
 
         auto [group_it, _] = _state.groups.try_emplace(
           md.key.group_id, group_stm());
         group_it->second.overwrite_metadata(std::move(*md.value));
     } else {
         // tombstone
+        vlog(klog.trace, "[group: {}] recovered tombstone", md.key.group_id);
         _state.groups.erase(md.key.group_id);
     }
 }

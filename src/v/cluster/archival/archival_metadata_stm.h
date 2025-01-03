@@ -307,7 +307,7 @@ private:
     ss::future<> do_apply(const model::record_batch& batch) override;
     ss::future<> apply_raft_snapshot(const iobuf&) override;
 
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) override;
     ss::future<raft::stm_snapshot>
     take_local_snapshot(ssx::semaphore_units apply_units) override;

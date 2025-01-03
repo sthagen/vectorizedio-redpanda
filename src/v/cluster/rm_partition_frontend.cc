@@ -559,4 +559,60 @@ ss::future<abort_tx_reply> rm_partition_frontend::do_abort_tx(
       });
 }
 
+ss::future<get_producers_reply>
+rm_partition_frontend::get_producers_locally(get_producers_request request) {
+    get_producers_reply reply;
+    auto partition = _partition_manager.local().get(request.ntp);
+    if (!partition || !partition->is_leader()) {
+        reply.error_code = tx::errc::not_coordinator;
+        co_return reply;
+    }
+    reply.error_code = tx::errc::none;
+    auto stm = partition->raft()->stm_manager()->get<rm_stm>();
+    if (!stm) {
+        // maybe an internal (non data) partition
+        co_return reply;
+    }
+    const auto& producers = stm->get_producers();
+    reply.producer_count = producers.size();
+    for (const auto& [pid, state] : producers) {
+        producer_state_info producer_info;
+        producer_info.pid = state->id();
+        // fill in the idempotent producer state.
+        const auto& requests = state->idempotent_request_state();
+        for (const auto& request : requests.inflight_requests()) {
+            idempotent_request_info request_info;
+            request_info.first_sequence = request->first_sequence();
+            request_info.last_sequence = request->last_sequence();
+            request_info.term = request->term();
+            producer_info.inflight_requests.push_back(std::move(request_info));
+        }
+
+        for (const auto& request : requests.finished_requests()) {
+            idempotent_request_info request_info;
+            request_info.first_sequence = request->first_sequence();
+            request_info.last_sequence = request->last_sequence();
+            request_info.term = request->term();
+            producer_info.finished_requests.push_back(std::move(request_info));
+        }
+        producer_info.last_update = state->last_update_timestamp();
+
+        // Fill in transactional producer state, if any.
+        const auto& tx_state = state->transaction_state();
+        if (state->has_transaction_in_progress() && tx_state) {
+            producer_info.tx_begin_offset = tx_state->first;
+            producer_info.tx_end_offset = tx_state->last;
+            producer_info.tx_seq = tx_state->sequence;
+            producer_info.tx_timeout = tx_state->timeout;
+            producer_info.coordinator_partition
+              = tx_state->coordinator_partition;
+        }
+        reply.producers.push_back(std::move(producer_info));
+        if (reply.producers.size() > request.max_producers_to_include) {
+            break;
+        }
+    }
+    co_return reply;
+}
+
 } // namespace cluster

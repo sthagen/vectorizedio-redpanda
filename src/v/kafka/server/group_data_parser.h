@@ -111,7 +111,7 @@ protected:
               std::move(b));
             return handle_version_fence(fence);
         }
-        vlog(klog.warn, "ignoring batch with type: {}", b.header().type);
+        vlog(klog.debug, "ignoring batch with type: {}", b.header().type);
         return ss::make_ready_future<>();
     }
 

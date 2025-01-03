@@ -2974,4 +2974,86 @@ ss::future<tx::errc> tx_gateway_frontend::do_delete_partition_from_tx(
     co_return tx::errc::none;
 }
 
+ss::future<tx::errc> tx_gateway_frontend::unsafe_abort_group_transaction(
+  kafka::group_id group,
+  model::producer_identity pid,
+  model::tx_seq tx_seq,
+  model::timeout_clock::duration timeout) {
+    auto holder = _gate.hold();
+    vlog(
+      txlog.warn,
+      "Issuing an unsafe abort of group transaction, group: {}, pid: {}, seq: "
+      "{}, timeout: {}",
+      group,
+      pid,
+      tx_seq,
+      timeout);
+    auto result = co_await _rm_group_proxy->abort_group_tx(
+      std::move(group), pid, tx_seq, timeout);
+    co_return result.ec;
+}
+
+ss::future<get_producers_reply>
+tx_gateway_frontend::get_producers(get_producers_request request) {
+    auto holder = _gate.hold();
+    const auto& ntp = request.ntp;
+    if (!_metadata_cache.local().contains(ntp)) {
+        co_return get_producers_reply{
+          .error_code = tx::errc::partition_not_exists};
+    }
+
+    auto leader_opt = _leaders.local().get_leader(ntp);
+    if (!leader_opt) {
+        co_return get_producers_reply{.error_code = tx::errc::leader_not_found};
+    }
+    auto leader = leader_opt.value();
+    if (leader == _self) {
+        auto shard = _shard_table.local().shard_for(ntp);
+        if (!shard.has_value()) {
+            co_return get_producers_reply{
+              .error_code = tx::errc::shard_not_found};
+        }
+        co_return co_await container().invoke_on(
+          shard.value(),
+          _ssg,
+          [request = std::move(request)](tx_gateway_frontend& local) mutable {
+              return local.get_producers_locally(std::move(request));
+          });
+    }
+    auto timeout = request.timeout;
+    auto result = co_await _connection_cache.local()
+                    .with_node_client<tx_gateway_client_protocol>(
+                      _self,
+                      ss::this_shard_id(),
+                      leader,
+                      model::timeout_clock::now() + timeout,
+                      [request = std::move(request),
+                       timeout](tx_gateway_client_protocol cp) mutable {
+                          return cp.get_producers(
+                            std::move(request),
+                            rpc::client_opts(
+                              model::timeout_clock::now() + timeout));
+                      });
+    if (result.has_error()) {
+        co_return get_producers_reply{.error_code = tx::errc::not_coordinator};
+    }
+    co_return std::move(result.value().data);
+}
+
+ss::future<get_producers_reply>
+tx_gateway_frontend::get_producers_locally(get_producers_request request) {
+    auto& ntp = request.ntp;
+    bool is_consumer_offsets_ntp = ntp.ns()
+                                     == model::kafka_consumer_offsets_nt.ns()
+                                   && ntp.tp.topic
+                                        == model::kafka_consumer_offsets_nt.tp;
+
+    if (is_consumer_offsets_ntp) {
+        co_return co_await _rm_group_proxy->get_group_producers_locally(
+          std::move(request));
+    }
+    co_return co_await _rm_partition_frontend.local().get_producers_locally(
+      std::move(request));
+}
+
 } // namespace cluster

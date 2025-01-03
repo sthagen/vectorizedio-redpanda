@@ -225,11 +225,13 @@ bool group::valid_previous_state(group_state s) const {
 group::ongoing_transaction::ongoing_transaction(
   model::tx_seq tx_seq,
   model::partition_id coordinator_partition,
-  model::timeout_clock::duration tx_timeout)
+  model::timeout_clock::duration tx_timeout,
+  model::offset begin_offset)
   : tx_seq(tx_seq)
   , coordinator_partition(coordinator_partition)
   , timeout(tx_timeout)
-  , last_update(model::timeout_clock::now()) {}
+  , last_update(model::timeout_clock::now())
+  , begin_offset(begin_offset) {}
 
 group::tx_producer::tx_producer(model::producer_epoch epoch)
   : epoch(epoch) {}
@@ -1934,7 +1936,8 @@ group::begin_tx(cluster::begin_group_tx_request r) {
       r.pid.get_id(), r.pid.get_epoch());
     producer_it->second.epoch = r.pid.get_epoch();
     producer_it->second.transaction = std::make_unique<ongoing_transaction>(
-      ongoing_transaction(r.tx_seq, r.tm_partition, r.timeout));
+      ongoing_transaction(
+        r.tx_seq, r.tm_partition, r.timeout, result.value().last_offset));
 
     try_arm(producer_it->second.transaction->deadline());
 
@@ -2583,12 +2586,20 @@ ss::future<error_code> group::remove() {
         co_return error_code::group_id_not_found;
 
     case group_state::empty:
-        set_state(group_state::dead);
         break;
 
     default:
         co_return error_code::non_empty_group;
     }
+
+    // check if there are any transactions in progress
+    // tombstoning a group with open transactions will result
+    // in hanging transactions in the log.
+    if (has_transactions_in_progress()) {
+        co_return error_code::non_empty_group;
+    }
+
+    set_state(group_state::dead);
 
     // build offset tombstones
     storage::record_batch_builder builder(
@@ -3557,14 +3568,18 @@ group::get_expired_offsets(std::chrono::seconds retention_period) {
     }
 }
 
+bool group::has_transactions_in_progress() const {
+    return std::any_of(
+      _producers.begin(),
+      _producers.end(),
+      [](const producers_map::value_type& p) {
+          return p.second.transaction != nullptr;
+      });
+}
+
 bool group::has_offsets() const {
     return !_offsets.empty() || !_pending_offset_commits.empty()
-           || std::any_of(
-             _producers.begin(),
-             _producers.end(),
-             [](const producers_map::value_type& p) {
-                 return p.second.transaction != nullptr;
-             });
+           || has_transactions_in_progress();
 }
 
 std::vector<model::topic_partition>

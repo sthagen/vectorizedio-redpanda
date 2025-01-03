@@ -71,6 +71,9 @@ public:
     ss::future<find_coordinator_reply> find_coordinator(
       find_coordinator_request, rpc::streaming_context&) override;
 
+    ss::future<get_producers_reply>
+    get_producers(get_producers_request, rpc::streaming_context&) override;
+
 private:
     ss::sharded<cluster::tx_gateway_frontend>& _tx_gateway_frontend;
     rm_group_proxy* _rm_group_proxy;

@@ -418,6 +418,13 @@ void admin_server::register_debug_routes() {
           return get_partition_state_handler(std::move(req));
       });
 
+    register_route<user>(
+      seastar::httpd::debug_json::get_partition_producers,
+      [this](std::unique_ptr<ss::http::request> req)
+        -> ss::future<ss::json::json_return_type> {
+          return get_producers_state_handler(std::move(req));
+      });
+
     register_route<superuser>(
       ss::httpd::debug_json::cpu_profile,
       [this](std::unique_ptr<ss::http::request> req)
@@ -808,6 +815,92 @@ admin_server::get_partition_state_handler(
         response.replicas.push(std::move(replica));
     }
     co_return ss::json::json_return_type(std::move(response));
+}
+
+ss::future<ss::json::json_return_type>
+admin_server::get_producers_state_handler(
+  std::unique_ptr<ss::http::request> req) {
+    if (!_tx_gateway_frontend.local_is_initialized()) {
+        throw ss::httpd::server_error_exception(
+          "Server is not yet ready to process requests, retry later.");
+    }
+    const model::ntp ntp = parse_ntp_from_request(req->param);
+    auto timeout = std::chrono::duration_cast<model::timeout_clock::duration>(
+      10s);
+    size_t limit = 1000;
+    if (auto e = req->get_query_param("limit"); !e.empty()) {
+        try {
+            limit = boost::lexical_cast<size_t>(e);
+        } catch (const boost::bad_lexical_cast&) {
+            // ignore
+        }
+    }
+    auto result = co_await _tx_gateway_frontend.local().get_producers(
+      cluster::get_producers_request{ntp, timeout, limit});
+    if (result.error_code != cluster::tx::errc::none) {
+        throw ss::httpd::server_error_exception(fmt::format(
+          "Error {} getting producers for ntp: {}", result.error_code, ntp));
+    }
+    vlog(
+      adminlog.debug,
+      "producers for {}, size: {}",
+      ntp,
+      result.producers.size());
+    ss::httpd::debug_json::partition_producers producers;
+    producers.ntp = fmt::format("{}", ntp);
+    producers.total_producer_count = result.producer_count;
+    for (auto& producer : result.producers) {
+        ss::httpd::debug_json::partition_producer_state producer_state;
+        producer_state.id = producer.pid.id();
+        producer_state.epoch = producer.pid.epoch();
+        for (const auto& req : producer.inflight_requests) {
+            ss::httpd::debug_json::idempotent_producer_request_state inflight;
+            inflight.first_sequence = req.first_sequence;
+            inflight.last_sequence = req.last_sequence;
+            inflight.term = req.term();
+            producer_state.inflight_idempotent_requests.push(
+              std::move(inflight));
+        }
+        for (const auto& req : producer.finished_requests) {
+            ss::httpd::debug_json::idempotent_producer_request_state finished;
+            finished.first_sequence = req.first_sequence;
+            finished.last_sequence = req.last_sequence;
+            finished.term = req.term();
+            producer_state.finished_idempotent_requests.push(
+              std::move(finished));
+        }
+        if (producer.last_update) {
+            producer_state.last_update_timestamp
+              = producer.last_update.value()();
+        }
+        if (producer.tx_begin_offset) {
+            producer_state.transaction_begin_offset
+              = producer.tx_begin_offset.value();
+        }
+        if (producer.tx_end_offset) {
+            producer_state.transaction_last_offset
+              = producer.tx_end_offset.value();
+        }
+        if (producer.tx_seq) {
+            producer_state.transaction_sequence = producer.tx_seq.value();
+        }
+        if (producer.tx_timeout) {
+            producer_state.transaction_timeout_ms
+              = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  producer.tx_timeout.value())
+                  .count();
+        }
+        if (producer.coordinator_partition) {
+            producer_state.transaction_coordinator_partition
+              = producer.coordinator_partition.value()();
+        }
+        if (producer.group_id) {
+            producer_state.transaction_group_id = producer.group_id.value();
+        }
+        producers.producers.push(std::move(producer_state));
+        co_await ss::coroutine::maybe_yield();
+    }
+    co_return ss::json::json_return_type(std::move(producers));
 }
 
 ss::future<ss::json::json_return_type> admin_server::get_node_uuid_handler() {

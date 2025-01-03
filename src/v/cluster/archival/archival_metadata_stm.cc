@@ -1242,7 +1242,8 @@ ss::future<> archival_metadata_stm::apply_raft_snapshot(const iobuf&) {
       get_last_offset());
 }
 
-ss::future<> archival_metadata_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied>
+archival_metadata_stm::apply_local_snapshot(
   raft::stm_snapshot_header header, iobuf&& data) {
     auto snap = serde::from_iobuf<snapshot>(std::move(data));
 
@@ -1310,7 +1311,7 @@ ss::future<> archival_metadata_stm::apply_local_snapshot(
     } else {
         _last_clean_at = header.offset;
     }
-    co_return;
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>

@@ -119,4 +119,10 @@ ss::future<find_coordinator_reply> tx_gateway::find_coordinator(
     co_return co_await _tx_gateway_frontend.local().find_coordinator(r.tid);
 }
 
+ss::future<get_producers_reply> tx_gateway::get_producers(
+  get_producers_request request, rpc::streaming_context&) {
+    co_return co_await _tx_gateway_frontend.local().get_producers(
+      std::move(request));
+}
+
 } // namespace cluster

@@ -26,8 +26,57 @@ class group_tx_tracker_stm final
   , public group_data_parser<group_tx_tracker_stm> {
 public:
     static constexpr std::string_view name = "group_tx_tracker_stm";
+    struct producer_tx_state
+      : serde::envelope<
+          producer_tx_state,
+          serde::version<0>,
+          serde::compat_version<0>> {
+        model::record_batch_type fence_type;
+        model::offset begin_offset;
+        model::timestamp batch_ts;
+        model::timeout_clock::duration timeout;
 
-    group_tx_tracker_stm(ss::logger&, raft::consensus*);
+        bool expired_deprecated_fence_tx() const;
+
+        auto serde_fields() {
+            return std::tie(fence_type, begin_offset, batch_ts, timeout);
+        }
+    };
+    struct per_group_state
+      : serde::envelope<
+          per_group_state,
+          serde::version<1>,
+          serde::compat_version<0>> {
+        per_group_state() = default;
+
+        void maybe_add_tx_begin(
+          const kafka::group_id&,
+          model::record_batch_type fence_type,
+          model::producer_identity pid,
+          model::offset offset,
+          model::timestamp begin_ts,
+          model::timeout_clock::duration tx_timeout);
+
+        absl::btree_set<model::offset> begin_offsets;
+
+        // deprecated
+        absl::btree_map<model::producer_identity, model::offset>
+          producer_to_begin_deprecated;
+
+        absl::btree_map<model::producer_identity, producer_tx_state>
+          producer_states;
+
+        void gc_expired_tx_fence_transactions();
+
+        auto serde_fields() {
+            return std::tie(
+              begin_offsets, producer_to_begin_deprecated, producer_states);
+        }
+    };
+    using all_txs_t = absl::btree_map<kafka::group_id, per_group_state>;
+
+    group_tx_tracker_stm(
+      ss::logger&, raft::consensus*, ss::sharded<features::feature_table>&);
 
     storage::stm_type type() override {
         return storage::stm_type::consumer_offsets_transactional;
@@ -48,7 +97,7 @@ public:
 
     model::offset max_collectible_offset() override;
 
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&& bytes) override;
 
     ss::future<raft::stm_snapshot>
@@ -72,31 +121,12 @@ public:
       model::record_batch_header, kafka::group_tx::commit_metadata);
     ss::future<> handle_version_fence(features::feature_table::version_fence);
 
+    ss::future<> stop() final;
+
+    const all_txs_t& inflight_transactions() const { return _all_txs; }
+
 private:
-    struct per_group_state
-      : serde::envelope<
-          per_group_state,
-          serde::version<0>,
-          serde::compat_version<0>> {
-        per_group_state() = default;
-
-        per_group_state(model::producer_identity pid, model::offset offset) {
-            maybe_add_tx_begin(pid, offset);
-        }
-
-        void
-        maybe_add_tx_begin(model::producer_identity pid, model::offset offset);
-
-        absl::btree_set<model::offset> begin_offsets;
-
-        absl::btree_map<model::producer_identity, model::offset>
-          producer_to_begin;
-
-        auto serde_fields() {
-            return std::tie(begin_offsets, producer_to_begin);
-        }
-    };
-    using all_txs_t = absl::btree_map<kafka::group_id, per_group_state>;
+    static constexpr int8_t supported_local_snapshot_version = 1;
     struct snapshot
       : serde::envelope<snapshot, serde::version<0>, serde::compat_version<0>> {
         all_txs_t transactions;
@@ -104,19 +134,38 @@ private:
         auto serde_fields() { return std::tie(transactions); }
     };
 
-    void maybe_add_tx_begin_offset(
-      kafka::group_id, model::producer_identity, model::offset);
+    void handle_group_metadata(group_metadata_kv);
 
-    void maybe_end_tx(kafka::group_id, model::producer_identity);
+    ss::future<> gc_expired_tx_fence_transactions();
+
+    void maybe_add_tx_begin_offset(
+      model::record_batch_type fence_type,
+      kafka::group_id,
+      model::producer_identity,
+      model::offset,
+      model::timestamp begin_ts,
+      model::timeout_clock::duration tx_timeout);
+
+    void maybe_end_tx(kafka::group_id, model::producer_identity, model::offset);
 
     all_txs_t _all_txs;
+
+    ss::sharded<features::feature_table>& _feature_table;
+    group_metadata_serializer _serializer;
+    ss::abort_source _as;
+    static constexpr ss::lowres_clock::duration tx_fence_gc_frequency{1h};
+    ss::timer<ss::lowres_clock> _stale_tx_fence_gc_timer;
 };
 
 class group_tx_tracker_stm_factory : public cluster::state_machine_factory {
 public:
-    group_tx_tracker_stm_factory() = default;
+    explicit group_tx_tracker_stm_factory(
+      ss::sharded<features::feature_table>&);
     bool is_applicable_for(const storage::ntp_config&) const final;
     void create(raft::state_machine_manager_builder&, raft::consensus*) final;
+
+private:
+    ss::sharded<features::feature_table>& _feature_table;
 };
 
 } // namespace kafka

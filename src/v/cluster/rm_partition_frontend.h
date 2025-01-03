@@ -49,6 +49,8 @@ public:
       model::producer_identity,
       model::tx_seq,
       model::timeout_clock::duration);
+    ss::future<get_producers_reply>
+      get_producers_locally(get_producers_request);
     ss::future<> stop() {
         _as.request_abort();
         return ss::make_ready_future<>();

@@ -63,8 +63,9 @@ ss::future<> dl_stm::do_apply(const model::record_batch& batch) {
     co_return;
 }
 
-ss::future<> dl_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) {
-    co_return;
+ss::future<raft::local_snapshot_applied>
+dl_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) {
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>
