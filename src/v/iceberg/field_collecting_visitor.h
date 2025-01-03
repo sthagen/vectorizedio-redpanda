@@ -16,30 +16,40 @@
 
 namespace iceberg {
 
+namespace detail {
+
 // Collects children of the given type in reverse order. The reversed order can
 // be useful, e.g. if the collection is being used as a stack.
-struct reverse_field_collecting_visitor {
+template<typename T>
+struct reverse_field_collecting_visitor_impl {
 public:
-    explicit reverse_field_collecting_visitor(
-      chunked_vector<iceberg::nested_field*>& collection)
+    explicit reverse_field_collecting_visitor_impl(
+      chunked_vector<T>& collection)
       : collection_(collection) {}
-    chunked_vector<iceberg::nested_field*>& collection_;
+    chunked_vector<T>& collection_;
 
-    void operator()(iceberg::primitive_type&) {
+    void operator()(const iceberg::primitive_type&) {
         // No-op, no additional fields to collect.
     }
-    void operator()(iceberg::list_type& t) {
+    void operator()(const iceberg::list_type& t) {
         collection_.push_back(t.element_field.get());
     }
-    void operator()(iceberg::struct_type& t) {
+    void operator()(const iceberg::struct_type& t) {
         for (auto& f : std::ranges::reverse_view(t.fields)) {
             collection_.push_back(f.get());
         }
     }
-    void operator()(iceberg::map_type& t) {
+    void operator()(const iceberg::map_type& t) {
         collection_.push_back(t.value_field.get());
         collection_.push_back(t.key_field.get());
     }
 };
+} // namespace detail
+
+using reverse_field_collecting_visitor
+  = detail::reverse_field_collecting_visitor_impl<nested_field*>;
+
+using reverse_const_field_collecting_visitor
+  = detail::reverse_field_collecting_visitor_impl<const nested_field*>;
 
 } // namespace iceberg
