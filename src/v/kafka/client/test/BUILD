@@ -242,10 +242,12 @@ redpanda_cc_btest(
     ],
     tags = ["exclusive"],
     deps = [
+        "//src/v/cluster",
         "//src/v/kafka/client",
         "//src/v/kafka/client/test:fixture",
         "//src/v/kafka/client/test:utils",
         "//src/v/kafka/protocol",
+        "//src/v/model",
         "//src/v/redpanda/tests:fixture_btest",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
