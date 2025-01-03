@@ -1275,9 +1275,13 @@ class TopicRecoveryTest(RedpandaTest):
         def included(path):
             controller_log_prefix = os.path.join(RedpandaService.DATA_DIR,
                                                  "redpanda")
+            internal_log_prefix = os.path.join(RedpandaService.DATA_DIR,
+                                               "kafka_internal")
             log_segment_extension = ".log"
             return not path.startswith(
-                controller_log_prefix) and path.endswith(log_segment_extension)
+                controller_log_prefix) and path.endswith(
+                    log_segment_extension
+                ) and not path.startswith(internal_log_prefix)
 
         return self._get_log_segment_checksums(node, included)
 
