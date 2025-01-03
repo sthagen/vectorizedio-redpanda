@@ -21,6 +21,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 
+#include <exception>
 #include <filesystem>
 namespace raft {
 namespace {
@@ -119,24 +120,40 @@ file_backed_stm_snapshot::load_snapshot() {
     }
 
     storage::snapshot_reader& reader = *maybe_reader;
-    iobuf meta_buf = co_await reader.read_metadata();
-    iobuf_parser meta_parser(std::move(meta_buf));
-    auto header = read_snapshot_header(meta_parser, _ntp, name());
-    if (!header) {
-        vlog(_log.warn, "Skipping snapshot {} due to old format", store_path());
-
-        // can't load old format of the snapshot, since snapshot is missing
-        // it will be reconstructed by replaying the log
-        co_await reader.close();
-        co_return std::nullopt;
-    }
     stm_snapshot snapshot;
-    snapshot.header = *header;
-    snapshot.data = co_await read_iobuf_exactly(
-      reader.input(), snapshot.header.snapshot_size);
+    std::exception_ptr ex{nullptr};
+    try {
+        iobuf meta_buf = co_await reader.read_metadata();
+        iobuf_parser meta_parser(std::move(meta_buf));
+        auto header = read_snapshot_header(meta_parser, _ntp, name());
+        if (!header) {
+            vlog(
+              _log.warn,
+              "Skipping snapshot {} due to old format",
+              store_path());
 
-    _snapshot_size = co_await reader.get_snapshot_size();
+            // can't load old format of the snapshot, since snapshot is missing
+            // it will be reconstructed by replaying the log
+            co_await reader.close();
+            co_return std::nullopt;
+        }
+        snapshot.header = *header;
+        snapshot.data = co_await read_iobuf_exactly(
+          reader.input(), snapshot.header.snapshot_size);
+
+        _snapshot_size = co_await reader.get_snapshot_size();
+    } catch (...) {
+        ex = std::current_exception();
+        vlog(
+          _log.warn,
+          "Exception thrown while reading local snapshot: {}, exception: {}",
+          store_path(),
+          ex);
+    }
     co_await reader.close();
+    if (ex != nullptr) {
+        std::rethrow_exception(ex);
+    }
     co_await _snapshot_mgr.remove_partial_snapshots();
 
     co_return snapshot;
