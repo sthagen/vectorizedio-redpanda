@@ -381,10 +381,20 @@ class ControllerLogLimitMirrorMakerTests(MirrorMakerService):
 
         self.run_validation(consumer_timeout_sec=120)
         self.mirror_maker.stop()
-        for t in topics:
-            desc = target_client.describe_topic(t.name)
-            self.logger.debug(f'source topic: {t}, target topic: {desc}')
-            assert len(desc.partitions) == t.partition_count
+
+        def _all_topics_are_present():
+            for t in topics:
+                desc = target_client.describe_topic(t.name)
+                self.logger.debug(f'source topic: {t}, target topic: {desc}')
+                if len(desc.partitions) != t.partition_count:
+                    return False
+            return True
+
+        wait_until(
+            _all_topics_are_present,
+            timeout_sec=90,
+            backoff_sec=2,
+            err_msg="Not all the topics are present in the target cluster")
 
 
 class ControllerLogLimitPartitionBalancerTests(PartitionBalancerService):
