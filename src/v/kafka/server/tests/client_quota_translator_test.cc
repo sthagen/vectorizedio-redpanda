@@ -24,6 +24,12 @@
 
 using namespace kafka;
 
+using cluster::client_quota::entity_key;
+using cluster::client_quota::entity_value;
+
+static const auto default_key = entity_key(
+  entity_key::client_id_default_match{});
+
 const ss::sstring test_client_id = "franz-go";
 const tracker_key test_client_id_key = k_client_id{test_client_id};
 
@@ -101,11 +107,15 @@ SEASTAR_THREAD_TEST_CASE(quota_translator_default_test) {
 
 SEASTAR_THREAD_TEST_CASE(quota_translator_modified_default_test) {
     reset_configs();
-    config::shard_local_cfg().target_quota_byte_rate.set_value(1111);
-    config::shard_local_cfg().target_fetch_quota_byte_rate.set_value(2222);
-    config::shard_local_cfg().kafka_admin_topic_api_rate.set_value(3333);
 
     fixture f;
+
+    auto default_values = entity_value{
+      .producer_byte_rate = scale_to_smp_count(1111),
+      .consumer_byte_rate = scale_to_smp_count(2222),
+      .controller_mutation_rate = scale_to_smp_count(3333),
+    };
+    f.quota_store.local().set_quota(default_key, default_values);
 
     auto expected_limits = client_quota_limits{
       .produce_limit = scale_to_smp_count(1111),
@@ -211,10 +221,6 @@ SEASTAR_THREAD_TEST_CASE(quota_translator_store_client_group_test) {
     reset_configs();
     fixture f;
 
-    using cluster::client_quota::entity_key;
-    using cluster::client_quota::entity_value;
-
-    auto default_key = entity_key{entity_key::client_id_default_match{}};
     auto default_values = entity_value{
       .producer_byte_rate = scale_to_smp_count(P_DEF),
       .consumer_byte_rate = scale_to_smp_count(F_DEF),
@@ -441,7 +447,8 @@ SEASTAR_THREAD_TEST_CASE(quota_translator_watch_test) {
     f.tr.watch([&first_called]() mutable { first_called = true; });
     f.tr.watch([&second_called]() mutable { second_called = true; });
 
-    config::shard_local_cfg().target_quota_byte_rate.set_value(P_DEF);
+    auto val = entity_value{.producer_byte_rate = P_DEF};
+    f.quota_store.local().set_quota(default_key, val);
 
     BOOST_CHECK(first_called);
     BOOST_CHECK(second_called);
