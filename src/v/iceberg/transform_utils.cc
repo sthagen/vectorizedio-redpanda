@@ -19,6 +19,15 @@ struct transform_applying_visitor {
       : source_val_(source_val) {}
     const value& source_val_;
 
+    value operator()(const identity_transform&) {
+        auto primitive = std::get_if<primitive_value>(&source_val_);
+        if (primitive) {
+            return make_copy(*primitive);
+        }
+        throw std::invalid_argument(
+          fmt::format("value {} must be primitive", source_val_));
+    }
+
     value operator()(const hour_transform&) {
         int_value v{std::visit(hour_transform_visitor{}, source_val_)};
         return v;
