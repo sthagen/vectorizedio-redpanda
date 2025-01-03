@@ -361,7 +361,7 @@ protected:
 
 private:
     std::optional<tx_metadata> find_tx(const kafka::transactional_id&);
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) override;
     ss::future<raft::stm_snapshot>
     take_local_snapshot(ssx::semaphore_units apply_units) override;

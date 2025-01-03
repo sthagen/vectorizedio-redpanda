@@ -121,11 +121,11 @@ model::offset translation_stm::max_collectible_offset() {
       kafka::offset_cast(_highest_translated_offset));
 }
 
-ss::future<> translation_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied> translation_stm::apply_local_snapshot(
   raft::stm_snapshot_header, iobuf&& bytes) {
     _highest_translated_offset
       = serde::from_iobuf<snapshot>(std::move(bytes)).highest_translated_offset;
-    co_return;
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>

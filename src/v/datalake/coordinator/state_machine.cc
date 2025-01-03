@@ -142,11 +142,12 @@ ss::future<> coordinator_stm::do_apply(const model::record_batch& b) {
 
 model::offset coordinator_stm::max_collectible_offset() { return {}; }
 
-ss::future<> coordinator_stm::apply_local_snapshot(
+ss::future<raft::local_snapshot_applied> coordinator_stm::apply_local_snapshot(
   raft::stm_snapshot_header, iobuf&& snapshot_buf) {
     auto parser = iobuf_parser(std::move(snapshot_buf));
     auto snapshot = co_await serde::read_async<stm_snapshot>(parser);
     state_ = std::move(snapshot.topics);
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>

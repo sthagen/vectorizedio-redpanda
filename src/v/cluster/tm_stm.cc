@@ -600,7 +600,7 @@ fragmented_vector<tx_metadata> tm_stm::get_transactions_list() const {
     return ret;
 }
 
-ss::future<>
+ss::future<raft::local_snapshot_applied>
 tm_stm::apply_local_snapshot(raft::stm_snapshot_header hdr, iobuf&& tm_ss_buf) {
     vassert(
       hdr.version >= tm_snapshot_v0::version
@@ -625,7 +625,7 @@ tm_stm::apply_local_snapshot(raft::stm_snapshot_header hdr, iobuf&& tm_ss_buf) {
         vlog(_ctx_log.trace, "Applied snapshot at offset: {}", hdr.offset);
     }
 
-    return ss::now();
+    co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>

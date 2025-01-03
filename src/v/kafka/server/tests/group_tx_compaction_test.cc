@@ -22,16 +22,17 @@ static model::ntp offsets_ntp{
   model::kafka_consumer_offsets_nt.tp,
   model::partition_id{0}};
 
-struct disabled_compaction_fixture {
-    disabled_compaction_fixture() {
+struct custom_configs_fixture {
+    custom_configs_fixture() {
         // compaction is run manually in this test.
         cfg.get("log_disable_housekeeping_for_tests").set_value(true);
+        cfg.get("group_initial_rebalance_delay").set_value(0ms);
     }
     scoped_config cfg;
 };
 
 struct group_manager_fixture
-  : public disabled_compaction_fixture
+  : public custom_configs_fixture
   , public redpanda_thread_fixture
   , public seastar_test {
     ss::future<> SetUpAsync() override {
@@ -49,6 +50,18 @@ struct group_manager_fixture
                    && gm.local().attached_partitions_count() == 1;
         });
         co_await wait_for_version_fence();
+    }
+
+    auto join_group(kafka::join_group_request request) {
+        return app._group_manager.local().join_group(std::move(request)).result;
+    }
+
+    auto sync_group(kafka::sync_group_request request) {
+        return app._group_manager.local().sync_group(std::move(request)).result;
+    }
+
+    auto describe_group(kafka::group_id& group) {
+        return app._group_manager.local().describe_group(offsets_ntp, group);
     }
 
     auto begin_tx(cluster::begin_group_tx_request request) {
@@ -122,6 +135,40 @@ struct group_manager_fixture
 struct executable_op {
     virtual ~executable_op() = default;
     virtual ss::future<> execute(group_manager_fixture*) = 0;
+};
+
+struct join_group_op : public executable_op {
+    explicit join_group_op(kafka::group_id group)
+      : group(std::move(group)) {}
+
+    ss::future<> execute(group_manager_fixture* fixture) override {
+        vlog(logger.trace, "Executing join_group_op: {}", group);
+
+        kafka::join_group_request request;
+        request.data = kafka::join_group_request_data{
+          .group_id = group,
+          .session_timeout_ms = 300s,
+          .member_id = kafka::unknown_member_id,
+          .protocol_type = kafka::protocol_type{"test"},
+          .protocols = chunked_vector<kafka::join_group_request_protocol>{
+            {kafka::protocol_name("test"), bytes()}}};
+        request.ntp = offsets_ntp;
+        auto result = co_await fixture->join_group(std::move(request));
+        ASSERT_EQ_CORO(result.data.error_code, kafka::error_code::none);
+
+        kafka::sync_group_request sync_request;
+        sync_request.ntp = offsets_ntp;
+        sync_request.data = kafka::sync_group_request_data{
+          .group_id = group,
+          .generation_id = result.data.generation_id,
+          .member_id = result.data.member_id,
+        };
+
+        auto sync_result = co_await fixture->sync_group(
+          std::move(sync_request));
+        ASSERT_EQ_CORO(sync_result.data.error_code, kafka::error_code::none);
+    }
+    kafka::group_id group;
 };
 
 struct begin_tx_op : public executable_op {
@@ -220,6 +267,7 @@ random_ops generate_workload(workload_parameters params) {
     for (int i = 0; i < params.num_groups; i++) {
         std::queue<executable_op_ptr> group_ops;
         kafka::group_id id = next_group_id();
+        group_ops.emplace(ss::make_shared<join_group_op>(id));
         auto pid = model::random_producer_identity();
         for (int j = 0; j < params.num_tx_per_group; j++) {
             auto seq = model::tx_seq{j};
@@ -368,7 +416,7 @@ TEST_P_CORO(group_basic_workload_fixture, test_group_tx_stm_tracking) {
     auto log = consumer_offsets_log();
     // Generate a commit transaction.
     auto ops = generate_workload(GetParam());
-    ASSERT_EQ_CORO(ops.size(), 3);
+    ASSERT_EQ_CORO(ops.size(), 4);
 
     auto wait_until_stm_apply = [&] {
         return tests::cooperative_spin_wait_with_timeout(5s, [log, stm] {
@@ -381,19 +429,22 @@ TEST_P_CORO(group_basic_workload_fixture, test_group_tx_stm_tracking) {
           [&]() { return wait_until_stm_apply(); });
     };
 
+    // prep the group
+    co_await execute_op(0);
+
     co_await wait_until_stm_apply();
     // no transactions in flight
     ASSERT_EQ_CORO(
       stm->max_collectible_offset(), log->offsets().committed_offset);
     auto before = stm->max_collectible_offset();
     // begin transaction.
-    co_await execute_op(0);
-    ASSERT_EQ_CORO(stm->max_collectible_offset(), before);
-    // tx offset commit
     co_await execute_op(1);
     ASSERT_EQ_CORO(stm->max_collectible_offset(), before);
-    // end transaction
+    // tx offset commit
     co_await execute_op(2);
+    ASSERT_EQ_CORO(stm->max_collectible_offset(), before);
+    // end transaction
+    co_await execute_op(3);
     // ensure max collectible offset moved.
     ASSERT_GT_CORO(stm->max_collectible_offset(), before);
     ASSERT_EQ_CORO(

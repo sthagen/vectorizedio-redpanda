@@ -956,7 +956,7 @@ class RpkTool:
 
     def group_delete(self, group):
         cmd = ["delete", group]
-        self._run_group(cmd)
+        return self._run_group(cmd)
 
     def group_list(self, states: list[str] = []) -> list[RpkListGroup]:
         cmd = ['list']

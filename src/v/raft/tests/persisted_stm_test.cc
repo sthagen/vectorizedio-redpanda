@@ -125,9 +125,11 @@ struct kv_state
 class persisted_kv : public persisted_stm<> {
 public:
     static constexpr std::string_view name = "persited_kv_stm";
-    explicit persisted_kv(raft_node_instance& rn)
+    explicit persisted_kv(
+      raft_node_instance& rn, bool reject_local_snapshots = false)
       : persisted_stm<>("simple-kv", logger, rn.raft().get())
-      , raft_node(rn) {}
+      , raft_node(rn)
+      , reject_local_snapshots(reject_local_snapshots) {}
 
     ss::future<> start() override { return persisted_stm<>::start(); }
     ss::future<> stop() override { return persisted_stm<>::stop(); }
@@ -158,10 +160,13 @@ public:
     /**
      * Called when local snapshot is applied to the state machine
      */
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(stm_snapshot_header, iobuf&& buffer) final {
+        if (reject_local_snapshots) {
+            co_return raft::local_snapshot_applied::no;
+        }
         state = serde::from_iobuf<kv_state>(std::move(buffer));
-        co_return;
+        co_return raft::local_snapshot_applied::yes;
     };
 
     /**
@@ -275,6 +280,7 @@ public:
     kv_state state;
     kv_operation last_operation;
     raft_node_instance& raft_node;
+    bool reject_local_snapshots = false;
 };
 
 class other_persisted_kv : public persisted_kv {
@@ -393,7 +399,8 @@ struct persisted_stm_test_fixture : state_machine_fixture {
         return ops;
     }
 
-    ss::future<> restart_cluster() {
+    ss::future<>
+    restart_cluster(bool reject_local_snapshots_after_restart = false) {
         absl::flat_hash_map<model::node_id, ss::sstring> data_directories;
         for (auto& [id, node] : nodes()) {
             data_directories[id]
@@ -408,7 +415,8 @@ struct persisted_stm_test_fixture : state_machine_fixture {
         for (auto& [_, node] : nodes()) {
             co_await node->initialise(all_vnodes());
             raft::state_machine_manager_builder builder;
-            auto stm = builder.create_stm<persisted_kv>(*node);
+            auto stm = builder.create_stm<persisted_kv>(
+              *node, reject_local_snapshots_after_restart);
             co_await node->start(std::move(builder));
             node_stms.emplace(node->get_vnode(), std::move(stm));
         }
@@ -474,10 +482,10 @@ public:
         co_return iobuf{};
     }
 
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(stm_snapshot_header, iobuf&& buffer) override {
         _last_stm_applied = serde::from_iobuf<model::offset>(std::move(buffer));
-        co_return;
+        co_return raft::local_snapshot_applied::yes;
     }
 
     ss::future<> validate_applied_offsets(model::offset before) {
@@ -592,6 +600,32 @@ TEST_F_CORO(persisted_stm_test_fixture, test_local_snapshot) {
     co_await wait_for_committed_offset(committed, 30s);
     co_await wait_for_apply();
 
+    for (const auto& [_, stm] : node_stms) {
+        ASSERT_EQ_CORO(stm->state, expected);
+    }
+}
+
+TEST_F_CORO(persisted_stm_test_fixture, test_skipping_local_snapshot_on_start) {
+    co_await initialize_state_machines();
+    kv_state expected;
+    auto ops = random_operations(2000);
+    for (auto batch : ops) {
+        co_await apply_operations(expected, std::move(batch));
+    }
+    co_await wait_for_apply();
+    for (const auto& [_, stm] : node_stms) {
+        ASSERT_EQ_CORO(stm->state, expected);
+    }
+    // take local snapshot on every node
+    co_await take_local_snapshot_on_every_node();
+
+    auto committed = node(model::node_id(0)).raft()->committed_offset();
+    // Reject snapshot loading
+    co_await restart_cluster(true);
+    co_await wait_for_committed_offset(committed, 30s);
+    co_await wait_for_apply();
+
+    // Ensure everything loaded from the log tallies
     for (const auto& [_, stm] : node_stms) {
         ASSERT_EQ_CORO(stm->state, expected);
     }

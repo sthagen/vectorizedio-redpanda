@@ -64,6 +64,11 @@
             "name": "find_coordinator",
             "input_type": "find_coordinator_request",
             "output_type": "find_coordinator_reply"
+        },
+        {
+            "name": "get_producers",
+            "input_type": "get_producers_request",
+            "output_type": "get_producers_reply"
         }
     ]
 }

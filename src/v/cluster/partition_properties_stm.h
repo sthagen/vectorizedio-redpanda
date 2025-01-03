@@ -48,7 +48,7 @@ public:
     writes_disabled are_writes_disabled() const;
 
 protected:
-    ss::future<>
+    ss::future<raft::local_snapshot_applied>
     apply_local_snapshot(raft::stm_snapshot_header, iobuf&&) override;
 
     ss::future<raft::stm_snapshot>

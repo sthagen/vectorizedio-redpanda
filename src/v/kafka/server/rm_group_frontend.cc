@@ -497,4 +497,13 @@ rm_group_frontend::abort_group_tx_locally(cluster::abort_group_tx_request req) {
     co_return reply;
 }
 
+ss::future<cluster::get_producers_reply>
+rm_group_frontend::get_group_producers_locally(
+  cluster::get_producers_request request) {
+    return _group_router.local()
+      .get_group_manager()
+      .local()
+      .get_group_producers_locally(std::move(request));
+}
+
 } // namespace kafka

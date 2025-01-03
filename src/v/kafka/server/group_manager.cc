@@ -29,6 +29,7 @@
 #include "kafka/server/group.h"
 #include "kafka/server/group_metadata.h"
 #include "kafka/server/group_recovery_consumer.h"
+#include "kafka/server/group_tx_tracker_stm.h"
 #include "kafka/server/logger.h"
 #include "model/fundamental.h"
 #include "model/namespace.h"
@@ -978,7 +979,7 @@ ss::future<> group_manager::do_recover_group(
             if (session.tx) {
                 auto& tx = *session.tx;
                 group::ongoing_transaction group_tx(
-                  tx.tx_seq, tx.tm_partition, tx.timeout);
+                  tx.tx_seq, tx.tm_partition, tx.timeout, tx.begin_offset);
                 for (auto& [tp, o_md] : tx.offsets) {
                     group_tx.offsets[tp] = group::pending_tx_offset{
                   .offset_metadata = group_tx::partition_offset{
@@ -1620,6 +1621,64 @@ group_manager::describe_group(const model::ntp& ntp, const kafka::group_id& g) {
     return group->describe();
 }
 
+group_manager::partition_producers
+group_manager::describe_partition_producers(const model::ntp& ntp) {
+    vlog(klog.debug, "describe producers: {}", ntp);
+    partition_producers response;
+    response.partition_index = ntp.tp.partition;
+    auto it = _partitions.find(ntp);
+    if (it == _partitions.end() || !it->second->partition->is_leader()) {
+        response.error_code = error_code::not_leader_for_partition;
+        return response;
+    }
+    response.error_code = kafka::error_code::none;
+    // snapshot the list of groups attached to this partition
+    chunked_vector<std::pair<group_id, group_ptr>> groups;
+    std::copy_if(
+      _groups.begin(),
+      _groups.end(),
+      std::back_inserter(groups),
+      [&ntp](const auto& g_pair) {
+          const auto& [group_id, group] = g_pair;
+          return group->partition()->ntp() == ntp;
+      });
+    for (auto& [gid, group] : groups) {
+        if (group->in_state(group_state::dead)) {
+            continue;
+        }
+        auto partition = group->partition();
+        if (!partition) {
+            // unlikely, conservative check
+            continue;
+        }
+        for (const auto& [id, state] : group->producers()) {
+            auto& tx = state.transaction;
+            int64_t start_offset = -1;
+            if (tx && tx->begin_offset >= model::offset{0}) {
+                start_offset = partition->get_offset_translator_state()
+                                 ->from_log_offset(tx->begin_offset);
+            }
+            int64_t last_timetamp = -1;
+            if (tx) {
+                auto time_since_last_update = model::timeout_clock::now()
+                                              - tx->last_update;
+                auto last_update_ts
+                  = (model::timestamp_clock::now() - time_since_last_update);
+                last_timetamp = last_update_ts.time_since_epoch() / 1ms;
+            }
+            response.active_producers.push_back({
+              .producer_id = id,
+              .producer_epoch = state.epoch,
+              .last_sequence = tx ? tx->tx_seq : -1,
+              .last_timestamp = last_timetamp,
+              .coordinator_epoch = -1,
+              .current_txn_start_offset = start_offset,
+            });
+        }
+    }
+    return response;
+}
+
 ss::future<std::vector<deletable_group_result>> group_manager::delete_groups(
   std::vector<std::pair<model::ntp, group_id>> groups) {
     std::vector<deletable_group_result> results;
@@ -1737,6 +1796,98 @@ error_code group_manager::validate_group_status(
       api,
       ntp);
     return error_code::not_coordinator;
+}
+
+ss::future<cluster::get_producers_reply>
+group_manager::get_group_producers_locally(
+  cluster::get_producers_request request) {
+    const auto& ntp = request.ntp;
+    cluster::get_producers_reply reply;
+    auto it = _partitions.find(ntp);
+    if (it == _partitions.end() || !it->second->partition->is_leader()) {
+        reply.error_code = cluster::tx::errc::not_coordinator;
+        co_return reply;
+    }
+    auto attached_partition = *it;
+    reply.error_code = cluster::tx::errc::none;
+    // snapshot the list of groups attached to this partition
+    chunked_hash_map<group_id, group_ptr> groups;
+    std::copy_if(
+      _groups.begin(),
+      _groups.end(),
+      std::inserter(groups, groups.end()),
+      [&ntp](auto g_pair) {
+          const auto& [group_id, group] = g_pair;
+          return group->partition()->ntp() == ntp;
+      });
+    reply.producer_count = std::accumulate(
+      groups.begin(),
+      groups.end(),
+      size_t(0),
+      [](size_t acc, const auto& entry) {
+          return acc + entry.second->producers().size();
+      });
+    for (auto& [gid, group] : groups) {
+        if (reply.producers.size() >= request.max_producers_to_include) {
+            break;
+        }
+        if (group->in_state(group_state::dead)) {
+            continue;
+        }
+        auto partition = group->partition();
+        if (!partition) {
+            // unlikely, conservative check
+            continue;
+        }
+        for (const auto& [id, state] : group->producers()) {
+            if (reply.producers.size() >= request.max_producers_to_include) {
+                break;
+            }
+            cluster::producer_state_info producer_info;
+            producer_info.pid = {id, state.epoch};
+            producer_info.group_id = group->id()();
+            auto& tx = state.transaction;
+            if (tx) {
+                producer_info.tx_begin_offset = tx->begin_offset;
+                producer_info.tx_seq = tx->tx_seq;
+                producer_info.tx_timeout = tx->timeout;
+                auto time_since_last_update = model::timeout_clock::now()
+                                              - tx->last_update;
+                auto last_update_ts = model::timestamp_clock::now()
+                                      - time_since_last_update;
+                producer_info.last_update = model::timestamp{
+                  last_update_ts.time_since_epoch() / 1ms};
+                producer_info.coordinator_partition = tx->coordinator_partition;
+            }
+            reply.producers.push_back(std::move(producer_info));
+        }
+    }
+
+    // check if there any any additional (stale) groups being tracked by
+    // the stm, the list should be empty in most cases unless there is
+    // a divergence in state.
+    auto partition = attached_partition.second->partition;
+    auto stm
+      = partition->raft()->stm_manager()->get<kafka::group_tx_tracker_stm>();
+    if (!stm) {
+        co_return reply;
+    }
+    const auto& stm_txes = stm->inflight_transactions();
+    for (const auto& [gid, state] : stm_txes) {
+        if (groups.contains(gid)) {
+            continue;
+        }
+        // we don't enforce size limits here because this list is expected to be
+        // small. stale group found, report it to the dbug output.
+        for (const auto& [pid, state] : state.producer_states) {
+            reply.producers.push_back({
+              .pid = pid,
+              .tx_begin_offset = state.begin_offset,
+              .group_id = gid() + "-stale",
+            });
+        }
+    }
+    co_return reply;
 }
 
 } // namespace kafka
