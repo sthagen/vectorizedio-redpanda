@@ -11,6 +11,5 @@ go_library(
 go_binary(
     name = "rpk",
     embed = [":rpk_lib"],
-    pure = "on",
     visibility = ["//visibility:public"],
 )
