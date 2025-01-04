@@ -592,7 +592,7 @@ ss::future<tx::errc> rm_stm::abort_tx(
     auto synced_term = _insync_term;
     auto [producer, _] = maybe_create_producer(pid);
     if (pid != producer->id()) {
-        co_return cluster::errc::invalid_producer_epoch;
+        co_return tx::errc::invalid_producer_epoch;
     }
     co_return co_await producer->run_with_lock(
       [this, synced_term, tx_seq, timeout, producer](
@@ -1540,7 +1540,7 @@ void rm_stm::maybe_rearm_autoabort_timer(time_point_type deadline) {
 
 ss::future<tx::errc> rm_stm::abort_all_txes() {
     if (!co_await sync(_sync_timeout())) {
-        co_return cluster::errc::not_leader;
+        co_return tx::errc::stale;
     }
 
     tx::errc last_err = tx::errc::none;
