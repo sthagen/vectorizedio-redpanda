@@ -245,35 +245,35 @@ SEASTAR_THREAD_TEST_CASE(quota_translator_priority_order) {
     // 2. Next: default client quota
     auto default_key = entity_key{entity_key::client_id_default_match{}};
     auto default_values = entity_value{
-      .producer_byte_rate = 21,
-      .consumer_byte_rate = 22,
-      .controller_mutation_rate = 23,
+      .producer_byte_rate = 11,
+      .consumer_byte_rate = 12,
+      .controller_mutation_rate = 13,
     };
     f.quota_store.local().set_quota(default_key, default_values);
 
     check_produce(
       "franz-go",
       k_client_id{"franz-go"},
-      21,
+      11,
       client_quota_rule::kafka_client_default);
     check_fetch(
       "franz-go",
       k_client_id{"franz-go"},
-      22,
+      12,
       client_quota_rule::kafka_client_default);
     check_pm(
       "franz-go",
       k_client_id{"franz-go"},
-      23,
+      13,
       client_quota_rule::kafka_client_default);
 
     // 4. Next: client id prefix quota store
     auto franz_go_prefix_key = entity_key{
       entity_key::client_id_prefix_match{"franz-go"}};
     auto franz_go_prefix_values = entity_value{
-      .producer_byte_rate = 41,
-      .consumer_byte_rate = 42,
-      .controller_mutation_rate = 43,
+      .producer_byte_rate = 21,
+      .consumer_byte_rate = 22,
+      .controller_mutation_rate = 23,
     };
     f.quota_store.local().set_quota(
       franz_go_prefix_key, franz_go_prefix_values);
@@ -281,43 +281,43 @@ SEASTAR_THREAD_TEST_CASE(quota_translator_priority_order) {
     check_produce(
       "franz-go",
       k_group_name{"franz-go"},
-      41,
+      21,
       client_quota_rule::kafka_client_prefix);
     check_fetch(
       "franz-go",
       k_group_name{"franz-go"},
-      42,
+      22,
       client_quota_rule::kafka_client_prefix);
     check_pm(
       "franz-go",
       k_group_name{"franz-go"},
-      43,
+      23,
       client_quota_rule::kafka_client_prefix);
 
     // 5. Finally: client id exact match quota store
     auto franz_go_exact_key = entity_key{
       entity_key::client_id_match{"franz-go"}};
     auto franz_go_exact_values = entity_value{
-      .producer_byte_rate = 51,
-      .consumer_byte_rate = 52,
-      .controller_mutation_rate = 53,
+      .producer_byte_rate = 31,
+      .consumer_byte_rate = 32,
+      .controller_mutation_rate = 33,
     };
     f.quota_store.local().set_quota(franz_go_exact_key, franz_go_exact_values);
 
     check_produce(
       "franz-go",
       k_client_id{"franz-go"},
-      51,
+      31,
       client_quota_rule::kafka_client_id);
     check_fetch(
       "franz-go",
       k_client_id{"franz-go"},
-      52,
+      32,
       client_quota_rule::kafka_client_id);
     check_pm(
       "franz-go",
       k_client_id{"franz-go"},
-      53,
+      33,
       client_quota_rule::kafka_client_id);
 }
 
