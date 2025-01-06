@@ -98,6 +98,8 @@ std::string_view to_string_view(feature f) {
         return "datalake_iceberg";
     case feature::raft_symmetric_reconfiguration_cancel:
         return "raft_symmetric_reconfiguration_cancel";
+    case feature::datalake_iceberg_ga:
+        return "datalake_iceberg_ga";
 
     /*
      * testing features
