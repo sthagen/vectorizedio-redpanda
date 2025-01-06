@@ -15,19 +15,6 @@ redpanda_test_cc_library(
 )
 
 redpanda_test_cc_library(
-    name = "client_quota_test_helpers",
-    hdrs = [
-        "client_quota_test_helpers.h",
-    ],
-    implementation_deps = [
-    ],
-    include_prefix = "kafka/server/tests",
-    deps = [
-        "//src/v/base",
-    ],
-)
-
-redpanda_test_cc_library(
     name = "topic_properties_helpers",
     hdrs = [
         "topic_properties_helpers.h",
@@ -638,7 +625,6 @@ redpanda_cc_btest(
         "//src/v/cluster",
         "//src/v/config",
         "//src/v/kafka/server",
-        "//src/v/kafka/server/tests:client_quota_test_helpers",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar",
@@ -658,7 +644,6 @@ redpanda_cc_btest(
         "//src/v/cluster",
         "//src/v/config",
         "//src/v/kafka/server",
-        "//src/v/kafka/server/tests:client_quota_test_helpers",
         "//src/v/test_utils:seastar_boost",
         "@boost//:test",
         "@seastar",
