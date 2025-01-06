@@ -12,9 +12,6 @@
 #include "iceberg/compatibility_utils.h"
 #include "iceberg/datatypes.h"
 
-#include <absl/container/btree_map.h>
-#include <fmt/format.h>
-
 #include <ranges>
 #include <variant>
 

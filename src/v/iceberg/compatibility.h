@@ -9,11 +9,8 @@
 
 #pragma once
 
-#include "base/outcome.h"
 #include "iceberg/compatibility_types.h"
 #include "iceberg/datatypes.h"
-
-#include <seastar/util/bool_class.hh>
 
 namespace iceberg {
 

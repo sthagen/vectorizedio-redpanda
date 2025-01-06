@@ -173,9 +173,6 @@ redpanda_cc_library(
         ":compatibility_utils",
         ":datatypes",
         "//src/v/base",
-        "@abseil-cpp//absl/container:btree",
-        "@fmt",
-        "@seastar",
     ],
 )
 
