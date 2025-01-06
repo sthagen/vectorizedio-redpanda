@@ -256,6 +256,47 @@ class ClusterRateQuotaTest(RedpandaTest):
                              auto_offset_reset='earliest',
                              enable_auto_commit=False)
 
+    def alter_quota(self, add=[], delete=[], default=[], name=[]):
+        res = self.rpk.alter_cluster_quotas(add=add,
+                                            delete=delete,
+                                            default=default,
+                                            name=name)
+        assert res['status'] == 'OK', f'Alter failed with result: {res}'
+
+        def all_observable():
+            for node in self.redpanda.started_nodes():
+                desc = self.rpk.describe_cluster_quotas(default=default,
+                                                        name=name,
+                                                        strict=True,
+                                                        node=node)
+                self.redpanda.logger.debug(
+                    f"Describe quotas result for {node.name}: {desc}")
+
+                # We always get 0 or 1 matches in the response because we use strict matching in
+                # the describe quotas request.
+                vals = desc.get('quotas', [{}])[0].get('values', [])
+
+                for to_delete in delete:
+                    still_exists = any(
+                        val.get('key') == to_delete for val in vals)
+                    if still_exists:
+                        return False
+
+                for to_add in add:
+                    expected_k, expected_v = to_add.split('=')
+                    expected = {'key': expected_k, 'value': expected_v}
+                    exists = any(val == expected for val in vals)
+                    if not exists:
+                        return False
+
+            return True
+
+        self.redpanda.wait_until(
+            all_observable,
+            timeout_sec=15,
+            backoff_sec=1,
+            err_msg="Quotas not observable by all nodes in time")
+
     @cluster(num_nodes=3)
     def test_client_group_produce_rate_throttle_mechanism(self):
         """
