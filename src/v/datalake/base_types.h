@@ -28,7 +28,6 @@ struct local_file_metadata {
     local_path path;
     size_t row_count = 0;
     size_t size_bytes = 0;
-    int hour = 0;
 
     friend std::ostream&
     operator<<(std::ostream& o, const local_file_metadata& r);

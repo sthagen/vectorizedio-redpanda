@@ -124,6 +124,7 @@ redpanda_cc_library(
         "//src/v/container:chunked_hash_map",
         "//src/v/iceberg:datatypes",
         "//src/v/iceberg:partition_key",
+        "//src/v/iceberg:schema",
         "//src/v/iceberg:values",
     ],
 )

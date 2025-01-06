@@ -40,6 +40,9 @@ iceberg::struct_type default_type_with_columns(size_t extra_columns) {
     }
     return type;
 }
+
+static constexpr auto schema_id = iceberg::schema::id_t{0};
+
 } // namespace
 
 class PartitioningWriterExtraColumnsTest
@@ -52,7 +55,7 @@ TEST_P(PartitioningWriterExtraColumnsTest, TestSchemaHappyPath) {
     auto field = field_type{default_type_with_columns(extra_columns)};
     auto& default_type = std::get<struct_type>(field);
     partitioning_writer writer(
-      *writer_factory, default_type.copy(), hour_partition_spec());
+      *writer_factory, schema_id, default_type.copy(), hour_partition_spec());
 
     // Create a bunch of records spread over multiple hours.
     static constexpr auto ms_per_hr = 3600 * 1000;
@@ -82,9 +85,10 @@ TEST_P(PartitioningWriterExtraColumnsTest, TestSchemaHappyPath) {
     int max_hr = std::numeric_limits<int>::min();
     size_t total_records = 0;
     for (const auto& f : files) {
-        total_records += f.row_count;
-        min_hr = std::min(f.hour, min_hr);
-        max_hr = std::max(f.hour, max_hr);
+        total_records += f.local_file.row_count;
+        int hour = get_hour(f.partition_key);
+        min_hr = std::min(hour, min_hr);
+        max_hr = std::max(hour, max_hr);
     }
     EXPECT_EQ(num_hrs - 1, max_hr - min_hr);
     EXPECT_EQ(total_records, records_per_hr * num_hrs);
@@ -100,7 +104,7 @@ TEST(PartitioningWriterTest, TestWriterError) {
     auto field = field_type{default_type_with_columns(0)};
     auto& default_type = std::get<struct_type>(field);
     partitioning_writer writer(
-      *writer_factory, default_type.copy(), hour_partition_spec());
+      *writer_factory, schema_id, default_type.copy(), hour_partition_spec());
     auto err = writer
                  .add_data(
                    val_with_timestamp(field, model::timestamp::now()),
@@ -113,7 +117,10 @@ TEST(PartitioningWriterTest, TestUnexpectedSchema) {
     auto writer_factory = std::make_unique<datalake::test_data_writer_factory>(
       false);
     partitioning_writer writer(
-      *writer_factory, default_type_with_columns(0), hour_partition_spec());
+      *writer_factory,
+      schema_id,
+      default_type_with_columns(0),
+      hour_partition_spec());
     auto unexpected_field_type = test_nested_schema_type();
     auto err = writer
                  .add_data(

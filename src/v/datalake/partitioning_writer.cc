@@ -19,6 +19,17 @@
 
 namespace datalake {
 
+std::ostream&
+operator<<(std::ostream& o, const partitioning_writer::partitioned_file& f) {
+    fmt::print(
+      o,
+      "{{local_file: {}, schema_id: {}, partition_spec_id: {}}}",
+      f.local_file,
+      f.schema_id,
+      f.partition_spec_id);
+    return o;
+}
+
 ss::future<writer_error>
 partitioning_writer::add_data(iceberg::struct_value val, int64_t approx_size) {
     iceberg::partition_key pk;
@@ -56,15 +67,13 @@ partitioning_writer::add_data(iceberg::struct_value val, int64_t approx_size) {
     co_return write_res;
 }
 
-ss::future<result<chunked_vector<local_file_metadata>, writer_error>>
+ss::future<
+  result<chunked_vector<partitioning_writer::partitioned_file>, writer_error>>
 partitioning_writer::finish() && {
-    chunked_vector<local_file_metadata> files;
+    chunked_vector<partitioned_file> files;
     auto first_error = writer_error::ok;
     // TODO: parallelize me!
     for (auto& [pk, writer] : writers_) {
-        int hour = std::get<iceberg::int_value>(
-                     std::get<iceberg::primitive_value>(*pk.val->fields[0]))
-                     .val;
         auto file_res = co_await writer->finish();
         if (file_res.has_error()) {
             vlog(
@@ -77,9 +86,13 @@ partitioning_writer::finish() && {
             // Even on error, move on so that we can close all the writers.
             continue;
         }
-        auto& file = file_res.value();
-        file.hour = hour;
-        files.emplace_back(std::move(file));
+
+        files.push_back(partitioned_file{
+          .local_file = std::move(file_res.value()),
+          .schema_id = schema_id_,
+          .partition_spec_id = spec_.spec_id,
+          .partition_key = std::move(pk),
+        });
     }
     if (first_error != writer_error::ok) {
         co_return first_error;
