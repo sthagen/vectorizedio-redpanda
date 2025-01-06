@@ -100,23 +100,43 @@ std::ostream& operator<<(std::ostream& o, const schema_manager::errc& e) {
     }
 }
 
-ss::future<checked<std::nullopt_t, schema_manager::errc>>
-simple_schema_manager::ensure_table_schema(
-  const model::topic&, const iceberg::struct_type&) {
-    co_return std::nullopt;
+bool schema_manager::table_info::fill_registered_ids(
+  iceberg::struct_type& type) {
+    auto fill_res = fill_field_ids(type, schema.schema_struct);
+    return !fill_res.has_error();
 }
 
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
-simple_schema_manager::get_registered_ids(
-  const model::topic&, iceberg::struct_type& desired_type) {
+simple_schema_manager::ensure_table_schema(
+  const model::topic& t, const iceberg::struct_type& desired_type) {
     iceberg::schema s{
-      .schema_struct = std::move(desired_type),
+      .schema_struct = desired_type.copy(),
       .schema_id = {},
       .identifier_field_ids = {},
     };
     s.assign_fresh_ids();
-    desired_type = std::move(s.schema_struct);
+
+    // TODO: check schema compatibility
+    topic2table_.insert_or_assign(
+      t,
+      table_info{
+        .id = table_id_for_topic(t),
+        .schema = std::move(s),
+      });
+
     co_return std::nullopt;
+}
+
+ss::future<checked<schema_manager::table_info, schema_manager::errc>>
+simple_schema_manager::get_table_info(const model::topic& t) {
+    auto it = topic2table_.find(t);
+    if (it == topic2table_.end()) {
+        co_return errc::failed;
+    }
+    co_return table_info{
+      .id = it->second.id.copy(),
+      .schema = it->second.schema.copy(),
+    };
 }
 
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
@@ -175,9 +195,8 @@ catalog_schema_manager::ensure_table_schema(
     co_return std::nullopt;
 }
 
-ss::future<checked<std::nullopt_t, schema_manager::errc>>
-catalog_schema_manager::get_registered_ids(
-  const model::topic& topic, iceberg::struct_type& dest_type) {
+ss::future<checked<schema_manager::table_info, schema_manager::errc>>
+catalog_schema_manager::get_table_info(const model::topic& topic) {
     auto table_id = table_id_for_topic(topic);
     auto load_res = co_await catalog_.load_table(table_id);
     if (load_res.has_error()) {
@@ -186,20 +205,22 @@ catalog_schema_manager::get_registered_ids(
           fmt::format(
             "Error while reloading table {} after schema update", table_id));
     }
-    auto get_res = get_ids_from_table_meta(
-      table_id, load_res.value(), dest_type);
-    if (get_res.has_error()) {
-        co_return get_res.error();
-    }
-    if (!get_res.value()) {
+    const auto& table = load_res.value();
+
+    auto cur_schema = table.get_schema(table.current_schema_id);
+    if (!cur_schema) {
         vlog(
-          datalake_log.warn,
-          "expected to successfully fill field IDs for table {}",
+          datalake_log.error,
+          "Cannot find current schema {} in table {}",
+          table.current_schema_id,
           table_id);
         co_return errc::failed;
     }
-    // Success! We got all the field IDs.
-    co_return std::nullopt;
+
+    co_return table_info{
+      .id = std::move(table_id),
+      .schema = cur_schema->copy(),
+    };
 }
 
 checked<bool, schema_manager::errc>

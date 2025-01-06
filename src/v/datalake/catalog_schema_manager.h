@@ -31,23 +31,36 @@ public:
     virtual ss::future<checked<std::nullopt_t, errc>> ensure_table_schema(
       const model::topic&, const iceberg::struct_type& desired_type)
       = 0;
-    virtual ss::future<checked<std::nullopt_t, errc>>
-    get_registered_ids(const model::topic&, iceberg::struct_type& desired_type)
-      = 0;
+
+    struct table_info {
+        iceberg::table_identifier id;
+        iceberg::schema schema;
+
+        // Fills the field IDs of the given type with those in the current
+        // schema. Returns true on success.
+        bool fill_registered_ids(iceberg::struct_type&);
+    };
+
+    virtual ss::future<checked<table_info, errc>>
+    get_table_info(const model::topic&) = 0;
+
     virtual ~schema_manager() = default;
 
     iceberg::table_identifier table_id_for_topic(const model::topic& t) const;
 };
 
+// Used in unit tests
 class simple_schema_manager : public schema_manager {
 public:
     ss::future<checked<std::nullopt_t, schema_manager::errc>>
     ensure_table_schema(
       const model::topic&, const iceberg::struct_type& desired_type) override;
-    ss::future<checked<std::nullopt_t, schema_manager::errc>>
-    get_registered_ids(
-      const model::topic&, iceberg::struct_type& desired_type) override;
-    ~simple_schema_manager() override = default;
+
+    ss::future<checked<table_info, schema_manager::errc>>
+    get_table_info(const model::topic&) override;
+
+private:
+    chunked_hash_map<model::topic, table_info> topic2table_;
 };
 
 // Manages interactions with the catalog when reconciling the current schema of
@@ -66,11 +79,9 @@ public:
     ensure_table_schema(
       const model::topic&, const iceberg::struct_type& desired_type) override;
 
-    // Loads the table metadata for the given topic and fills the field IDs of
-    // the given type with those in the current schema.
-    ss::future<checked<std::nullopt_t, schema_manager::errc>>
-    get_registered_ids(
-      const model::topic&, iceberg::struct_type& desired_type) override;
+    // Loads the table metadata for the given topic.
+    ss::future<checked<table_info, schema_manager::errc>>
+    get_table_info(const model::topic&) override;
 
 private:
     // Attempts to fill the field ids in the given type with those from the
