@@ -325,3 +325,638 @@ struct_type nested_test_struct() {
     return nested_struct;
 }
 } // namespace
+
+struct struct_evolution_test_case {
+    std::string_view description{};
+    std::function<struct_type(unique_id_generator&)> generator;
+    std::function<void(struct_type&)> update;
+    checked<std::nullopt_t, schema_evolution_errc> err{std::nullopt};
+    std::function<bool(const struct_type&, const struct_type&)> validator =
+      [](const struct_type&, const struct_type&) { return true; };
+    schema_changed any_change{true};
+};
+
+std::ostream&
+operator<<(std::ostream& os, const struct_evolution_test_case& tc) {
+    return os << tc.description;
+}
+
+static const std::vector<struct_evolution_test_case> valid_cases{
+  struct_evolution_test_case{
+    .description = "valid primitive type promotion is OK",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          return s;
+      },
+    .update = [](struct_type& s) { s.fields[0]->type = long_type{}; },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          return updated(*src.fields.back(), *dst.fields.back());
+      },
+  },
+  struct_evolution_test_case{
+    .description = "list elements are subject to type promotion rules (valid)",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "qux",
+            field_required::yes,
+            list_type::create(
+              ids.get_one(), field_required::yes, date_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<list_type>(s.fields[0]).element_field->type = timestamp_type{};
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          auto& src_list = get<list_type>(src.fields.back());
+          auto& dst_list = get<list_type>(dst.fields.back());
+          return updated(*src_list.element_field, *dst_list.element_field);
+      },
+  },
+  struct_evolution_test_case{
+    .description = "evolving a list-element struct is allowed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "qux",
+            field_required::yes,
+            list_type::create(
+              ids.get_one(), field_required::yes, struct_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<struct_type>(get<list_type>(s.fields.back()).element_field)
+            .fields.emplace_back(
+              nested_field::create(0, "int", field_required::no, int_type{}));
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dest) {
+          auto& src_list = get<list_type>(src.fields.back());
+          auto& dst_list = get<list_type>(dest.fields.back());
+          return updated(*src_list.element_field, *dst_list.element_field);
+      },
+  },
+  struct_evolution_test_case{
+    .description
+    = "map keys & values are subject to type promotion rules (valid)",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "a_map",
+            field_required::no,
+            map_type::create(
+              ids.get_one(),
+              int_type{},
+              ids.get_one(),
+              field_required::no,
+              float_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          auto& map_t = get<map_type>(s.fields[0]);
+          map_t.key_field->type = long_type{};
+          map_t.value_field->type = double_type{};
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          const auto& src_map = get<map_type>(src.fields.back());
+          const auto& dst_map = get<map_type>(dst.fields.back());
+          return updated(*src_map.key_field, *dst_map.key_field)
+                 && updated(*src_map.value_field, *dst_map.value_field);
+      },
+  },
+  struct_evolution_test_case{
+    .description = "we can 'add' nested fields",
+    .generator = [](unique_id_generator&) { return struct_type{}; },
+    .update =
+      [](struct_type& s) {
+          struct_type list_element{};
+          list_element.fields.emplace_back(
+            nested_field::create(0, "f1", field_required::no, int_type{}));
+          struct_type nested_struct{};
+          nested_struct.fields.emplace_back(nested_field::create(
+            0,
+            "nested_list",
+            field_required::no,
+            list_type::create(0, field_required::no, date_type{})));
+          list_element.fields.emplace_back(nested_field::create(
+            0, "f2", field_required::no, std::move(nested_struct)));
+          s.fields.emplace_back(nested_field::create(
+            0,
+            "nested",
+            field_required::no,
+            list_type::create(0, field_required::no, std::move(list_element))));
+      },
+    .validator =
+      [](const struct_type&, const struct_type& dest) {
+          bool all_assigned = true;
+          chunked_vector<nested_field*> stk;
+          bool err
+            = for_each_field(dest, [&all_assigned](const nested_field* f) {
+                  all_assigned = all_assigned && (updated(*f) || added(*f));
+              }).has_error();
+
+          return !err && all_assigned;
+      },
+  },
+  struct_evolution_test_case{
+    .description = "we can add nested fields in the middle of a schema",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::yes, int_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "bar", field_required::yes, float_type{}));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          s.fields.emplace_back(
+            nested_field::create(0, "baz", field_required::no, string_type{}));
+          std::swap(s.fields[1], s.fields[2]);
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dest) {
+          auto orig_match = *src.fields[0] == *dest.fields[0]
+                            && *src.fields[1] == *dest.fields[2];
+          return orig_match && updated(*dest.fields[0])
+                 && updated(*dest.fields[2]) && added(*dest.fields[1]);
+      },
+  },
+  struct_evolution_test_case{
+    .description = "removing a required field works",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::yes, int_type{}));
+          return s;
+      },
+    .update = [](struct_type& s) { s.fields.pop_back(); },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          return dst.fields.empty() && removed(*src.fields.back());
+      },
+  },
+  struct_evolution_test_case{
+    .description = "field removal respects the original nesting",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          struct_type nested{};
+          nested.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::yes, int_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "nested", field_required::yes, std::move(nested)));
+
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<struct_type>(s.fields.back()).fields.pop_back();
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dest) {
+          auto& dst_nested = get<struct_type>(dest.fields.back());
+          auto& src_nested = get<struct_type>(src.fields.back());
+          return src.fields.size() == dest.fields.size()
+                 && dst_nested.fields.empty()
+                 && removed(*src_nested.fields.back());
+      },
+  },
+  struct_evolution_test_case{
+    .description
+    = "grouping multiple fields into a struct won't produce any errors,"
+      "but the struct and contents are all treated as new fields with"
+      "new IDs, and the original fields are removed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s;
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "bar", field_required::no, string_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "baz", field_required::no, double_type{}));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          struct_type foobarbaz{};
+          std::move(
+            s.fields.begin(),
+            s.fields.end(),
+            std::back_inserter(foobarbaz.fields));
+          s.fields.clear();
+          s.fields.emplace_back(nested_field::create(
+            0, "foobarbaz", field_required::no, std::move(foobarbaz)));
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dest) {
+          auto& new_struct = get<struct_type>(dest.fields[0]);
+          // the three struct fields have the same names as but different IDs
+          // from the three fields in the source struct, which are removed
+          bool struct_fields_ok = std::ranges::all_of(
+            boost::irange(0UL, new_struct.fields.size()),
+            [&new_struct, &src](auto i) {
+                if (i > new_struct.fields.size() || i > src.fields.size()) {
+                    return false;
+                }
+                auto& new_f = new_struct.fields[i];
+                auto& orig_f = src.fields[i];
+                return new_f->name == orig_f->name && new_f->id != orig_f->id
+                       && added(*new_f) && removed(*orig_f);
+            });
+
+          return struct_fields_ok && dest.fields.size() == 1;
+      },
+  },
+  struct_evolution_test_case{
+    .description = "a map value can be manipulated as usual",
+    .generator = [](unique_id_generator&) { return nested_test_struct(); },
+    .update =
+      [](struct_type& s) {
+          auto& map = get<map_type>(s.fields[0]);
+          auto& nested_map = get<map_type>(map.value_field);
+          auto& val = get<struct_type>(nested_map.value_field);
+          val.fields.front()->type = long_type{};
+          val.fields.emplace_back(
+            nested_field::create(0, "nmv3", field_required::no, double_type{}));
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          auto& src_map = get<map_type>(
+            get<map_type>(src.fields[0]).value_field);
+          auto& dst_map = get<map_type>(
+            get<map_type>(dst.fields[0]).value_field);
+          auto& dst_val = get<struct_type>(dst_map.value_field);
+          return updated(*src_map.value_field, *dst_map.value_field)
+                 && added(*dst_val.fields.back());
+      },
+  },
+  struct_evolution_test_case{
+    .description = "promoting a field from required to optional is allowed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::yes, int_type{}));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          s.fields.back()->required = field_required::no;
+          s.fields.back()->type = long_type{};
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          auto& src_f = src.fields.back();
+          auto& dst_f = dst.fields.back();
+          return src_f->required != dst_f->required && updated(*src_f, *dst_f);
+      },
+  },
+  struct_evolution_test_case{
+    .description = "reordering fields is legal",
+    .generator = [](unique_id_generator&) { return nested_test_struct(); },
+    .update =
+      [](struct_type& s) {
+          auto& quux = get<map_type>(s.fields.front());
+          auto& quux_val = get<map_type>(quux.value_field);
+          auto& quux_val_val = get<struct_type>(quux_val.value_field);
+          std::swap(quux_val_val.fields.front(), quux_val_val.fields.back());
+
+          auto& location = get<list_type>(s.fields.back());
+          auto& location_elt = get<struct_type>(location.element_field);
+          std::swap(location_elt.fields.front(), location_elt.fields.back());
+          std::swap(s.fields.front(), s.fields.back());
+      },
+    .validator =
+      [](const struct_type& src, const struct_type& dst) {
+          bool all_updated = true;
+
+          if (auto res = for_each_field(
+                dst,
+                [&all_updated](const nested_field* f) {
+                    all_updated = all_updated && updated(*f);
+                });
+              res.has_error()) {
+              return false;
+          }
+
+          return all_updated && structs_equivalent(src, dst);
+      },
+    // TODO(oren): do we need to detect field reordering? or just support it?
+    // should reordered fields in a schema correspond to some parquet layout
+    // change on disk?
+    .any_change = schema_changed::no,
+  },
+  struct_evolution_test_case{
+    .description
+    = "renaming a field is not ID preserving. the renamed field is "
+      "'added' and the old one 'removed'",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          return s;
+      },
+    .update = [](struct_type& s) { s.fields.back()->name = "bar"; },
+    .validator =
+      [](const struct_type& src, const struct_type& dest) {
+          const auto& s = src.fields.back();
+          const auto& d = dest.fields.back();
+          return s->name != d->name && s->id != d->id && removed(*s)
+                 && added(*d);
+      },
+  },
+  struct_evolution_test_case{
+    .description = "removing a field marks all nested fields as removed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          struct_type nested{};
+          nested.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          nested.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "bar",
+            field_required::no,
+            list_type::create(ids.get_one(), field_required::no, int_type{})));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "nested", field_required::no, std::move(nested)));
+          return s;
+      },
+    .update = [](struct_type& s) { s.fields.pop_back(); },
+    .validator =
+      [](const struct_type& src, const struct_type&) {
+          bool all_removed = true;
+          bool err = for_each_field(src, [&all_removed](const nested_field* f) {
+                         all_removed = all_removed && removed(*f);
+                     }).has_error();
+
+          return !err && all_removed;
+      },
+  },
+};
+
+static const std::vector<struct_evolution_test_case> invalid_cases{
+  struct_evolution_test_case{
+    .description = "invalid primitive type promotions are rejected",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          return s;
+      },
+    .update = [](
+
+                struct_type& s) { s.fields[0]->type = string_type{}; },
+    .err = schema_evolution_errc::type_mismatch,
+  },
+  struct_evolution_test_case{
+    .description
+    = "list elements are subject to type promotion rules (invalid)",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "qux",
+            field_required::yes,
+            list_type::create(
+              ids.get_one(), field_required::yes, date_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<list_type>(s.fields[0]).element_field->type = string_type{};
+      },
+    .err = schema_evolution_errc::type_mismatch,
+  },
+  struct_evolution_test_case{
+    .description
+    = "introducing a required field to a list-element struct is not allowed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "qux",
+            field_required::yes,
+            list_type::create(
+              ids.get_one(), field_required::yes, struct_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<struct_type>(get<list_type>(s.fields[0]).element_field)
+            .fields.emplace_back(
+              nested_field::create(0, "int", field_required::yes, int_type{}));
+      },
+    .err = schema_evolution_errc::new_required_field,
+
+  },
+  struct_evolution_test_case{
+    .description = "map values are subject to type promotion rules (invalid)",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "a_map",
+            field_required::no,
+            map_type::create(
+              ids.get_one(),
+              int_type{},
+              ids.get_one(),
+              field_required::no,
+              float_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<map_type>(s.fields[0]).value_field->type = string_type{};
+      },
+    .err = schema_evolution_errc::type_mismatch,
+  },
+  struct_evolution_test_case{
+    .description = "map keys are subject to type promotion rules (invalid)",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(),
+            "a_map",
+            field_required::no,
+            map_type::create(
+              ids.get_one(),
+              int_type{},
+              ids.get_one(),
+              field_required::no,
+              float_type{})));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          get<map_type>(s.fields[0]).key_field->type = double_type{};
+      },
+    .err = schema_evolution_errc::type_mismatch,
+  },
+  struct_evolution_test_case{
+    .description = "evolving a primitive field into a struct is illegal",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          struct_type foo{};
+          foo.fields.emplace_back(std::move(s.fields.back()));
+          s.fields.clear();
+          // note that the top-level name of the struct (that now contains
+          // 'foo') is also 'foo'
+          s.fields.emplace_back(
+            nested_field::create(0, "foo", field_required::no, std::move(foo)));
+      },
+    .err = schema_evolution_errc::incompatible,
+  },
+  struct_evolution_test_case{
+    .description = "evolving a single field struct into a primitive is illegal",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          struct_type foo{};
+          foo.fields.emplace_back(nested_field::create(
+            ids.get_one(), "bar", field_required::no, int_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, std::move(foo)));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          auto bar = std::move(get<struct_type>(s.fields.back()).fields.back());
+          bar->name = "foo";
+          s.fields.clear();
+          s.fields.emplace_back(std::move(bar));
+      },
+    .err = schema_evolution_errc::incompatible,
+  },
+  struct_evolution_test_case{
+    .description
+    = "ambiguous (name-wise) type promotions are logged as such. even though"
+      "we made a valid promotion of the first field, there's no way to"
+      "distinguish between the two if the change came through SR",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, float_type{}));
+          return s;
+      },
+    .update = [](struct_type& s) { s.fields.back()->type = long_type{}; },
+    .err = schema_evolution_errc::ambiguous,
+  },
+  struct_evolution_test_case{
+    .description = "adding fields to a map key is illegal",
+    .generator = [](unique_id_generator&) { return nested_test_struct(); },
+    .update =
+      [](struct_type& s) {
+          auto& map = get<map_type>(s.fields[0]);
+          auto& key = get<struct_type>(map.key_field);
+          key.fields.emplace_back(
+            nested_field::create(0, "qux", field_required::no, int_type{}));
+      },
+    .err = schema_evolution_errc::violates_map_key_invariant,
+  },
+  struct_evolution_test_case{
+    .description = "dropping fields from a map key struct is illegal",
+    .generator = [](unique_id_generator&) { return nested_test_struct(); },
+    .update =
+      [](struct_type& s) {
+          auto& map = get<map_type>(s.fields[0]);
+          auto& key = get<struct_type>(map.key_field);
+          key.fields.pop_back();
+      },
+    .err = schema_evolution_errc::violates_map_key_invariant,
+  },
+  struct_evolution_test_case{
+    .description
+    = "promoting a field from optional to required is strictly illegal"
+      "even if the field type promotion would be allowed",
+    .generator =
+      [](unique_id_generator& ids) {
+          struct_type s{};
+          s.fields.emplace_back(nested_field::create(
+            ids.get_one(), "foo", field_required::no, int_type{}));
+          return s;
+      },
+    .update =
+      [](struct_type& s) {
+          s.fields.back()->required = field_required::yes;
+          s.fields.back()->type = long_type{};
+      },
+    .err = schema_evolution_errc::new_required_field,
+  },
+  struct_evolution_test_case{
+    .description = "adding required fields is illegal (NOTE: the spec allows "
+                   "this but schema registry does not. we may introduce "
+                   "support in the future.)",
+    .generator = [](unique_id_generator&) { return struct_type{}; },
+    .update =
+      [](struct_type& s) {
+          s.fields.emplace_back(
+            nested_field::create(0, "foo", field_required::yes, int_type{}));
+      },
+    .err = schema_evolution_errc::new_required_field,
+  },
+};
+
+static constexpr auto valid_plus_errs = [](auto&& R) {
+    std::vector<struct_evolution_test_case> result;
+    result.reserve(valid_cases.size() + invalid_cases.size());
+    std::ranges::copy(valid_cases, std::back_inserter(result));
+    std::ranges::copy(R, std::back_inserter(result));
+    return result;
+};
+
+class StructCompatibilityTestBase
+  : public CompatibilityTest<struct_evolution_test_case> {
+protected:
+    unique_id_generator ids;
+
+public:
+    auto generator() { return GetParam().generator(ids); }
+    auto update(const struct_type& s) {
+        auto cp = s.copy();
+        GetParam().update(cp);
+        reset_field_ids(cp);
+        return cp;
+    }
+    auto& err() { return GetParam().err; }
+    auto validator(const struct_type& src, const struct_type& dest) {
+        return GetParam().validator(src, dest);
+    }
+    auto& any_change() { return GetParam().any_change; }
+};
