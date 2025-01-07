@@ -21,7 +21,7 @@
 #include "storage/segment.h"
 #include "storage/segment_appender.h"
 #include "storage/segment_reader.h"
-#include "utils/disk_log_builder.h"
+#include "storage/tests/utils/disk_log_builder.h"
 
 #include <seastar/core/thread.hh>
 #include <seastar/testing/thread_test_case.hh>

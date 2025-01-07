@@ -80,7 +80,7 @@ TEST_F(SegmentReaderTest, TestBasicReads) {
     buf.append(data.data(), data.size());
     paging_file_->append(std::move(buf)).get();
     readable_segment readable_seg(paging_file_.get());
-    for (int i = 0; i < data.size(); i++) {
+    for (size_t i = 0; i < data.size(); i++) {
         auto reader = readable_seg.make_reader();
         auto stream = reader->make_stream(i);
         auto buf = stream.read_up_to(data.size()).get();
@@ -194,7 +194,7 @@ TEST_F(SegmentReaderTest, TestReadVersionBeforeGaps) {
     expectations_map_t expected_per_version;
     auto reader = readable_seg.make_reader();
     readable_seg.add_gap(file_gap(1, 3));
-    for (int i = 0; i < data.size(); i++) {
+    for (size_t i = 0; i < data.size(); i++) {
         // Reading below the gapped version should ignore the gap entirely.
         ASSERT_NO_FATAL_FAILURE(
           validate_reader_exactly(*reader, i, data.substr(i)));
@@ -285,7 +285,7 @@ TEST_F(SegmentReaderTest, TestReadsWithRandomGaps) {
         }
         // Rebuild the expected string, removing all gaps.
         ss::sstring expected;
-        for (int d = 0; d < data.size(); d++) {
+        for (size_t d = 0; d < data.size(); d++) {
             if (removed_pos.contains(d)) {
                 continue;
             }
@@ -317,12 +317,12 @@ TEST_F(SegmentReaderTest, TestRandomReadsWithGaps) {
     for (int i = 0; i < 10; i++) {
         auto gap_start = random_generators::get_int(size);
         auto gap_len = random_generators::get_int(size_t{1}, size);
-        for (int l = 0; l < gap_len; l++) {
+        for (size_t l = 0; l < gap_len; l++) {
             removed_pos.emplace(gap_start + l);
         }
         // Rebuild the expected string, removing all gaps.
         ss::sstring expected;
-        for (int d = 0; d < data.size(); d++) {
+        for (size_t d = 0; d < data.size(); d++) {
             if (removed_pos.contains(d)) {
                 continue;
             }
@@ -333,7 +333,7 @@ TEST_F(SegmentReaderTest, TestRandomReadsWithGaps) {
         expected_per_version.emplace_back(readable_seg.make_reader(), expected);
         for (const auto& [reader, full_expected_str] : expected_per_version) {
             // Read starting at every position, and ensure nothing funny.
-            for (int i = 0; i < size; i++) {
+            for (size_t i = 0; i < size; i++) {
                 auto stream = reader->make_stream(i);
                 auto buf = stream.read_exactly(size).get();
 

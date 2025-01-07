@@ -127,7 +127,7 @@ public:
         // Generate some segments.
         size_t val_count = starting_value;
         for (size_t i = 0; i < num_segments; i++) {
-            for (int r = 0; r < batches_per_segment; r++) {
+            for (size_t r = 0; r < batches_per_segment; r++) {
                 auto kvs = tests::kv_t::sequence(
                   val_count,
                   records_per_batch,
@@ -459,7 +459,7 @@ TEST_F(CompactionFixtureTest, TestDedupeMultiPassAddedSegment) {
     ASSERT_LT(segments_compacted, segments_compacted_2);
 
     // segs.size() - 2 to account for active segment.
-    for (int i = 0; i < segs.size() - 2; ++i) {
+    for (size_t i = 0; i < segs.size() - 2; ++i) {
         auto& seg = segs[i];
         ASSERT_TRUE(seg->finished_windowed_compaction());
         ASSERT_TRUE(seg->finished_self_compaction());
@@ -938,7 +938,7 @@ TEST_P(CompactionFixtureTombstonesParamTest, TestTombstonesCompletelyEmptyLog) {
                          .get();
 
     ASSERT_TRUE(did_compact);
-    for (int i = 0; i < num_segments; ++i) {
+    for (size_t i = 0; i < num_segments; ++i) {
         ASSERT_TRUE(log->segments()[i]->index().has_clean_compact_timestamp());
     }
 
