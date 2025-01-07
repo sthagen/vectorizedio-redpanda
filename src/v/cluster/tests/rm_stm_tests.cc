@@ -941,7 +941,7 @@ FIXTURE_TEST(test_tx_expiration_without_data_batches, rm_stm_test_fixture) {
 FIXTURE_TEST(test_concurrent_producer_evictions, rm_stm_test_fixture) {
     create_stm_and_start_raft();
     auto& stm = *_stm;
-    stm.start().get0();
+    stm.start().get();
     stm.testing_only_disable_auto_abort();
 
     wait_for_confirmed_leader();
