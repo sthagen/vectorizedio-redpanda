@@ -202,7 +202,13 @@ TEST_F(FileCommitterTest, TestMissingTopic) {
     ASSERT_EQ(load_res.error(), iceberg::catalog::errc::not_found);
 }
 
-TEST_F(FileCommitterTest, TestFilesGetPartitionKey) {
+class FileCommitterPartitionTest
+  : public FileCommitterTest
+  , public testing::WithParamInterface<bool> {};
+
+TEST_P(FileCommitterPartitionTest, TestFilesGetPartitionKey) {
+    const bool use_legacy_format = GetParam();
+
     create_table();
 
     using namespace iceberg;
@@ -215,13 +221,25 @@ TEST_F(FileCommitterTest, TestFilesGetPartitionKey) {
             std::move(offsets),
           },
           added_at_counter++);
+
         for (auto& e : t_state.pid_to_pending_files[model::partition_id{0}]
                          .pending_entries) {
-            e.data.files.emplace_back(datalake::coordinator::data_file{
+            datalake::coordinator::data_file file{
               .row_count = 100,
               .file_size_bytes = 1024,
-              .hour_deprecated = hour,
-            });
+            };
+
+            if (use_legacy_format) {
+                file.hour_deprecated = hour;
+            } else {
+                chunked_vector<std::optional<bytes>> pk;
+                pk.push_back(value_to_bytes(int_value{hour}));
+                file.table_schema_id = 0;
+                file.partition_spec_id = 0;
+                file.partition_key = std::move(pk);
+            }
+
+            e.data.files.emplace_back(std::move(file));
         }
         state.topic_to_state[topic] = std::move(t_state);
         return state;
@@ -288,6 +306,9 @@ TEST_F(FileCommitterTest, TestFilesGetPartitionKey) {
     ASSERT_EQ(1, mfiles[1].added_files_count);
     ASSERT_EQ(100, mfiles[1].added_rows_count);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+  WithLegacyFormat, FileCommitterPartitionTest, testing::Bool());
 
 // Test that deduplication happens when all of the pending files are already
 // committed to Iceberg.
