@@ -63,8 +63,8 @@ FIXTURE_TEST(test_replicated_partition_end_offset, redpanda_thread_fixture) {
             // replicate a batch that is subjected to offset translation
             return p
               ->replicate(
-                model::make_memory_record_batch_reader(
-                  {std::move(builder).build()}),
+                chunked_vector<model::record_batch>::single(
+                  std::move(builder).build()),
                 raft::replicate_options(raft::consistency_level::quorum_ack))
               .then([p, rp](result<cluster::kafka_result> rr) {
                   BOOST_REQUIRE(rr.has_value());
