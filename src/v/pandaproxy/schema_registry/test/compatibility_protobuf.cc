@@ -31,7 +31,9 @@ namespace pps = pp::schema_registry;
 namespace {
 
 struct simple_sharded_store {
-    simple_sharded_store() {
+    explicit simple_sharded_store(
+      pps::protobuf_renderer_v2 proto_v2 = pps::protobuf_renderer_v2::no)
+      : store{proto_v2} {
         store.start(pps::is_mutable::yes, ss::default_smp_service_group())
           .get();
     }

@@ -324,6 +324,7 @@ ss::future<const pb::FileDescriptor*> import_schema(
 struct protobuf_schema_definition::impl {
     pb::DescriptorPool _dp;
     const pb::FileDescriptor* fd{};
+    protobuf_renderer_v2 v2_renderer{protobuf_renderer_v2::no};
 
     /**
      * debug_string swaps the order of the import and package lines that
@@ -434,6 +435,9 @@ make_protobuf_schema_definition(schema_getter& store, canonical_schema schema) {
     auto impl = ss::make_shared<protobuf_schema_definition::impl>();
     auto refs = schema.def().refs();
     impl->fd = co_await import_schema(impl->_dp, store, std::move(schema));
+    if (auto* s = dynamic_cast<const sharded_store*>(&store); s != nullptr) {
+        impl->v2_renderer = s->protobuf_v2_renderer();
+    }
     co_return protobuf_schema_definition{std::move(impl), std::move(refs)};
 }
 
