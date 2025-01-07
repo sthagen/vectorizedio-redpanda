@@ -333,7 +333,7 @@ class KgoRepeaterService(Service):
 
     def _get_status_reports(self):
         for node in self.nodes:
-            r = requests.get(self._remote_url(node, "status"), timeout=10)
+            r = requests.get(self._remote_url(node, "status"), timeout=30)
             r.raise_for_status()
             node_status = r.json()
             for worker_status in node_status:
