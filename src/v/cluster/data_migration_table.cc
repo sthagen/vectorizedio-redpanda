@@ -138,6 +138,7 @@ ss::future<> migrations_table::apply_snapshot(
                 continue;
             }
             it->second.state = migration.state;
+            it->second.completed_timestamp = migration.completed_timestamp;
         }
         affected_ids.push_back(id);
         updated.emplace_back(it->second);
