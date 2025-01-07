@@ -194,6 +194,7 @@ redpanda_cc_gtest(
     ],
     deps = [
         ":test_data_writer",
+        "//src/v/bytes",
         "//src/v/datalake:partitioning_writer",
         "//src/v/datalake:table_definition",
         "//src/v/iceberg/tests:test_schemas",

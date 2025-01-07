@@ -7,6 +7,7 @@
  *
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
+#include "bytes/bytes.h"
 #include "datalake/partitioning_writer.h"
 #include "datalake/table_definition.h"
 #include "datalake/tests/test_data_writer.h"
@@ -43,6 +44,23 @@ iceberg::struct_type default_type_with_columns(size_t extra_columns) {
 
 static constexpr auto schema_id = iceberg::schema::id_t{0};
 
+static constexpr auto ms_per_hr = 3600 * 1000;
+
+// Create a bunch of records spread over multiple hours.
+chunked_vector<struct_value> generate_values(
+  const field_type& schema_field, int num_hrs, int records_per_hr) {
+    const auto start_time = model::timestamp::now();
+    chunked_vector<struct_value> vals;
+    for (int h = 0; h < num_hrs; h++) {
+        for (int i = 0; i < records_per_hr; i++) {
+            vals.emplace_back(val_with_timestamp(
+              schema_field,
+              model::timestamp{start_time.value() + h * ms_per_hr + i}));
+        }
+    }
+    return vals;
+}
+
 } // namespace
 
 class PartitioningWriterExtraColumnsTest
@@ -57,18 +75,10 @@ TEST_P(PartitioningWriterExtraColumnsTest, TestSchemaHappyPath) {
     partitioning_writer writer(
       *writer_factory, schema_id, default_type.copy(), hour_partition_spec());
 
-    // Create a bunch of records spread over multiple hours.
-    static constexpr auto ms_per_hr = 3600 * 1000;
-    static constexpr auto num_hrs = 10;
-    static constexpr auto records_per_hr = 5;
-    const auto start_time = model::timestamp::now();
-    chunked_vector<struct_value> source_vals;
-    for (int h = 0; h < num_hrs; h++) {
-        for (int i = 0; i < records_per_hr; i++) {
-            source_vals.emplace_back(val_with_timestamp(
-              field, model::timestamp{start_time.value() + h * ms_per_hr + i}));
-        }
-    }
+    static constexpr int num_hrs = 5;
+    static constexpr int records_per_hr = 5;
+    auto source_vals = generate_values(field, num_hrs, records_per_hr);
+
     // Give the data to the partitioning writer.
     for (auto& v : source_vals) {
         auto err = writer.add_data(std::move(v), /*approx_size=*/0).get();
@@ -129,4 +139,120 @@ TEST(PartitioningWriterTest, TestUnexpectedSchema) {
                    /*approx_size=*/0)
                  .get();
     EXPECT_EQ(err, writer_error::parquet_conversion_error);
+}
+
+TEST(PartitioningWriterTest, TestEmptyKey) {
+    auto writer_factory = std::make_unique<datalake::test_data_writer_factory>(
+      false);
+    auto field = field_type{default_type_with_columns(0)};
+    auto& default_type = std::get<struct_type>(field);
+    auto spec_id = partition_spec::id_t{123};
+    partition_spec empty_spec{.spec_id = spec_id};
+    partitioning_writer writer(
+      *writer_factory, schema_id, default_type.copy(), empty_spec.copy());
+
+    static constexpr auto num_hrs = 10;
+    static constexpr auto records_per_hr = 5;
+    auto source_vals = generate_values(field, num_hrs, records_per_hr);
+
+    // Give the data to the partitioning writer.
+    for (auto& v : source_vals) {
+        auto err = writer.add_data(std::move(v), /*approx_size=*/0).get();
+        EXPECT_EQ(err, writer_error::ok);
+    }
+
+    // There should be only one file corresponding to the single partition.
+    auto res = std::move(writer).finish().get();
+    ASSERT_FALSE(res.has_error()) << res.error();
+    const auto& files = res.value();
+    ASSERT_EQ(files.size(), 1);
+
+    const auto& file = files[0];
+    ASSERT_EQ(file.partition_spec_id, spec_id);
+    ASSERT_EQ(file.partition_key.val->fields.size(), 0);
+}
+
+TEST(PartitioningWriterTest, TestCompositeKey) {
+    auto writer_factory = std::make_unique<datalake::test_data_writer_factory>(
+      false);
+
+    auto schema_type = default_type_with_columns(5);
+    schema_type.fields.push_back(nested_field::create(
+      schema_type.fields.size() + 1,
+      "foo_str",
+      field_required::no,
+      string_type{}));
+
+    auto schema_field = field_type{schema_type.copy()};
+
+    partition_spec spec = hour_partition_spec();
+    spec.spec_id = partition_spec::id_t{123};
+    spec.fields.push_back(partition_field{
+      .source_id = schema_type.fields.back()->id,
+      .field_id = spec.fields.back().field_id + 1,
+      .name = "field2",
+      .transform = identity_transform{},
+    });
+
+    partitioning_writer writer(
+      *writer_factory, schema_id, schema_type.copy(), spec.copy());
+
+    static constexpr auto num_hrs = 10;
+    static constexpr auto records_per_hr = 5;
+    auto source_vals = generate_values(schema_field, num_hrs, records_per_hr);
+
+    // For each record set a value for the string field to aaa/bbb/null.
+    // rows in each hour will get all three values.
+    for (size_t i = 0; i < source_vals.size(); ++i) {
+        auto& string_field = source_vals[i].fields.back();
+        switch (i % 3) {
+        case 0:
+            string_field = string_value{iobuf::from("aaa")};
+            break;
+        case 1:
+            string_field = string_value{iobuf::from("bbb")};
+            break;
+        default:
+            string_field = std::nullopt;
+            break;
+        }
+    }
+
+    // Give the data to the partitioning writer.
+    for (auto& v : source_vals) {
+        auto err = writer.add_data(std::move(v), /*approx_size=*/0).get();
+        EXPECT_EQ(err, writer_error::ok);
+    }
+
+    auto res = std::move(writer).finish().get();
+    ASSERT_FALSE(res.has_error()) << res.error();
+
+    const auto& files = res.value();
+    ASSERT_EQ(files.size(), 3 * num_hrs);
+
+    // check that we've got a file for each possible partition key value.
+    std::map<std::optional<bytes>, std::vector<int>> string2hours;
+    for (const auto& file : files) {
+        ASSERT_EQ(file.partition_spec_id, spec.spec_id);
+        const auto& key_fields = file.partition_key.val->fields;
+        ASSERT_EQ(key_fields.size(), 2);
+        int hour = std::get<int_value>(
+                     std::get<primitive_value>(key_fields[0].value()))
+                     .val;
+        std::optional<bytes> string;
+        if (key_fields[1]) {
+            string = iobuf_to_bytes(
+              std::get<string_value>(
+                std::get<primitive_value>(key_fields[1].value()))
+                .val);
+        }
+        string2hours[string].push_back(hour);
+    }
+
+    ASSERT_TRUE(string2hours.contains(std::nullopt));
+    ASSERT_EQ(string2hours[std::nullopt].size(), num_hrs);
+    ASSERT_TRUE(string2hours.contains(bytes::from_string("aaa")));
+    ASSERT_EQ(string2hours[bytes::from_string("aaa")].size(), num_hrs);
+    ASSERT_TRUE(string2hours.contains(bytes::from_string("bbb")));
+    ASSERT_EQ(string2hours[bytes::from_string("bbb")].size(), num_hrs);
 }
