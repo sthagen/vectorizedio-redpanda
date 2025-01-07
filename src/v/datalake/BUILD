@@ -219,6 +219,7 @@ redpanda_cc_library(
         ":writer",
         "//src/v/base",
         "//src/v/datalake/coordinator:translated_offset_range",
+        "//src/v/iceberg:values_bytes",
         "//src/v/model",
         "//src/v/utils:lazy_abort_source",
         "//src/v/utils:retry_chain_node",

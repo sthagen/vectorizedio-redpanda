@@ -220,7 +220,7 @@ TEST_F(FileCommitterTest, TestFilesGetPartitionKey) {
             e.data.files.emplace_back(datalake::coordinator::data_file{
               .row_count = 100,
               .file_size_bytes = 1024,
-              .hour = hour,
+              .hour_deprecated = hour,
             });
         }
         state.topic_to_state[topic] = std::move(t_state);

@@ -12,6 +12,7 @@
 
 #include "datalake/logger.h"
 #include "datalake/record_multiplexer.h"
+#include "iceberg/values_bytes.h"
 
 #include <seastar/core/loop.hh>
 #include <seastar/core/seastar.hh>
@@ -73,6 +74,7 @@ translation_task::translate(
   const model::ntp& ntp,
   model::revision_id topic_revision,
   std::unique_ptr<parquet_file_writer_factory> writer_factory,
+  custom_partitioning_enabled is_custom_partitioning_enabled,
   model::record_batch_reader reader,
   const remote_path& remote_path_prefix,
   retry_chain_node& rcn,
@@ -135,15 +137,32 @@ translation_task::translate(
             break;
         }
 
-        ret.files.push_back(coordinator::data_file{
+        chunked_vector<std::optional<bytes>> pk_fields;
+        pk_fields.reserve(file.partition_key.val->fields.size());
+        for (const auto& field : file.partition_key.val->fields) {
+            if (field) {
+                pk_fields.emplace_back(value_to_bytes(field.value()));
+            } else {
+                pk_fields.emplace_back(std::nullopt);
+            }
+        }
+
+        coordinator::data_file uploaded{
           .remote_path = r.value()().string(),
           .row_count = file.local_file.row_count,
           .file_size_bytes = file.local_file.size_bytes,
-          .hour = std::get<iceberg::int_value>(
-                    std::get<iceberg::primitive_value>(
-                      file.partition_key.val->fields[0].value()))
-                    .val,
-        });
+          .table_schema_id = file.schema_id,
+          .partition_spec_id = file.partition_spec_id,
+          .partition_key = std::move(pk_fields),
+        };
+
+        if (!is_custom_partitioning_enabled) {
+            // Upgrade is still in progress, write out the hour value for old
+            // versions.
+            uploaded.hour_deprecated = get_hour(file.partition_key);
+        }
+
+        ret.files.push_back(std::move(uploaded));
     }
 
     auto delete_result = co_await delete_local_data_files(
