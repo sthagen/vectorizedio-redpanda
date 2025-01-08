@@ -98,7 +98,7 @@ TEST(EntryStream, TestShortHeader) {
     entry_header hdr{0, 0, entry_type::record_batch};
     hdr_buf.append(entry_header_to_iobuf(hdr));
     ASSERT_GT(hdr_buf.size_bytes(), 1);
-    for (int i = 1; i < hdr_buf.size_bytes(); i++) {
+    for (size_t i = 1; i < hdr_buf.size_bytes(); i++) {
         auto copy_buf = hdr_buf.copy();
         copy_buf.trim_back(i);
         auto short_stream = make_iobuf_input_stream(std::move(copy_buf));

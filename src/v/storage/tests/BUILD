@@ -1,6 +1,34 @@
 load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
+    name = "storage_e2e_fixture",
+    hdrs = [
+        "storage_e2e_fixture.h",
+    ],
+    include_prefix = "storage/tests",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/kafka/server/tests:kafka_test_utils",
+        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/storage",
+        "//src/v/test_utils:scoped_config",
+        "@seastar",
+    ],
+)
+
+redpanda_test_cc_library(
+    name = "manual_mixin",
+    hdrs = [
+        "manual_mixin.h",
+    ],
+    include_prefix = "storage/tests",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/test_utils:scoped_config",
+    ],
+)
+
+redpanda_test_cc_library(
     name = "kvstore_fixture",
     hdrs = [
         "kvstore_fixture.h",
@@ -539,5 +567,289 @@ redpanda_cc_btest(
         "@boost//:test",
         "@fmt",
         "@seastar",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "segment_size_jitter_test",
+    timeout = "short",
+    srcs = [
+        "segment_size_jitter_test.cc",
+    ],
+    deps = [
+        "//src/v/storage",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "log_segment_reader_test",
+    timeout = "short",
+    srcs = [
+        "log_segment_reader_test.cc",
+    ],
+    deps = [
+        "//src/v/model",
+        "//src/v/model/tests:random",
+        "//src/v/random:generators",
+        "//src/v/storage",
+        "//src/v/storage:logger",
+        "//src/v/storage:parser_utils",
+        "//src/v/storage:record_batch_utils",
+        "//src/v/storage:segment_appender",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "offset_assignment_test",
+    timeout = "short",
+    srcs = [
+        "offset_assignment_test.cc",
+    ],
+    deps = [
+        "//src/v/model/tests:random",
+        "//src/v/storage",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "log_truncate_test",
+    timeout = "short",
+    srcs = [
+        "log_truncate_test.cc",
+    ],
+    deps = [
+        "//src/v/model",
+        "//src/v/storage",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/storage/tests:storage_test_fixture",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:range",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "compaction_index_format_tests",
+    timeout = "short",
+    srcs = [
+        "compaction_index_format_tests.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/bytes:random",
+        "//src/v/model/tests:random",
+        "//src/v/random:generators",
+        "//src/v/reflection:adl",
+        "//src/v/storage",
+        "//src/v/storage:logger",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:random",
+        "//src/v/test_utils:seastar_boost",
+        "//src/v/test_utils:tmpbuf_file",
+        "//src/v/utils:vint",
+        "@boost//:test",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "disk_log_builder_test",
+    timeout = "short",
+    srcs = [
+        "disk_log_builder_test.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/model",
+        "//src/v/model/tests:random",
+        "//src/v/storage",
+        "//src/v/storage/tests:disk_log_builder_fixture",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "log_retention_tests",
+    timeout = "short",
+    srcs = [
+        "log_retention_tests.cc",
+    ],
+    deps = [
+        "//src/v/model",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "half_page_concurrent_dispatch",
+    timeout = "short",
+    srcs = [
+        "half_page_concurrent_dispatch.cc",
+    ],
+    deps = [
+        "//src/v/storage",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "file_sanitizer_test",
+    timeout = "short",
+    srcs = [
+        "file_sanitizer_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/bytes:iostream",
+        "//src/v/storage",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "compaction_reducer_test",
+    timeout = "short",
+    srcs = [
+        "compaction_reducer_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:random",
+        "//src/v/random:generators",
+        "//src/v/storage",
+        "//src/v/storage:logger",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "batch_consumer_utils_test",
+    timeout = "short",
+    srcs = [
+        "batch_consumer_utils_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:iostream",
+        "//src/v/model/tests:random",
+        "//src/v/storage",
+        "//src/v/storage/tests:disk_log_builder",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "log_replayer_test",
+    timeout = "short",
+    srcs = [
+        "log_replayer_test.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/features",
+        "//src/v/model",
+        "//src/v/model/tests:random",
+        "//src/v/random:generators",
+        "//src/v/storage",
+        "//src/v/storage:logger",
+        "//src/v/storage:record_batch_utils",
+        "//src/v/storage:resources",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
+    name = "storage_e2e_fixture_test",
+    timeout = "moderate",
+    srcs = [
+        "storage_e2e_fixture_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/kafka/server/tests:kafka_test_utils",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/storage",
+        "//src/v/storage/tests:storage_e2e_fixture",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:scoped_config",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_gtest(
+    name = "compaction_e2e_test",
+    timeout = "moderate",
+    srcs = [
+        "compaction_e2e_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/base",
+        "//src/v/kafka/server/tests:kafka_test_utils",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/redpanda/tests:fixture_gtest",
+        "//src/v/storage",
+        "//src/v/storage/tests:manual_mixin",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:gtest",
+        "//src/v/test_utils:scoped_config",
+        "//src/v/test_utils:seastar_boost",
+        "//src/v/utils:directory_walker",
+        "@abseil-cpp//absl/container:btree",
+        "@googletest//:gtest",
+        "@seastar",
+        "@seastar//:testing",
     ],
 )
