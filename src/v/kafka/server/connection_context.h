@@ -267,7 +267,7 @@ private:
     };
 
     using sequence_id = named_type<uint64_t, struct kafka_protocol_sequence>;
-    using map_t = absl::flat_hash_map<sequence_id, response_and_resources>;
+    using map_t = chunked_hash_map<sequence_id, response_and_resources>;
 
     /*
      * dispatch_method_once is the first stage processing of a request and
