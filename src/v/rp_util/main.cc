@@ -10,38 +10,77 @@
  */
 
 #include "base/seastarx.h"
-#include "boost/program_options.hpp"
+#include "base/vassert.h"
+#include "bytes/iobuf.h"
+#include "bytes/iostream.h"
 #include "compat/run.h"
 #include "redpanda/admin/cluster_config_schema_util.h"
-#include "seastar/core/app-template.hh"
 #include "version/version.h"
 
+#include <seastar/core/app-template.hh>
+#include <seastar/core/iostream.hh>
+
+#include <cerrno>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 
 namespace {
-int corpus_write(char** argv, std::filesystem::path dir) {
-    seastar::app_template app;
+
+int run_seastar(std::function<ss::future<int>()> main) {
+    ss::app_template::seastar_options seastar_config;
+    // Use a small footprint for this tool.
+    seastar_config.smp_opts.smp.set_value(1);
+    seastar_config.smp_opts.memory_allocator = ss::memory_allocator::standard;
+    seastar_config.reactor_opts.overprovisioned.set_value();
+    seastar_config.log_opts.default_log_level.set_value(ss::log_level::warn);
+    seastar::app_template app(std::move(seastar_config));
+    ss::sstring program_name = "rp_util";
+    std::array<char*, 1> args = {program_name.data()};
     try {
-        return app.run(1, argv, [dir = std::move(dir)]() {
-            return compat::write_corpus(dir).then([] { return 0; });
-        });
+        return app.run(args.size(), args.data(), std::move(main));
     } catch (...) {
         std::cerr << std::current_exception() << "\n";
         return 1;
     }
 }
 
-int corpus_check(char** argv, std::filesystem::path path) {
-    seastar::app_template app;
-    try {
-        return app.run(1, argv, [path = std::move(path)]() -> ss::future<int> {
-            return compat::check_type(path).then([] { return 0; });
-        });
-    } catch (...) {
-        std::cerr << std::current_exception() << "\n";
-        return 1;
-    }
+int corpus_write(std::filesystem::path dir) {
+    return run_seastar([dir = std::move(dir)]() -> ss::future<int> {
+        return compat::write_corpus(dir).then([] { return 0; });
+    });
+}
+
+int corpus_check(std::filesystem::path path) {
+    return run_seastar([path = std::move(path)]() -> ss::future<int> {
+        return compat::check_type(path).then([] { return 0; });
+    });
+}
+
+int print_cluster_config_schema() {
+    return run_seastar([]() -> ss::future<int> {
+        auto schema = util::generate_json_schema(config::configuration());
+        if (!schema._body_writer) {
+            vassert(
+              !schema._res.empty(),
+              "expected string if there is no body writer");
+            std::cout << schema._res << "\n";
+            return ss::as_ready_future(0);
+        }
+        vassert(
+          schema._res.empty(),
+          "expected empty string result if there is a body writer, got: {}",
+          schema._res);
+        auto buf = std::make_unique<iobuf>();
+        return schema._body_writer(make_iobuf_ref_output_stream(*buf.get()))
+          .then([buf = std::move(buf)]() -> int {
+              for (const auto& chunk : *buf) {
+                  std::cout << std::string_view{chunk.get(), chunk.size()};
+              }
+              std::cout << "\n";
+              return 0;
+          });
+    });
 }
 } // namespace
 
@@ -74,14 +113,17 @@ int main(int ac, char* av[]) {
     if (vm.count("help")) {
         std::cout << desc << "\n";
     } else if (vm.count("config_schema_json")) {
-        std::cout << util::generate_json_schema(config::configuration())._res
-                  << "\n";
+        return print_cluster_config_schema();
     } else if (vm.count("version")) {
         std::cout << redpanda_version() << "\n";
     } else if (vm.count("corpus_write")) {
-        return corpus_write(av, vm["corpus_write"].as<std::filesystem::path>());
+        return corpus_write(vm["corpus_write"].as<std::filesystem::path>());
     } else if (vm.count("corpus_check")) {
-        return corpus_check(av, vm["corpus_check"].as<std::filesystem::path>());
+        return corpus_check(vm["corpus_check"].as<std::filesystem::path>());
+    } else {
+        std::cout << "missing option" << "\n";
+        std::cout << desc << "\n";
+        return 1;
     }
 
     return 0;
