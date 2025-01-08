@@ -50,6 +50,7 @@ def redpanda_cc_binary(
         defines = [],
         local_defines = [],
         visibility = None,
+        testonly = False,
         copts = [],
         linkopts = [],
         deps = []):
@@ -64,6 +65,7 @@ def redpanda_cc_binary(
         local_defines = local_defines,
         visibility = visibility,
         deps = deps,
+        testonly = testonly,
         copts = redpanda_copts() + copts,
         linkopts = linkopts,
         features = [
