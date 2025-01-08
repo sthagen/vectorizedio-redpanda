@@ -1047,7 +1047,7 @@ FIXTURE_TEST(append_concurrent_with_prefix_truncate, storage_test_fixture) {
     auto ntp = model::controller_ntp;
 
     storage::ntp_config ntp_cfg(ntp, mgr.config().base_dir);
-    auto log = mgr.manage(std::move(ntp_cfg)).get0();
+    auto log = mgr.manage(std::move(ntp_cfg)).get();
 
     bool stop = false;
     size_t cnt = 0;
