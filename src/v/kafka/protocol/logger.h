@@ -17,5 +17,6 @@
 namespace kafka {
 
 extern ss::logger klog;
+extern ss::logger kauthzlog;
 
 } // namespace kafka

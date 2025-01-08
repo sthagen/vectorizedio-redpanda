@@ -312,10 +312,10 @@ private:
 
         template<typename... Args>
         void log(ss::log_level lvl, const char* format, Args&&... args) {
-            if (klog.is_enabled(lvl)) {
+            if (kauthzlog.is_enabled(lvl)) {
                 auto line_fmt = ss::sstring("{}:{} failed authorization - ")
                                 + format;
-                klog.log(
+                kauthzlog.log(
                   lvl,
                   line_fmt.c_str(),
                   _client_addr,
