@@ -585,7 +585,10 @@ class OMBValidationTest(RedpandaCloudTest):
                             1)
         producer_rate = tier_limits.max_ingress // 2
         total_producers = self._producer_count(producer_rate)
-        total_consumers = self._consumer_count(producer_rate * subscriptions)
+        # double consumer count which is a bit more friendly and realistic in
+        # high partition scenarios
+        total_consumers = self._consumer_count(
+            producer_rate * subscriptions) * 2
 
         workload = self.WORKLOAD_DEFAULTS | {
             "name":
