@@ -83,8 +83,8 @@ public:
     }
 
 private:
-    using in_progress_map = absl::
-      node_hash_map<model::partition_id, std::vector<model::broker_shard>>;
+    using in_progress_map
+      = chunked_hash_map<model::partition_id, std::vector<model::broker_shard>>;
     template<typename Cmd>
     ss::future<std::error_code> dispatch_updates_to_cores(Cmd, model::offset);
 
