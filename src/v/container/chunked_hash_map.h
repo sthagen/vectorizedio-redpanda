@@ -90,3 +90,18 @@ using chunked_hash_set = ankerl::unordered_dense::segmented_set<
   chunked_vector<Key>,
   ankerl::unordered_dense::bucket_type::standard,
   chunked_vector<ankerl::unordered_dense::bucket_type::standard>>;
+
+template<typename K, typename V>
+std::ostream& operator<<(std::ostream& o, const chunked_hash_map<K, V>& r) {
+    o << "{";
+    bool first = true;
+    for (const auto& [k, v] : r) {
+        if (!first) {
+            o << ", ";
+        }
+        o << "{" << k << " -> " << v << "}";
+        first = false;
+    }
+    o << "}";
+    return o;
+}
