@@ -38,7 +38,10 @@ bool is_reconnect_error(const std::system_error& e) {
       ss::tls::ERROR_NO_CIPHER_SUITES,
       ss::tls::ERROR_PREMATURE_TERMINATION,
       ss::tls::ERROR_DECRYPTION_FAILED,
-      ss::tls::ERROR_MAC_VERIFY_FAILED};
+      ss::tls::ERROR_MAC_VERIFY_FAILED,
+      ss::tls::ERROR_WRONG_VERSION_NUMBER,
+      ss::tls::ERROR_HTTP_REQUEST,
+      ss::tls::ERROR_HTTPS_PROXY_REQUEST};
 
     if (e.code().category() == ss::tls::error_category()) {
         return absl::c_any_of(
