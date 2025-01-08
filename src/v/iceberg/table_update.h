@@ -65,6 +65,11 @@ struct remove_snapshots {
     }
 };
 
+struct remove_snapshot_ref {
+    ss::sstring ref_name;
+    remove_snapshot_ref copy() const { return {.ref_name = ref_name}; }
+};
+
 struct set_snapshot_ref {
     ss::sstring ref_name;
     snapshot_reference ref;
@@ -83,7 +88,6 @@ struct set_snapshot_ref {
 // - set_default_spec
 // - add_sort_order
 // - set_default_sort_order
-// - remove_snapshot_ref
 // - set_location
 // - set_properties
 // - remove_properties
@@ -95,6 +99,7 @@ using update = std::variant<
   add_spec,
   add_snapshot,
   remove_snapshots,
+  remove_snapshot_ref,
   set_snapshot_ref>;
 
 } // namespace iceberg::table_update
