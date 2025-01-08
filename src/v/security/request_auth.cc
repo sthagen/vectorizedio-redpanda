@@ -227,7 +227,14 @@ void request_auth_result::pass() { _checked = true; }
  * knowing that all our member objects have nothrow destructors.
  */
 request_auth_result::~request_auth_result() noexcept(false) {
-    if (!_checked && !std::current_exception()) {
+    // If another exception is already in flight (e.g., thrown during request
+    // handling between authenticate() and the check), it's acceptable that we
+    // didn't perform the check. We only log the error if there is no active
+    // exception, to avoid confusion where the log suggests an authentication
+    // issue when the real cause might be unrelated.
+    const auto another_exception_in_flight = std::current_exception()
+                                             || std::uncaught_exceptions() > 0;
+    if (!_checked && !another_exception_in_flight) {
         vlog(
           logger.error, "request_auth_result destroyed without being checked!");
 
