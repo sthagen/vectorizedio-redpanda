@@ -143,7 +143,7 @@ async def main():
                         "--directory",
                         type=pathlib.Path,
                         help="data directory",
-                        default="data")
+                        default=None)
     parser.add_argument("--base-rpc-port",
                         type=int,
                         help="rpc port",
@@ -182,6 +182,10 @@ async def main():
     elif extra_args:
         # Re-do with strict parse: this will surface unknown argument errors
         args = parser.parse_args()
+
+    if args.directory is None:
+        args.directory = pathlib.Path(
+            os.environ.get("BUILD_WORKSPACE_DIRECTORY", ".")) / "data"
 
     # Use the first 3 nodes as seed servers
     rpc_addresses = [
