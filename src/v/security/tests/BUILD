@@ -6,6 +6,7 @@ redpanda_test_cc_library(
         "randoms.h",
     ],
     include_prefix = "security/tests",
+    visibility = ["//visibility:public"],
     deps = [
         "//src/v/bytes:random",
         "//src/v/security",
