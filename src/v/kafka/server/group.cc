@@ -1913,10 +1913,10 @@ group::begin_tx(cluster::begin_group_tx_request r) {
     // replicate fence batch - this is a transaction boundary
     model::record_batch batch = make_tx_fence_batch(
       r.pid, std::move(fence), use_dedicated_batch_type_for_fence());
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
+
     auto result = co_await _partition->raft()->replicate(
       _term,
-      std::move(reader),
+      std::move(batch),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!result) {
@@ -2059,11 +2059,10 @@ group::store_txn_offsets(txn_offset_commit_request r) {
       prepared_tx_record_version,
       pid,
       std::move(tx_entry));
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
 
     auto result = co_await _partition->raft()->replicate(
       _term,
-      std::move(reader),
+      std::move(batch),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!result) {
@@ -2230,12 +2229,9 @@ group::offset_commit_stages group::store_offsets(offset_commit_request&& r) {
           offset_commit_response(r, error_code::none));
     }
 
-    auto batch = std::move(builder).build();
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
-
     auto replicate_stages = _partition->raft()->replicate_in_stages(
       _term,
-      std::move(reader),
+      chunked_vector<model::record_batch>::single(std::move(builder).build()),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     auto f = replicate_stages.replicate_finished.then(
@@ -2613,12 +2609,11 @@ ss::future<error_code> group::remove() {
     add_group_tombstone_record(_id, builder);
 
     auto batch = std::move(builder).build();
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
 
     try {
         auto result = co_await _partition->raft()->replicate(
           _term,
-          std::move(reader),
+          std::move(batch),
           raft::replicate_options(raft::consistency_level::quorum_ack));
         if (result) {
             vlog(
@@ -2700,12 +2695,11 @@ ss::future<> group::remove_topic_partitions(
     }
 
     auto batch = std::move(builder).build();
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
 
     try {
         auto result = co_await _partition->raft()->replicate(
           _term,
-          std::move(reader),
+          std::move(batch),
           raft::replicate_options(raft::consistency_level::quorum_ack));
         if (result) {
             vlog(
@@ -2740,7 +2734,7 @@ ss::future<result<raft::replicate_result>>
 group::store_group(model::record_batch batch) {
     return _partition->raft()->replicate(
       _term,
-      model::make_memory_record_batch_reader(std::move(batch)),
+      std::move(batch),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 }
 
@@ -2970,11 +2964,10 @@ ss::future<cluster::abort_group_tx_reply> group::do_abort(
       aborted_tx_record_version,
       pid,
       std::move(tx));
-    auto reader = model::make_memory_record_batch_reader(std::move(batch));
 
     auto result = co_await _partition->raft()->replicate(
       _term,
-      std::move(reader),
+      std::move(batch),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!result) {
@@ -3093,7 +3086,7 @@ ss::future<cluster::commit_group_tx_reply> group::do_commit(
     // tx_gateway_frontend). So redpanda will eventually finish commit and
     // complete write for both this events.
 
-    model::record_batch_reader::data_t batches;
+    chunked_vector<model::record_batch> batches;
     batches.reserve(2);
     // if pending offsets are empty, (there was no store_txn_offsets call, do
     // not replicate the offsets update batch)
@@ -3125,11 +3118,9 @@ ss::future<cluster::commit_group_tx_reply> group::do_commit(
 
     batches.push_back(std::move(batch));
 
-    auto reader = model::make_memory_record_batch_reader(std::move(batches));
-
     auto result = co_await _partition->raft()->replicate(
       _term,
-      std::move(reader),
+      std::move(batches),
       raft::replicate_options(raft::consistency_level::quorum_ack));
 
     if (!result) {

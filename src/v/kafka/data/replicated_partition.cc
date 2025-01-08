@@ -326,15 +326,15 @@ replicated_partition::timequery(storage::timequery_config cfg) {
     // no further offset translation is required here.
     return _partition->timequery(cfg);
 }
-
 ss::future<result<model::offset>> replicated_partition::replicate(
-  model::record_batch_reader rdr, raft::replicate_options opts) {
+  chunked_vector<model::record_batch> batches, raft::replicate_options opts) {
     using ret_t = result<model::offset>;
     if (_partition->is_read_replica_mode_enabled()) {
         return ss::make_ready_future<ret_t>(
           kafka::error_code::invalid_topic_exception);
     }
-    return _partition->replicate(std::move(rdr), opts)
+
+    return _partition->replicate(std::move(batches), opts)
       .then([](result<cluster::kafka_result> r) {
           if (!r) {
               return ret_t(r.error());
@@ -342,10 +342,15 @@ ss::future<result<model::offset>> replicated_partition::replicate(
           return ret_t(model::offset(r.value().last_offset()));
       });
 }
+ss::future<result<model::offset>> replicated_partition::replicate(
+  model::record_batch batch, raft::replicate_options opts) {
+    return replicate(
+      chunked_vector<model::record_batch>::single(std::move(batch)), opts);
+}
 
 raft::replicate_stages replicated_partition::replicate(
   model::batch_identity batch_id,
-  model::record_batch_reader&& rdr,
+  model::record_batch batch,
   raft::replicate_options opts) {
     using ret_t = result<raft::replicate_result>;
     if (_partition->is_read_replica_mode_enabled()) {
@@ -354,8 +359,10 @@ raft::replicate_stages replicated_partition::replicate(
           ss::make_ready_future<result<raft::replicate_result>>(
             make_error_code(kafka::error_code::invalid_topic_exception))};
     }
-
-    auto res = _partition->replicate_in_stages(batch_id, std::move(rdr), opts);
+    auto res = _partition->replicate_in_stages(
+      batch_id,
+      chunked_vector<model::record_batch>::single(std::move(batch)),
+      opts);
 
     raft::replicate_stages out(raft::errc::success);
     out.request_enqueued = std::move(res.request_enqueued);

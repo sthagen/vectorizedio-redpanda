@@ -154,15 +154,15 @@ ss::future<result<model::offset, cluster::errc>> local_service::produce(
             co_return cluster::errc::invalid_request;
         }
     }
-    auto rdr = model::make_foreign_fragmented_memory_record_batch_reader(
-      std::move(batches));
     // TODO: schema validation
     co_return co_await _partition_manager->invoke_on_shard(
       *shard,
       ntp,
-      [timeout, r = std::move(rdr)](kafka::partition_proxy* partition) mutable {
+      [timeout,
+       batches = chunked_vector<model::record_batch>(std::move(batches))](
+        kafka::partition_proxy* partition) mutable {
           return partition
-            ->replicate(std::move(r), make_replicate_options(timeout))
+            ->replicate(std::move(batches), make_replicate_options(timeout))
             .then(
               [](result<model::offset> r)
                 -> result<model::offset, cluster::errc> {
