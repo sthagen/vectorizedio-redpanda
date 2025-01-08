@@ -123,10 +123,59 @@ struct nested_field {
     std::optional<ss::sstring> doc;
     // TODO: support initial-default and write-default optional literals.
 
-    static nested_field_ptr
-    create(int32_t id, ss::sstring name, field_required req, field_type t) {
+    /**
+     * evolution_metadata - Variant holding annotation related to schema
+     * evolution (i.e. transforming some 'source' schema into some 'destination'
+     * schema).
+     *
+     * The 'meta' field is populated during a schema struct "annotation" pass
+     * (see compatibility.h for detail), for fields under both structs in a
+     * traversal, though with different value types depending on whether
+     * 'source' or 'destination' (see below).
+     *
+     * - src_info: For destination schema fields that are backwards compatible
+     *   with some source schema field
+     *   - id: source field ID, assigned to destination field ID
+     *   - required: requiredness of source field, validated against proposed
+     *     requiredness of destination field
+     *   - type: Optionally, the primitive type of the source field, validated
+     *     against proposed type of the destination field
+     * - is_new: For destination schema fields that do not appear in the source
+     *   schema
+     * - removed: For source schema fields, indicating whether the field was
+     *   dropped from the schema (i.e. does not have a corresponding destination
+     *   field)
+     */
+    struct src_info {
+        id_t id{};
+        field_required required{};
+        std::optional<primitive_type> type{};
+    };
+    struct is_new {};
+    using removed = ss::bool_class<struct removed_field_tag>;
+    using evolution_metadata
+      = std::variant<std::nullopt_t, src_info, is_new, removed>;
+    mutable evolution_metadata meta{std::nullopt};
+
+    void set_evolution_metadata(evolution_metadata v) const {
+        vassert(
+          !has_evolution_metadata(),
+          "Evolution metadata should not be overwritten");
+        meta = v;
+    }
+
+    bool has_evolution_metadata() const {
+        return !std::holds_alternative<std::nullopt_t>(meta);
+    }
+
+    static nested_field_ptr create(
+      int32_t id,
+      ss::sstring name,
+      field_required req,
+      field_type t,
+      evolution_metadata meta = std::nullopt) {
         return std::make_unique<nested_field>(
-          id_t{id}, std::move(name), req, std::move(t), std::nullopt);
+          id_t{id}, std::move(name), req, std::move(t), std::nullopt, meta);
     }
 
     nested_field_ptr copy() const;

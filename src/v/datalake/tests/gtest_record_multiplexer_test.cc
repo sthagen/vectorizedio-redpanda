@@ -102,14 +102,14 @@ TEST(DatalakeMultiplexerTest, TestMultiplexerWriteError) {
     batch_spec.records = record_count;
     batch_spec.count = batch_count;
     ss::circular_buffer<model::record_batch> batches
-      = model::test::make_random_batches(batch_spec).get0();
+      = model::test::make_random_batches(batch_spec).get();
 
     auto reader = model::make_generating_record_batch_reader(
       [batches = std::move(batches)]() mutable {
           return ss::make_ready_future<model::record_batch_reader::data_t>(
             std::move(batches));
       });
-    auto res = reader.consume(std::move(multiplexer), model::no_timeout).get0();
+    auto res = reader.consume(std::move(multiplexer), model::no_timeout).get();
     ASSERT_TRUE(res.has_error());
     EXPECT_EQ(res.error(), datalake::writer_error::parquet_conversion_error);
 }
@@ -145,7 +145,7 @@ TEST(DatalakeMultiplexerTest, WritesDataFiles) {
     batch_spec.count = batch_count;
     batch_spec.offset = model::offset{start_offset};
     ss::circular_buffer<model::record_batch> batches
-      = model::test::make_random_batches(batch_spec).get0();
+      = model::test::make_random_batches(batch_spec).get();
 
     auto reader = model::make_generating_record_batch_reader(
       [batches = std::move(batches)]() mutable {
@@ -154,7 +154,7 @@ TEST(DatalakeMultiplexerTest, WritesDataFiles) {
       });
 
     auto result
-      = reader.consume(std::move(multiplexer), model::no_timeout).get0();
+      = reader.consume(std::move(multiplexer), model::no_timeout).get();
 
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result.value().data_files.size(), 1);
