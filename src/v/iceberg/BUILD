@@ -565,6 +565,32 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "remove_snapshots_action",
+    srcs = [
+        "remove_snapshots_action.cc",
+    ],
+    hdrs = [
+        "remove_snapshots_action.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        ":snapshot",
+        ":table_update",
+        "//src/v/base",
+        "//src/v/container:chunked_hash_map",
+    ],
+    include_prefix = "iceberg",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":action",
+        ":table_metadata",
+        "//src/v/container:fragmented_vector",
+        "//src/v/model",
+        "//src/v/utils:prefix_logger",
+    ],
+)
+
+redpanda_cc_library(
     name = "schema",
     srcs = [
         "schema.cc",
@@ -913,6 +939,7 @@ redpanda_cc_library(
         "transaction.h",
     ],
     implementation_deps = [
+        ":remove_snapshots_action",
         ":table_update_applier",
         ":update_schema_action",
     ],

@@ -43,6 +43,7 @@ rp_test(
     partition_key_test.cc
     partition_key_type_test.cc
     partition_test.cc
+    remove_snapshots_action_test.cc
     schema_avro_test.cc
     schema_json_test.cc
     schema_test.cc

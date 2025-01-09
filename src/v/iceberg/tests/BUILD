@@ -284,6 +284,23 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "remove_snapshots_action_test",
+    timeout = "short",
+    srcs = [
+        "remove_snapshots_action_test.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/iceberg:manifest_entry",
+        "//src/v/iceberg:remove_snapshots_action",
+        "//src/v/iceberg:table_metadata",
+        "//src/v/random:generators",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "schema_avro_test",
     timeout = "short",
     srcs = [
