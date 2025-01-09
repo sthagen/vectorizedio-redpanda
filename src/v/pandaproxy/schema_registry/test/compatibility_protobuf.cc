@@ -857,6 +857,53 @@ message SearchResponse {
 )"));
 }
 
+SEASTAR_THREAD_TEST_CASE(test_protobuf_synthetic_oneof) {
+    auto schema = R"(syntax = "proto3";
+package foo;
+message WithSynthetic {
+  optional int32 int32 = 1;
+}
+
+message WithOneOf {
+  oneof some_int {
+    int32 int32 = 1;
+  }
+}
+
+)";
+    auto expected_sanitized = R"(syntax = "proto3";
+package foo;
+
+message WithSynthetic {
+  optional int32 int32 = 1;
+}
+message WithOneOf {
+  oneof some_int {
+    int32 int32 = 1;
+  }
+}
+
+)";
+    BOOST_CHECK_EQUAL(
+      sanitize(schema, pps::normalize::no, pps::protobuf_renderer_v2::yes),
+      expected_sanitized);
+    auto expected_normalized = R"(syntax = "proto3";
+package foo;
+
+message WithSynthetic {
+  optional int32 int32 = 1;
+}
+message WithOneOf {
+  oneof some_int {
+    int32 int32 = 1;
+  }
+}
+
+)";
+    BOOST_CHECK_EQUAL(
+      normalize(schema, pps::protobuf_renderer_v2::yes), expected_normalized);
+}
+
 SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize) {
     auto schema = R"(
 syntax = "proto3";

@@ -683,12 +683,12 @@ struct protobuf_schema_definition::impl {
             bool is_proto2 = edition == pb::Edition::EDITION_PROTO2;
             if(descriptor && 
                 (descriptor->is_map() || descriptor->real_containing_oneof() ||
-                (descriptor->is_optional() && !(is_proto2 && !descriptor->containing_oneof())))) {
+                ((descriptor->is_optional() && !field.proto3_optional()) && !(is_proto2 && !descriptor->containing_oneof())))) {
                 return "";
             }
             switch (field.label()) {
             case pb::FieldDescriptorProto::LABEL_OPTIONAL:
-                return is_proto2 ? "optional " : "";
+                return "optional ";
             case pb::FieldDescriptorProto::LABEL_REPEATED:
                 return "repeated ";
             case pb::FieldDescriptorProto::LABEL_REQUIRED:
