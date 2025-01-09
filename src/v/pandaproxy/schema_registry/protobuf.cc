@@ -46,6 +46,7 @@
 #include <seastar/util/variant_utils.hh>
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/container/flat_set.hpp>
 #include <fmt/core.h>
@@ -70,6 +71,7 @@
 #include <algorithm>
 #include <charconv>
 #include <functional>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <unordered_set>
@@ -621,10 +623,20 @@ struct protobuf_schema_definition::impl {
       pb::Edition edition,
       const pb::FieldDescriptorProto& field,
       const pb::FieldDescriptor* descriptor,
-      int indent) const {
+      int indent,
+      bool is_group = false) const {
         const auto type_name = [&]() -> std::string_view {
             if (field.has_type_name()) {
-                return field.type_name();
+                std::string_view name{field.type_name()};
+                if (is_group) {
+                    // Remove the prefix, the type is always in the immediate
+                    // scope.
+                    size_t pos = name.find_last_of('.');
+                    if (pos != std::string::npos) {
+                        name = name.substr(pos + 1);
+                    }
+                }
+                return name;
             }
             switch (field.type()) {
             case pb::FieldDescriptorProto::TYPE_DOUBLE:
@@ -689,6 +701,7 @@ struct protobuf_schema_definition::impl {
             const auto name_for =
               [&](const pb::FieldDescriptor* fd) -> std::string_view {
                 switch (fd->type()) {
+                case pb::FieldDescriptor::TYPE_GROUP:
                 case pb::FieldDescriptor::TYPE_MESSAGE:
                     return is_normalized ? fd->message_type()->full_name()
                                          : fd->message_type()->name();
@@ -716,8 +729,8 @@ struct protobuf_schema_definition::impl {
               "",
               indent,
               label(),
-              type_name(),
-              field.name(),
+              is_group ? "group" : type_name(),
+              is_group ? type_name() : field.name(),
               field.number());
         }
 
@@ -740,11 +753,8 @@ struct protobuf_schema_definition::impl {
         bool first = true;
         auto maybe_print_seperator = [&]() {
             if (count > 1) {
-                if (first) {
-                    fmt::print(os, " [\n{:{}}", "", indent + 2);
-                } else {
-                    fmt::print(os, ",\n{:{}}", "", indent + 2);
-                }
+                const auto prefix = first ? " [" : ",";
+                fmt::print(os, "{}\n{:{}}", prefix, "", indent + 2);
                 first = false;
             } else if (first) {
                 fmt::print(os, " [");
@@ -795,7 +805,11 @@ struct protobuf_schema_definition::impl {
         } else if (count == 1) {
             fmt::print(os, "]");
         }
-        fmt::print(os, ";\n");
+        if (is_group) {
+            fmt::print(os, " {{\n");
+        } else {
+            fmt::print(os, ";\n");
+        }
     }
 
     void render_extension(
@@ -811,13 +825,23 @@ struct protobuf_schema_definition::impl {
     }
 
     // Render a message, including nested messages
-    void render_message(
+    void render_nested(
       std::ostream& os,
       pb::Edition edition,
+      const std::optional<pb::FieldDescriptorProto>& field,
+      const pb::FieldDescriptor* field_descriptor,
       const pb::DescriptorProto& message,
       const pb::Descriptor* descriptor,
       int indent) const {
-        fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
+        auto type = field.has_value() ? field->type()
+                                      : pb::FieldDescriptorProto::TYPE_MESSAGE;
+        if (type == pb::FieldDescriptorProto::TYPE_MESSAGE) {
+            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
+        } else if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
+            bool is_group = true;
+            render_field(
+              os, edition, *field, field_descriptor, indent, is_group);
+        }
 
         if (message.has_options()) {
             if (message.options().has_deprecated()) {
@@ -880,10 +904,13 @@ struct protobuf_schema_definition::impl {
         }
 
         bool has_fields = false;
-        auto fields = maybe_sorted(
+        auto fields_ = maybe_sorted(
           message.field(),
           std::ranges::less{},
           &pb::FieldDescriptorProto::number);
+        auto fields = std::views::filter(fields_, [](const auto& f) {
+            return f.type() != pb::FieldDescriptorProto::TYPE_GROUP;
+        });
 
         // Each oneof section needs to start with the lowest field number, which
         // may be different to the order of oneof_decl in the message.
@@ -947,8 +974,22 @@ struct protobuf_schema_definition::impl {
 
         // Render nested types
         for (const auto& nested : nested_messages) {
-            auto d = descriptor->FindNestedTypeByName(nested.name());
-            render_message(os, edition, nested, d, indent + 2);
+            auto it = std::ranges::find_if(
+              message.field(), [&nested](const auto& f) {
+                  return f.name() == absl::AsciiStrToLower(nested.name());
+              });
+
+            auto field = (it != message.field().end())
+                           ? std::optional<pb::FieldDescriptorProto>{*it}
+                           : std::nullopt;
+            render_nested(
+              os,
+              edition,
+              field,
+              field_descriptor,
+              nested,
+              descriptor->FindNestedTypeByName(nested.name()),
+              indent + 2);
         }
 
         // Render nested enums
@@ -1276,7 +1317,7 @@ struct protobuf_schema_definition::impl {
         // Render messages
         for (const auto& message : fdp.message_type()) {
             auto d = descriptor.FindMessageTypeByName(message.name());
-            render_message(os, edition, message, d, 0);
+            render_nested(os, edition, std::nullopt, nullptr, message, d, 0);
         }
 
         // Render enums

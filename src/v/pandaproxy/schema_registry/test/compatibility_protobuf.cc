@@ -784,6 +784,79 @@ message HasMap {
 )"));
 }
 
+SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize_group) {
+    auto schema = R"(syntax = "proto2";
+message SearchResponse {
+  repeated group Result = 1 {
+    optional string title = 2;
+    optional string url = 1;
+    repeated string snippets = 3;
+    message SomeMessage {
+      optional string string = 1;
+    }
+    optional SomeMessage msg = 4;
+    repeated group InnerGroup = 5 {
+      optional int32 int32 = 1;
+    }
+    oneof nested_oneof {
+      string name = 6;
+    }
+  }
+})";
+
+    BOOST_CHECK_EQUAL(
+      sanitize(schema, pps::normalize::no, pps::protobuf_renderer_v2::yes),
+      (R"(syntax = "proto2";
+
+message SearchResponse {
+
+  repeated group Result = 1 {
+    optional string title = 2;
+    optional string url = 1;
+    repeated string snippets = 3;
+    optional SomeMessage msg = 4;
+
+    oneof nested_oneof {
+      string name = 6;
+    }
+
+    message SomeMessage {
+      optional string string = 1;
+    }
+    repeated group InnerGroup = 5 {
+      optional int32 int32 = 1;
+    }
+  }
+}
+
+)"));
+    BOOST_CHECK_EQUAL(
+      normalize(schema, pps::protobuf_renderer_v2::yes), (R"(syntax = "proto2";
+
+message SearchResponse {
+
+  repeated group Result = 1 {
+    optional string url = 1;
+    optional string title = 2;
+    repeated string snippets = 3;
+    optional .SearchResponse.Result.SomeMessage msg = 4;
+
+    oneof nested_oneof {
+      string name = 6;
+    }
+
+    message SomeMessage {
+      optional string string = 1;
+    }
+    repeated group InnerGroup = 5 {
+      optional int32 int32 = 1;
+    }
+  }
+}
+
+)"));
+}
+
 SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize) {
     auto schema = R"(
 syntax = "proto3";
