@@ -26,6 +26,7 @@ please keep this up to date with every new library use.
 | libcxxabi       | Apache License 2                   |
 | libnumactl      | LGPL v2.1                          |
 | libpciaccess    | MIT                                |
+| libxml2         | MIT                                |
 | lksctp-tools    | LGPL v2.1                          |
 | lz4             | BSD 2                              |
 | OpenSSL v3      | Apache License 2                   |
