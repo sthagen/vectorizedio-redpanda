@@ -85,6 +85,17 @@ struct table_metadata {
     // TODO: (optional) statistics
     // TODO: (optional) partition_statistics
 
+    const partition_spec* get_partition_spec(partition_spec::id_t id) const {
+        auto it = std::ranges::find(
+          partition_specs, id, &partition_spec::spec_id);
+        return it != partition_specs.end() ? &*it : nullptr;
+    }
+
+    const schema* get_schema(schema::id_t id) const {
+        auto it = std::ranges::find(schemas, id, &schema::schema_id);
+        return it != schemas.end() ? &*it : nullptr;
+    }
+
     friend bool operator==(const table_metadata&, const table_metadata&)
       = default;
 };

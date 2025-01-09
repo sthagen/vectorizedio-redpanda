@@ -167,18 +167,17 @@ record_multiplexer::operator()(model::record_batch batch) {
                 co_return ss::stop_iteration::yes;
             }
 
-            auto get_ids_res = co_await _schema_mgr.get_registered_ids(
-              _ntp.tp.topic, record_type.type);
-            if (get_ids_res.has_error()) {
-                auto e = get_ids_res.error();
+            auto load_res = co_await _schema_mgr.get_table_info(_ntp.tp.topic);
+            if (load_res.has_error()) {
+                auto e = load_res.error();
                 switch (e) {
                 case schema_manager::errc::not_supported:
                 case schema_manager::errc::failed:
                     vlog(
                       _log.warn,
-                      "Error getting field IDs for record {}: {}",
+                      "Error getting table info for record {}: {}",
                       offset,
-                      get_ids_res.error());
+                      load_res.error());
                     [[fallthrough]];
                 case schema_manager::errc::shutting_down:
                     _error = writer_error::parquet_conversion_error;
@@ -186,10 +185,25 @@ record_multiplexer::operator()(model::record_batch batch) {
                 co_return ss::stop_iteration::yes;
             }
 
+            if (!load_res.value().fill_registered_ids(record_type.type)) {
+                // This shouldn't happen because we ensured the schema with the
+                // call to table_creator. Probably someone managed to change the
+                // table between two calls.
+                vlog(
+                  _log.warn,
+                  "expected to successfully fill field IDs for record {}",
+                  offset);
+                _error = writer_error::parquet_conversion_error;
+                co_return ss::stop_iteration::yes;
+            }
+
             auto [iter, _] = _writers.emplace(
               record_type.comps,
               std::make_unique<partitioning_writer>(
-                *_writer_factory, std::move(record_type.type)));
+                *_writer_factory,
+                load_res.value().schema.schema_id,
+                std::move(record_type.type),
+                std::move(load_res.value().partition_spec)));
             writer_iter = iter;
         }
 

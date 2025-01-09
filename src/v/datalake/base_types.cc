@@ -14,11 +14,10 @@ namespace datalake {
 std::ostream& operator<<(std::ostream& o, const local_file_metadata& f_meta) {
     fmt::print(
       o,
-      "{{relative_path: {}, size_bytes: {}, row_count: {}, hour: {}}}",
+      "{{relative_path: {}, size_bytes: {}, row_count: {}}}",
       f_meta.path,
       f_meta.size_bytes,
-      f_meta.row_count,
-      f_meta.hour);
+      f_meta.row_count);
     return o;
 }
 } // namespace datalake

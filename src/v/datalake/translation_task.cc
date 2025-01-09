@@ -12,6 +12,7 @@
 
 #include "datalake/logger.h"
 #include "datalake/record_multiplexer.h"
+#include "iceberg/values_bytes.h"
 
 #include <seastar/core/loop.hh>
 #include <seastar/core/seastar.hh>
@@ -33,6 +34,27 @@ translation_task::errc map_error_code(cloud_data_io::errc errc) {
     }
 }
 
+ss::future<checked<std::nullopt_t, translation_task::errc>>
+delete_local_data_files(
+  const chunked_vector<partitioning_writer::partitioned_file>& files) {
+    using ret_t = checked<std::nullopt_t, translation_task::errc>;
+    return ss::max_concurrent_for_each(
+             files,
+             16,
+             [](const partitioning_writer::partitioned_file& file) {
+                 vlog(
+                   datalake_log.trace,
+                   "removing local data file: {}",
+                   file.local_file);
+                 return ss::remove_file(file.local_file.path().string());
+             })
+      .then([] { return ret_t(std::nullopt); })
+      .handle_exception([](const std::exception_ptr& e) {
+          vlog(datalake_log.warn, "error deleting local data files - {}", e);
+          return ret_t(translation_task::errc::file_io_error);
+      });
+}
+
 } // namespace
 translation_task::translation_task(
   cloud_data_io& cloud_io,
@@ -52,6 +74,7 @@ translation_task::translate(
   const model::ntp& ntp,
   model::revision_id topic_revision,
   std::unique_ptr<parquet_file_writer_factory> writer_factory,
+  custom_partitioning_enabled is_custom_partitioning_enabled,
   model::record_batch_reader reader,
   const remote_path& remote_path_prefix,
   retry_chain_node& rcn,
@@ -77,28 +100,31 @@ translation_task::translate(
         co_return errc::file_io_error;
     }
     auto write_result = std::move(mux_result).value();
-    vlog(
-      datalake_log.trace,
-      "translation result base offset: {}, last offset: {}, data files: {}",
-      write_result.start_offset,
-      write_result.last_offset,
-      fmt::join(write_result.data_files, ", "));
+    if (datalake_log.is_enabled(seastar::log_level::trace)) {
+        vlog(
+          datalake_log.trace,
+          "translation result base offset: {}, last offset: {}, data files: {}",
+          write_result.start_offset,
+          write_result.last_offset,
+          fmt::join(write_result.data_files, ", "));
+    }
 
     coordinator::translated_offset_range ret{
       .start_offset = write_result.start_offset,
       .last_offset = write_result.last_offset,
     };
     ret.files.reserve(write_result.data_files.size());
+
     std::optional<errc> upload_error;
     // TODO: parallelize uploads
-    for (auto& lf_meta : write_result.data_files) {
+    for (auto& file : write_result.data_files) {
         auto r = co_await execute_single_upload(
-          lf_meta, remote_path_prefix, rcn, lazy_as);
+          file.local_file, remote_path_prefix, rcn, lazy_as);
         if (r.has_error()) {
             vlog(
               datalake_log.warn,
               "error uploading file {} to object store - {}",
-              lf_meta,
+              file.local_file,
               r.error());
             upload_error = r.error();
             /**
@@ -110,12 +136,33 @@ translation_task::translate(
              */
             break;
         }
-        ret.files.push_back(coordinator::data_file{
+
+        chunked_vector<std::optional<bytes>> pk_fields;
+        pk_fields.reserve(file.partition_key.val->fields.size());
+        for (const auto& field : file.partition_key.val->fields) {
+            if (field) {
+                pk_fields.emplace_back(value_to_bytes(field.value()));
+            } else {
+                pk_fields.emplace_back(std::nullopt);
+            }
+        }
+
+        coordinator::data_file uploaded{
           .remote_path = r.value()().string(),
-          .row_count = lf_meta.row_count,
-          .file_size_bytes = lf_meta.size_bytes,
-          .hour = lf_meta.hour,
-        });
+          .row_count = file.local_file.row_count,
+          .file_size_bytes = file.local_file.size_bytes,
+          .table_schema_id = file.schema_id,
+          .partition_spec_id = file.partition_spec_id,
+          .partition_key = std::move(pk_fields),
+        };
+
+        if (!is_custom_partitioning_enabled) {
+            // Upgrade is still in progress, write out the hour value for old
+            // versions.
+            uploaded.hour_deprecated = get_hour(file.partition_key);
+        }
+
+        ret.files.push_back(std::move(uploaded));
     }
 
     auto delete_result = co_await delete_local_data_files(
@@ -171,24 +218,6 @@ translation_task::execute_single_upload(
     }
 
     co_return remote_path;
-}
-ss::future<checked<std::nullopt_t, translation_task::errc>>
-translation_task::delete_local_data_files(
-  const chunked_vector<local_file_metadata>& files) {
-    using ret_t = checked<std::nullopt_t, translation_task::errc>;
-    return ss::max_concurrent_for_each(
-             files,
-             16,
-             [](const local_file_metadata& lf_meta) {
-                 vlog(
-                   datalake_log.trace, "removing local data file: {}", lf_meta);
-                 return ss::remove_file(lf_meta.path().string());
-             })
-      .then([] { return ret_t(std::nullopt); })
-      .handle_exception([](const std::exception_ptr& e) {
-          vlog(datalake_log.warn, "error deleting local data files - {}", e);
-          return ret_t(errc::file_io_error);
-      });
 }
 
 std::ostream& operator<<(std::ostream& o, translation_task::errc ec) {

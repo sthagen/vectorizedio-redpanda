@@ -35,6 +35,10 @@ public:
         file_io_error,
         cloud_io_error,
     };
+
+    using custom_partitioning_enabled
+      = ss::bool_class<struct custom_partitioning_enabled_t>;
+
     /**
      * Executes the translation and uploads files to the object store. The tasks
      * accepts an abort source indicating when the upload retires should be
@@ -44,6 +48,7 @@ public:
       const model::ntp& ntp,
       model::revision_id topic_revision,
       std::unique_ptr<parquet_file_writer_factory> writer_factory,
+      custom_partitioning_enabled is_custom_partitioning_enabled,
       model::record_batch_reader reader,
       const remote_path& remote_path_prefix,
       retry_chain_node& parent_rcn,
@@ -60,9 +65,6 @@ private:
 
     ss::future<errc> delete_remote_files(
       chunked_vector<remote_path>, retry_chain_node& parent_rcn);
-
-    ss::future<checked<std::nullopt_t, errc>>
-    delete_local_data_files(const chunked_vector<local_file_metadata>&);
 
     static constexpr std::chrono::milliseconds _read_timeout{30000};
     cloud_data_io* _cloud_io;

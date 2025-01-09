@@ -23,6 +23,7 @@
 #include "iceberg/table_metadata.h"
 #include "iceberg/transaction.h"
 #include "iceberg/values.h"
+#include "iceberg/values_bytes.h"
 
 namespace datalake::coordinator {
 namespace {
@@ -179,8 +180,82 @@ iceberg_file_committer::commit_topic_files_to_catalog(
               std::make_optional<model::offset>(e.added_pending_at));
             for (const auto& f : e.data.files) {
                 auto pk = std::make_unique<iceberg::struct_value>();
-                pk->fields.emplace_back(iceberg::int_value{f.hour});
-                icb_files.emplace_back(iceberg::data_file{
+                if (f.table_schema_id >= 0) {
+                    auto schema_id = iceberg::schema::id_t{f.table_schema_id};
+                    auto schema = table.get_schema(schema_id);
+                    if (!schema) {
+                        vlog(
+                          datalake_log.error,
+                          "can't find schema {} in table for topic {}",
+                          schema_id,
+                          topic);
+                        co_return errc::failed;
+                    }
+
+                    auto pspec_id = iceberg::partition_spec::id_t{
+                      f.partition_spec_id};
+                    auto partition_spec = table.get_partition_spec(pspec_id);
+                    if (!partition_spec) {
+                        vlog(
+                          datalake_log.error,
+                          "can't find partition spec {} in table for topic {}",
+                          pspec_id,
+                          topic);
+                        co_return errc::failed;
+                    }
+
+                    if (
+                      partition_spec->fields.size() != f.partition_key.size()) {
+                        vlog(
+                          datalake_log.error,
+                          "[topic: {}, file: {}] partition key size {} doesn't "
+                          "match spec size {} (spec id: {})",
+                          topic,
+                          f.remote_path,
+                          f.partition_key.size(),
+                          partition_spec->fields.size(),
+                          pspec_id);
+                        co_return errc::failed;
+                    }
+
+                    auto key_type = iceberg::partition_key_type::create(
+                      *partition_spec, *schema);
+
+                    for (size_t i = 0; i < partition_spec->fields.size(); ++i) {
+                        const auto& field_type = key_type.type.fields.at(i);
+                        const auto& field_bytes = f.partition_key.at(i);
+                        if (field_bytes) {
+                            try {
+                                pk->fields.push_back(iceberg::value_from_bytes(
+                                  field_type->type, field_bytes.value()));
+                            } catch (const std::invalid_argument& e) {
+                                vlog(
+                                  datalake_log.error,
+                                  "[topic: {}, file: {}] failed to parse "
+                                  "partition key field {} (type: {}): {}",
+                                  topic,
+                                  f.remote_path,
+                                  i,
+                                  field_type->type,
+                                  e);
+                                co_return errc::failed;
+                            }
+                        } else {
+                            pk->fields.push_back(std::nullopt);
+                        }
+                    }
+                } else {
+                    // File created by a legacy Redpanda version that only
+                    // supported hourly partitioning, the partition key value is
+                    // in the hour_deprecated field.
+                    pk->fields.emplace_back(
+                      iceberg::int_value{f.hour_deprecated});
+                }
+
+                // TODO: pass schema_id and pspec_id to merge_append_action
+                // (currently it assumes that the files were serialized with the
+                // current schema and a single partition spec).
+                icb_files.push_back({
                   .content_type = iceberg::data_file_content_type::data,
                   .file_path = io_.to_uri(std::filesystem::path(f.remote_path)),
                   .file_format = iceberg::data_file_format::parquet,

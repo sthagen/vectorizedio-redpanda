@@ -144,7 +144,10 @@ redpanda_cc_library(
     ],
     deps = [
         "//src/v/base",
+        "//src/v/bytes",
+        "//src/v/container:fragmented_vector",
         "//src/v/serde",
+        "//src/v/serde:bytes",
         "@fmt",
         "@seastar",
     ],
@@ -183,6 +186,7 @@ redpanda_cc_library(
         "//src/v/iceberg:table_metadata",
         "//src/v/iceberg:transaction",
         "//src/v/iceberg:values",
+        "//src/v/iceberg:values_bytes",
     ],
     include_prefix = "datalake/coordinator",
     deps = [

@@ -69,6 +69,8 @@ enum class feature : std::uint64_t {
     shadow_indexing_split_topic_property_update = 1ULL << 53U,
     datalake_iceberg = 1ULL << 54U,
     raft_symmetric_reconfiguration_cancel = 1ULL << 55U,
+    datalake_iceberg_ga = 1ULL << 56U,
+
     // Dummy features for testing only
     test_alpha = 1ULL << 61U,
     test_bravo = 1ULL << 62U,
@@ -412,6 +414,12 @@ inline constexpr std::array feature_schema{
     release_version::v25_1_1,
     "raft_symmetric_reconfiguration_cancel",
     feature::raft_symmetric_reconfiguration_cancel,
+    feature_spec::available_policy::always,
+    feature_spec::prepare_policy::always},
+  feature_spec{
+    release_version::v25_1_1,
+    "datalake_iceberg_ga",
+    feature::datalake_iceberg_ga,
     feature_spec::available_policy::always,
     feature_spec::prepare_policy::always},
 };
