@@ -64,4 +64,10 @@ bool operator==(const partition_key& lhs, const partition_key& rhs) {
     return lhs.val == rhs.val;
 }
 
+int get_hour(const iceberg::partition_key& pk) {
+    return std::get<iceberg::int_value>(
+             std::get<iceberg::primitive_value>(pk.val->fields.at(0).value()))
+      .val;
+}
+
 } // namespace iceberg

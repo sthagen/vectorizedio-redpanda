@@ -39,7 +39,7 @@ public:
         kafka::offset last_offset;
         // vector containing a list of files that were written during
         // translation.
-        chunked_vector<local_file_metadata> data_files;
+        chunked_vector<partitioning_writer::partitioned_file> data_files;
     };
     explicit record_multiplexer(
       const model::ntp& ntp,

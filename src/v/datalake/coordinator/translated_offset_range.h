@@ -35,7 +35,10 @@ struct translated_offset_range
         translated_offset_range range;
         range.start_offset = start_offset;
         range.last_offset = last_offset;
-        range.files = files.copy();
+        range.files.reserve(files.size());
+        for (const auto& f : files) {
+            range.files.push_back(f.copy());
+        }
         return range;
     }
 };

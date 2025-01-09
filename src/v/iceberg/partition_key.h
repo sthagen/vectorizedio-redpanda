@@ -39,6 +39,10 @@ struct partition_key {
 };
 bool operator==(const partition_key&, const partition_key&);
 
+// Helper for legacy hourly partitioning. Assumes that the key contains an hour
+// value.
+int get_hour(const iceberg::partition_key&);
+
 } // namespace iceberg
 
 namespace std {

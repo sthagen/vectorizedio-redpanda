@@ -228,8 +228,8 @@ TEST_P(RecordMultiplexerParamTest, TestSimpleAvroRecords) {
 
     std::unordered_set<int> hrs;
     for (auto& f : write_res.data_files) {
-        hrs.emplace(f.hour);
-        EXPECT_EQ(f.row_count, GetParam().records_per_hr());
+        hrs.emplace(get_hour(f.partition_key));
+        EXPECT_EQ(f.local_file.row_count, GetParam().records_per_hr());
     }
     EXPECT_EQ(hrs.size(), GetParam().hrs);
 
@@ -264,10 +264,10 @@ TEST_P(RecordMultiplexerParamTest, TestAvroRecordsMultipleSchemas) {
 
     std::unordered_set<int> hrs;
     for (auto& f : write_res.data_files) {
-        hrs.emplace(f.hour);
+        hrs.emplace(get_hour(f.partition_key));
         // Each file should have half the records as normal, since we have
         // twice the files.
-        EXPECT_EQ(f.row_count, GetParam().records_per_hr() / 2);
+        EXPECT_EQ(f.local_file.row_count, GetParam().records_per_hr() / 2);
     }
     EXPECT_EQ(hrs.size(), GetParam().hrs);
     auto schema = get_current_schema();
@@ -318,8 +318,8 @@ TEST_F(RecordMultiplexerTest, TestAvroRecordsWithRedpandaField) {
 
     std::unordered_set<int> hrs;
     for (auto& f : write_res.data_files) {
-        hrs.emplace(f.hour);
-        EXPECT_EQ(f.row_count, default_param.records_per_hr());
+        hrs.emplace(get_hour(f.partition_key));
+        EXPECT_EQ(f.local_file.row_count, default_param.records_per_hr());
     }
     EXPECT_EQ(hrs.size(), default_param.hrs);
 

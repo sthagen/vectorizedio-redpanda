@@ -124,6 +124,7 @@ redpanda_cc_library(
         "//src/v/container:chunked_hash_map",
         "//src/v/iceberg:datatypes",
         "//src/v/iceberg:partition_key",
+        "//src/v/iceberg:schema",
         "//src/v/iceberg:values",
     ],
 )
@@ -218,6 +219,7 @@ redpanda_cc_library(
         ":writer",
         "//src/v/base",
         "//src/v/datalake/coordinator:translated_offset_range",
+        "//src/v/iceberg:values_bytes",
         "//src/v/model",
         "//src/v/utils:lazy_abort_source",
         "//src/v/utils:retry_chain_node",

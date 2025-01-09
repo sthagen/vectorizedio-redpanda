@@ -13,6 +13,7 @@
 #include "datalake/data_writer_interface.h"
 #include "iceberg/datatypes.h"
 #include "iceberg/partition_key.h"
+#include "iceberg/schema.h"
 #include "iceberg/values.h"
 
 namespace iceberg {
@@ -30,9 +31,15 @@ namespace datalake {
 class partitioning_writer {
 public:
     explicit partitioning_writer(
-      parquet_file_writer_factory& factory, iceberg::struct_type type)
+      parquet_file_writer_factory& factory,
+      iceberg::schema::id_t schema_id,
+      iceberg::struct_type type,
+      iceberg::partition_spec spec)
       : writer_factory_(factory)
-      , type_(std::move(type)) {}
+      , schema_id_(schema_id)
+      , type_(std::move(type))
+      , accessors_(iceberg::struct_accessor::from_struct_type(type_))
+      , spec_(std::move(spec)) {}
 
     // Adds the given value to the writer corresponding to the value's
     // partition key.
@@ -41,18 +48,30 @@ public:
     ss::future<writer_error>
     add_data(iceberg::struct_value, int64_t approx_size);
 
+    struct partitioned_file {
+        local_file_metadata local_file;
+        iceberg::schema::id_t schema_id;
+        iceberg::partition_spec::id_t partition_spec_id;
+        iceberg::partition_key partition_key;
+
+        friend std::ostream& operator<<(std::ostream&, const partitioned_file&);
+    };
+
     // Finishes and returns the list of local files written by the underlying
     // writers, with the appropriate partitioning metadata filled in.
-    ss::future<result<chunked_vector<local_file_metadata>, writer_error>>
+    ss::future<result<chunked_vector<partitioned_file>, writer_error>>
     finish() &&;
 
 private:
     // Factory for data writers.
     parquet_file_writer_factory& writer_factory_;
 
+    iceberg::schema::id_t schema_id_;
     // The Iceberg message type for the underlying writer. Expected to include
     // Redpanda-specific fields, e.g. a timestamp field for partitioning.
     const iceberg::struct_type type_;
+    iceberg::struct_accessor::ids_accessor_map_t accessors_;
+    iceberg::partition_spec spec_;
 
     // Map of partition keys to their corresponding data file writers.
     chunked_hash_map<

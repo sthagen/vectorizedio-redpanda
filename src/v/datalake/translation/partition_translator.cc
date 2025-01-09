@@ -253,6 +253,8 @@ partition_translator::do_translation_for_range(
     auto kafka_reader
       = model::make_record_batch_reader<kafka::read_committed_reader>(
         std::move(tracker), std::move(log_reader.reader));
+    const translation_task::custom_partitioning_enabled is_cp_enabled{
+      _features->local().is_active(features::feature::datalake_iceberg_ga)};
     // Be wary of introducing abortable code here that can skip cleanup
     // of kafka_reader. The reader is cleaned up along with consumption,
     // so we need to ensure that the reader is dispatched to translation
@@ -261,6 +263,7 @@ partition_translator::do_translation_for_range(
       ntp,
       _partition->get_topic_revision_id(),
       std::move(writer_factory),
+      is_cp_enabled,
       std::move(kafka_reader),
       remote_path_prefix,
       parent,

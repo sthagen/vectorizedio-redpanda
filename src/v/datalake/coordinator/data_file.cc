@@ -13,11 +13,14 @@ namespace datalake::coordinator {
 
 std::ostream& operator<<(std::ostream& o, const data_file& f) {
     o << fmt::format(
-      "{{remote_path: {}, row_count: {}, file_size_bytes: {}, hour: {}}}",
+      "{{remote_path: {}, row_count: {}, file_size_bytes: {}, hour_deprecated: "
+      "{}, table_schema_id: {}, partition_spec_id: {}}}",
       f.remote_path,
       f.row_count,
       f.file_size_bytes,
-      f.hour);
+      f.hour_deprecated,
+      f.table_schema_id,
+      f.partition_spec_id);
     return o;
 }
 
