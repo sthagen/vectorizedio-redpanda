@@ -334,6 +334,6 @@ use_repo(
 bazel_dep(name = "bazel_clang_tidy", dev_dependency = True)
 git_override(
     module_name = "bazel_clang_tidy",
-    commit = "a95424548c494470258a23128f70244f7a79dac2",
+    commit = "db677011c7363509a288a9fb3bf0a50830bbf791",
     remote = "https://github.com/erenon/bazel_clang_tidy.git",
 )
