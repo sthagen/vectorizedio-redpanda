@@ -49,11 +49,11 @@ please keep this up to date with every new library use.
 These are dependencies of wasmtime and can be generated via a script like:
 
 ```bash
-# Make sure you run this in a checked out wasmtime repo with the same version that we use.
+# Make sure you run this in bazel/thirdparty to pick up our rust dependencies.
 rm -f /tmp/license.md
 for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 do
-    cargo license --no-default-features --features=async --features=wat --avoid-build-deps --avoid-dev-deps --filter-platform=$target --json \
+    cargo license --avoid-build-deps --avoid-dev-deps --filter-platform=$target --json \
       | jq 'map({name, license})' | jq -r '(.[0] | keys_unsorted) as $keys | map([.[ $keys[] ]])[] | @text "| \(.[0]) | \(.[1]) |"' \
       >> /tmp/license.md
 done
