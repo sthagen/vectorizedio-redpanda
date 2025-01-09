@@ -1920,7 +1920,8 @@ class RpkTool:
                                 default=[],
                                 name=[],
                                 strict=False,
-                                output_format="json"):
+                                output_format="json",
+                                node: Optional[ClusterNode] = None):
         cmd = ["describe"]
 
         if strict:
@@ -1932,7 +1933,9 @@ class RpkTool:
         if len(name) > 0:
             cmd += ["--name", ",".join(name)]
 
-        return self._run_cluster_quotas(cmd, output_format=output_format)
+        return self._run_cluster_quotas(cmd,
+                                        output_format=output_format,
+                                        node=node)
 
     def alter_cluster_quotas(self,
                              add=[],
