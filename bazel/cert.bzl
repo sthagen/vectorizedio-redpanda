@@ -60,6 +60,8 @@ def redpanda_selfsigned_cert(name, certificate, common_name, visibility = None):
             "req",
             "-new",
             "-x509",
+            "-days",
+            "1000",
             "-sha256",
             "-key",
             "$(execpath :{})".format(private_key),
