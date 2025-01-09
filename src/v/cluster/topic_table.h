@@ -672,7 +672,7 @@ private:
         uint64_t id;
     };
 
-    void notify_waiters();
+    ss::future<> notify_waiters();
 
     void change_partition_replicas(
       model::ntp ntp,
@@ -684,7 +684,7 @@ private:
 
     class snapshot_applier;
 
-    std::error_code do_local_delete(
+    ss::future<std::error_code> do_local_delete(
       model::topic_namespace nt, model::offset offset, bool ignore_migration);
     ss::future<std::error_code>
       do_apply(update_partition_replicas_cmd_data, model::offset);
