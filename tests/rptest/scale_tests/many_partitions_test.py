@@ -415,8 +415,10 @@ class ManyPartitionsTest(PreallocNodesTest):
         # Because segments are rolled after a write we need to size messages
         # such that actual segment size is as close as possible to the desired
         # size. In default configuration we run with `log_segment_size_jitter_percent=5`
-        # adjust the messages size to always be larger than that.
-        warmup_message_size = math.ceil(scale.segment_size * 0.06)
+        # We use a message size of 0.53 * segment_size to ensure that with two
+        # messages we are always just about above the max possible segment size (2*0.53 > 1.05).
+        # We want decently sized messages to not make this warmup phase slower than needed.
+        warmup_message_size = math.ceil(scale.segment_size * 0.53)
         target_cloud_segments = 24 * 7 * scale.partition_limit
 
         # Enough data to generate the desired number of segments plus few more
