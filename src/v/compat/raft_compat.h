@@ -11,6 +11,8 @@
 #pragma once
 
 #include "compat/check.h"
+#include "compat/json.h"
+#include "compat/model_json.h"
 #include "compat/raft_generator.h"
 #include "compat/raft_json.h"
 #include "raft/types.h"

@@ -13,6 +13,7 @@
 
 #include "cluster/partition_balancer_types.h"
 #include "compat/check.h"
+#include "compat/cluster_json.h"
 #include "compat/json.h"
 #include "compat/partition_balancer_generator.h"
 

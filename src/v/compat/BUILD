@@ -31,6 +31,7 @@ redpanda_test_cc_library(
         "abort_tx_generator.h",
         "acls_compat.h",
         "acls_generator.h",
+        "acls_json.h",
         "begin_group_tx_compat.h",
         "begin_group_tx_generator.h",
         "begin_tx_compat.h",
@@ -72,6 +73,7 @@ redpanda_test_cc_library(
     include_prefix = "compat",
     visibility = ["//visibility:public"],
     deps = [
+        "//src/v/bytes:random",
         "//src/v/cluster",
         "//src/v/cluster/tests:randoms",
         "//src/v/container:json",
