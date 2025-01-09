@@ -1231,9 +1231,9 @@ struct protobuf_schema_definition::impl {
                   deps.begin(), std::ranges::unique(deps).begin());
             };
 
-            sort_and_unique(public_deps);
             sort_and_unique(weak_deps);
             sort_and_unique(private_deps);
+            sort_and_unique(public_deps);
         }
 
         auto print_deps = [&](const auto& view, std::string_view type) {
@@ -1242,9 +1242,9 @@ struct protobuf_schema_definition::impl {
             }
         };
 
-        print_deps(public_deps, "public ");
-        print_deps(weak_deps, "weak ");
         print_deps(private_deps, "");
+        print_deps(weak_deps, "weak ");
+        print_deps(public_deps, "public ");
     }
 
     void render_proto(

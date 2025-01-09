@@ -714,9 +714,9 @@ package foo;
 // sanitize should maintain relative ordering of imports per group,
 // normalize should sort them
 import "google/protobuf/timestamp.proto";
+import public "google/protobuf/duration.proto";
 import weak "google/protobuf/any.proto";
 import "google/protobuf/api.proto";
-import public "google/protobuf/duration.proto";
 )";
 
     BOOST_CHECK_EQUAL(
@@ -724,20 +724,20 @@ import public "google/protobuf/duration.proto";
       (R"(syntax = "proto3";
 package foo;
 
-import public "google/protobuf/duration.proto";
-import weak "google/protobuf/any.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/api.proto";
+import weak "google/protobuf/any.proto";
+import public "google/protobuf/duration.proto";
 
 )"));
     BOOST_CHECK_EQUAL(
       normalize(schema, pps::protobuf_renderer_v2::yes), (R"(syntax = "proto3";
 package foo;
 
-import public "google/protobuf/duration.proto";
-import weak "google/protobuf/any.proto";
 import "google/protobuf/api.proto";
 import "google/protobuf/timestamp.proto";
+import weak "google/protobuf/any.proto";
+import public "google/protobuf/duration.proto";
 
 )"));
 }
