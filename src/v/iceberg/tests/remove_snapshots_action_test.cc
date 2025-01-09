@@ -12,6 +12,7 @@
 #include "iceberg/manifest_entry.h"
 #include "iceberg/remove_snapshots_action.h"
 #include "iceberg/table_metadata.h"
+#include "iceberg/transaction.h"
 #include "random/generators.h"
 
 #include <gtest/gtest.h>
@@ -377,4 +378,45 @@ TEST_F(RemoveSnapshotsActionTest, TestRandomizedSnapshots) {
     auto long_removal = compute_removal(
       table, now.value() + long_expiry_age_ms + 1);
     ASSERT_EQ(long_removal.snaps.size(), num_expected_removed_long);
+}
+
+TEST_F(RemoveSnapshotsActionTest, TestRemoveSnapshotTransaction) {
+    const auto now = model::timestamp::now();
+    const auto expiry_age_ms = 10000;
+    auto table = create_table();
+    auto highest_id = add_snapshots(
+      default_total_snaps, now.value() - expiry_age_ms - 1, &table);
+    auto& main_ref = add_branch(highest_id, "main", &table);
+    main_ref.max_snapshot_age_ms = expiry_age_ms;
+
+    ASSERT_EQ(table.snapshots->size(), default_total_snaps);
+    ASSERT_EQ(table.refs->size(), 1);
+
+    transaction txn(std::move(table));
+    auto tx_outcome = txn.remove_expired_snapshots(now).get();
+    ASSERT_FALSE(tx_outcome.has_error());
+    ASSERT_EQ(
+      txn.table().snapshots->size(),
+      remove_snapshots_action::default_min_snapshots_retained);
+    ASSERT_EQ(txn.table().refs->size(), 1);
+}
+
+TEST_F(RemoveSnapshotsActionTest, TestRemoveSnapshotReferenceTransaction) {
+    const auto now = model::timestamp::now();
+    const auto expiry_age_ms
+      = remove_snapshots_action::default_max_snapshot_age_ms;
+    auto table = create_table();
+    auto id = add_snapshots(1, now.value() - expiry_age_ms - 1, &table);
+    auto& tag_ref = add_tag(id, "tag", &table);
+    tag_ref.max_snapshot_age_ms = expiry_age_ms;
+    tag_ref.max_ref_age_ms = expiry_age_ms;
+
+    ASSERT_EQ(table.snapshots->size(), 1);
+    ASSERT_EQ(table.refs->size(), 1);
+
+    transaction txn(std::move(table));
+    auto tx_outcome = txn.remove_expired_snapshots(now).get();
+    ASSERT_FALSE(tx_outcome.has_error());
+    ASSERT_EQ(txn.table().snapshots->size(), 0);
+    ASSERT_EQ(txn.table().refs->size(), 0);
 }

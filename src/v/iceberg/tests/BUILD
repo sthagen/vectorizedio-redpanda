@@ -294,6 +294,7 @@ redpanda_cc_gtest(
         "//src/v/iceberg:manifest_entry",
         "//src/v/iceberg:remove_snapshots_action",
         "//src/v/iceberg:table_metadata",
+        "//src/v/iceberg:transaction",
         "//src/v/random:generators",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
