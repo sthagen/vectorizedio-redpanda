@@ -10,10 +10,12 @@
  */
 #pragma once
 
-#include "cluster/types.h"
+#include "cluster/tx_protocol_types.h"
 #include "compat/check.h"
+#include "compat/cluster_json.h"
 #include "compat/commit_group_tx_generator.h"
 #include "compat/json.h"
+#include "compat/model_json.h"
 
 namespace compat {
 

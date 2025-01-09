@@ -13,6 +13,7 @@
 
 #include "cluster/errc.h"
 #include "cluster/partition_balancer_types.h"
+#include "cluster/tests/randoms.h"
 #include "compat/cluster_generator.h"
 #include "model/tests/randoms.h"
 #include "model/timestamp.h"

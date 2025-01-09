@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "cluster/tx_protocol_types.h"
 #include "cluster/types.h"
 #include "compat/begin_tx_generator.h"
 #include "compat/check.h"

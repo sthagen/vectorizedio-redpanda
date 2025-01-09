@@ -10,8 +10,9 @@
  */
 #pragma once
 
-#include "cluster/types.h"
+#include "cluster/tx_protocol_types.h"
 #include "compat/generator.h"
+#include "model/tests/randoms.h"
 #include "model/timeout_clock.h"
 #include "test_utils/randoms.h"
 

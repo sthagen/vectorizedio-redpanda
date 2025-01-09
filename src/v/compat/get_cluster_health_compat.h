@@ -12,8 +12,10 @@
 
 #include "cluster/types.h"
 #include "compat/check.h"
+#include "compat/cluster_json.h"
 #include "compat/get_cluster_health_generator.h"
 #include "compat/json.h"
+#include "compat/model_json.h"
 
 namespace compat {
 

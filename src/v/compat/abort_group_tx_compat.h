@@ -14,6 +14,7 @@
 #include "compat/abort_group_tx_generator.h"
 #include "compat/check.h"
 #include "compat/json.h"
+#include "compat/model_json.h"
 
 namespace compat {
 

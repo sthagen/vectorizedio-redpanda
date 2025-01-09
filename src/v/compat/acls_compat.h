@@ -12,7 +12,9 @@
 
 #include "cluster/types.h"
 #include "compat/acls_generator.h"
+#include "compat/acls_json.h"
 #include "compat/check.h"
+#include "compat/cluster_json.h"
 #include "compat/json.h"
 
 namespace compat {

@@ -10,8 +10,10 @@
  */
 #pragma once
 
+#include "bytes/random.h"
 #include "compat/generator.h"
 #include "model/tests/random_batch.h"
+#include "raft/transfer_leadership.h"
 #include "raft/types.h"
 #include "random/generators.h"
 #include "test_utils/randoms.h"

@@ -12,6 +12,7 @@
 
 #include "cluster/health_monitor_types.h"
 #include "cluster/types.h"
+#include "compat/acls_json.h"
 #include "compat/json.h"
 #include "compat/model_json.h"
 #include "compat/storage_json.h"
@@ -794,6 +795,79 @@ read_value(const json::Value& rd, cluster::topic_properties_update& tpu) {
     read_member(rd, "tp_ns", tpu.tp_ns);
     read_member(rd, "properties", tpu.properties);
     read_member(rd, "custom_properties", tpu.custom_properties);
+}
+
+inline void rjson_serialize(
+  json::Writer<json::StringBuffer>& w,
+  const cluster::partition_balancer_violations::unavailable_node& un) {
+    w.StartObject();
+    w.Key("id");
+    rjson_serialize(w, un.id);
+    w.Key("unavailable_since");
+    rjson_serialize(w, un.unavailable_since.value());
+    w.EndObject();
+}
+
+inline void read_value(
+  const json::Value& rd,
+  cluster::partition_balancer_violations::unavailable_node& un) {
+    read_member(rd, "id", un.id);
+    read_member(rd, "unavailable_since", un.unavailable_since);
+}
+
+inline void rjson_serialize(
+  json::Writer<json::StringBuffer>& w,
+  const cluster::partition_balancer_violations::full_node& fn) {
+    w.StartObject();
+    w.Key("id");
+    rjson_serialize(w, fn.id);
+    w.Key("disk_used_percent");
+    rjson_serialize(w, fn.disk_used_percent);
+    w.EndObject();
+}
+
+inline void read_value(
+  const json::Value& rd,
+  cluster::partition_balancer_violations::full_node& fn) {
+    read_member(rd, "id", fn.id);
+    read_member(rd, "disk_used_percent", fn.disk_used_percent);
+}
+
+inline void rjson_serialize(
+  json::Writer<json::StringBuffer>& w,
+  const cluster::partition_balancer_violations& violations) {
+    w.StartObject();
+    w.Key("unavailable_nodes");
+    rjson_serialize(w, violations.unavailable_nodes);
+    w.Key("full_nodes");
+    rjson_serialize(w, violations.full_nodes);
+    w.EndObject();
+}
+
+inline void read_value(
+  const json::Value& rd, cluster::partition_balancer_violations& violations) {
+    read_member(rd, "unavailable_nodes", violations.unavailable_nodes);
+    read_member(rd, "full_nodes", violations.full_nodes);
+}
+
+inline void
+read_value(const json::Value& rd, cluster::create_acls_cmd_data& data) {
+    read_member(rd, "bindings", data.bindings);
+}
+
+inline void rjson_serialize(
+  json::Writer<json::StringBuffer>& w,
+  const cluster::create_acls_cmd_data& data) {
+    w.StartObject();
+    w.Key("bindings");
+    rjson_serialize(w, data.bindings);
+    w.EndObject();
+}
+
+inline void
+read_value(const json::Value& rd, cluster::delete_acls_result& data) {
+    read_member(rd, "error", data.error);
+    read_member(rd, "bindings", data.bindings);
 }
 
 } // namespace json

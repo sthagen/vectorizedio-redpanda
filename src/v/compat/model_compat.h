@@ -14,6 +14,7 @@
 #include "compat/check.h"
 #include "compat/json.h"
 #include "compat/model_generator.h"
+#include "compat/model_json.h"
 #include "model/metadata.h"
 #include "model/record.h"
 

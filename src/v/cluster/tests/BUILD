@@ -6,6 +6,7 @@ redpanda_test_cc_library(
         "randoms.h",
     ],
     include_prefix = "cluster/tests",
+    visibility = ["//visibility:public"],
     deps = [
         "//src/v/cluster",
         "//src/v/model/tests:random",
