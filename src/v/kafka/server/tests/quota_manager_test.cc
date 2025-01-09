@@ -25,9 +25,17 @@
 #include <boost/test/unit_test.hpp>
 
 using namespace std::chrono_literals;
+using cluster::client_quota::entity_key;
+using cluster::client_quota::entity_value;
 using kafka::scale_to_smp_count;
 
+static const auto default_key = entity_key(
+  entity_key::client_id_default_match{});
 static const auto client_id = "franz-go";
+static const auto franz_go_key = entity_key{
+  entity_key::client_id_prefix_match{"franz-go"}};
+static const auto not_franz_go_key = entity_key{
+  entity_key::client_id_prefix_match{"not-franz-go"}};
 
 struct fixture {
     ss::sharded<cluster::client_quota::store> quota_store;
@@ -42,6 +50,28 @@ struct fixture {
     ~fixture() {
         sqm.stop().get();
         quota_store.stop().get();
+    }
+
+    void set_basic_quotas() {
+        auto default_values = entity_value{
+          .producer_byte_rate = scale_to_smp_count(1024),
+          .consumer_byte_rate = scale_to_smp_count(1025),
+          .controller_mutation_rate = scale_to_smp_count(1026),
+        };
+
+        auto franz_go_values = entity_value{
+          .producer_byte_rate = scale_to_smp_count(4096),
+          .consumer_byte_rate = scale_to_smp_count(4097),
+        };
+
+        auto not_franz_go_values = entity_value{
+          .producer_byte_rate = scale_to_smp_count(2048),
+          .consumer_byte_rate = scale_to_smp_count(2049),
+        };
+
+        quota_store.local().set_quota(default_key, default_values);
+        quota_store.local().set_quota(franz_go_key, franz_go_values);
+        quota_store.local().set_quota(not_franz_go_key, not_franz_go_values);
     }
 };
 
@@ -67,10 +97,6 @@ SEASTAR_THREAD_TEST_CASE(quota_manager_fetch_no_throttling) {
 SEASTAR_THREAD_TEST_CASE(quota_manager_fetch_throttling) {
     fixture f;
 
-    using cluster::client_quota::entity_key;
-    using cluster::client_quota::entity_value;
-
-    auto default_key = entity_key(entity_key::client_id_default_match{});
     auto default_values = entity_value{
       .consumer_byte_rate = 100,
     };
@@ -109,18 +135,13 @@ SEASTAR_THREAD_TEST_CASE(quota_manager_fetch_stress_test) {
           std::chrono::milliseconds::max());
     }).get();
 
-    using cluster::client_quota::entity_key;
-    using cluster::client_quota::entity_value;
-
-    auto default_key = entity_key(entity_key::client_id_default_match{});
     auto default_values = entity_value{
       .consumer_byte_rate = 100,
     };
     f.quota_store
-      .invoke_on_all(
-        [&default_key, &default_values](cluster::client_quota::store& store) {
-            store.set_quota(default_key, default_values);
-        })
+      .invoke_on_all([&default_values](cluster::client_quota::store& store) {
+          store.set_quota(default_key, default_values);
+      })
       .get();
 
     // Exercise the quota manager from multiple cores to attempt to
@@ -138,51 +159,12 @@ SEASTAR_THREAD_TEST_CASE(quota_manager_fetch_stress_test) {
       .get();
 }
 
-constexpr std::string_view raw_basic_produce_config = R"([
-  {
-    "group_name": "not-franz-go-group",
-    "clients_prefix": "not-franz-go",
-    "quota": 2048
-  },
-  {
-    "group_name": "franz-go-group",
-    "clients_prefix": "franz-go",
-    "quota": 4096
-  }
-])";
-
-constexpr std::string_view raw_basic_fetch_config = R"([
-  {
-    "group_name": "not-franz-go-group",
-    "clients_prefix": "not-franz-go",
-    "quota": 2049
-  },
-  {
-    "group_name": "franz-go-group",
-    "clients_prefix": "franz-go",
-    "quota": 4097
-  }
-])";
-
-constexpr auto basic_config = [](config::configuration& conf) {
-    // produce
-    conf.target_quota_byte_rate.set_value(1024);
-    conf.kafka_client_group_byte_rate_quota.set_value(
-      YAML::Load(std::string(raw_basic_produce_config)));
-    // fetch
-    conf.target_fetch_quota_byte_rate.set_value(1025);
-    conf.kafka_client_group_fetch_byte_rate_quota.set_value(
-      YAML::Load(std::string(raw_basic_fetch_config)));
-    // partition mutation rate
-    conf.kafka_admin_topic_api_rate.set_value(1026);
-};
-
 SEASTAR_THREAD_TEST_CASE(static_config_test) {
     using k_client_id = kafka::k_client_id;
     using k_group_name = kafka::k_group_name;
     fixture f;
 
-    set_config(basic_config).get();
+    f.set_basic_quotas();
 
     auto& buckets_map = f.sqm.local().get_global_map_for_testing();
 
@@ -193,7 +175,7 @@ SEASTAR_THREAD_TEST_CASE(static_config_test) {
         f.sqm.local().record_fetch_tp(client_id, 1).get();
         f.sqm.local().record_produce_tp_and_throttle(client_id, 1).get();
         f.sqm.local().record_partition_mutations(client_id, 1).get();
-        auto it = buckets_map->find(k_group_name{client_id + "-group"});
+        auto it = buckets_map->find(k_group_name{client_id});
         BOOST_REQUIRE(it != buckets_map->end());
         BOOST_REQUIRE(it->second->tp_produce_rate.has_value());
         BOOST_CHECK_EQUAL(
@@ -208,7 +190,7 @@ SEASTAR_THREAD_TEST_CASE(static_config_test) {
         f.sqm.local().record_fetch_tp(client_id, 1).get();
         f.sqm.local().record_produce_tp_and_throttle(client_id, 1).get();
         f.sqm.local().record_partition_mutations(client_id, 1).get();
-        auto it = buckets_map->find(k_group_name{client_id + "-group"});
+        auto it = buckets_map->find(k_group_name{client_id});
         BOOST_REQUIRE(it != buckets_map->end());
         BOOST_REQUIRE(it->second->tp_produce_rate.has_value());
         BOOST_CHECK_EQUAL(
@@ -243,7 +225,7 @@ SEASTAR_THREAD_TEST_CASE(update_test) {
     using k_client_id = kafka::k_client_id;
     fixture f;
 
-    set_config(basic_config).get();
+    f.set_basic_quotas();
 
     auto& buckets_map = f.sqm.local().get_global_map_for_testing();
 
@@ -259,17 +241,29 @@ SEASTAR_THREAD_TEST_CASE(update_test) {
             client_id, scale_to_smp_count(8192), now)
           .get();
 
-        set_config([](config::configuration& conf) {
-            auto fetch_config = YAML::Load(std::string(raw_basic_fetch_config));
-            for (auto n : fetch_config) {
-                n["quota"] = n["quota"].as<uint32_t>() + 1;
-            }
-            conf.kafka_client_group_fetch_byte_rate_quota.set_value(
-              fetch_config);
-        }).get();
+        // Increment the franz-go and not-franz-go group fetch quotas
+        auto franz_go_values = f.quota_store.local().get_quota(franz_go_key);
+        auto not_franz_go_values = f.quota_store.local().get_quota(
+          not_franz_go_key);
+
+        // Sanity check that the fetch quotas are present
+        auto has_fetch_quota = [](const auto& qv) {
+            return qv.has_value() && qv->consumer_byte_rate.has_value();
+        };
+        BOOST_REQUIRE(has_fetch_quota(franz_go_values));
+        BOOST_REQUIRE(has_fetch_quota(not_franz_go_values));
+
+        *franz_go_values->consumer_byte_rate += scale_to_smp_count(1);
+        *not_franz_go_values->consumer_byte_rate += scale_to_smp_count(1);
+
+        f.quota_store.local().set_quota(franz_go_key, *franz_go_values);
+        f.quota_store.local().set_quota(not_franz_go_key, *not_franz_go_values);
+
+        // Wait for the quota update to propagate
+        ss::sleep(std::chrono::milliseconds(1)).get();
 
         // Check the rate has been updated
-        auto it = buckets_map->find(k_group_name{client_id + "-group"});
+        auto it = buckets_map->find(k_group_name{client_id});
         BOOST_REQUIRE(it != buckets_map->end());
         BOOST_REQUIRE(it->second->tp_fetch_rate.has_value());
         BOOST_CHECK_EQUAL(
@@ -294,22 +288,18 @@ SEASTAR_THREAD_TEST_CASE(update_test) {
             client_id, scale_to_smp_count(8192), now)
           .get();
 
-        set_config([&](config::configuration& conf) {
-            auto produce_config = YAML::Load(
-              std::string(raw_basic_produce_config));
-            for (size_t i = 0; i < produce_config.size(); ++i) {
-                if (
-                  produce_config[i]["clients_prefix"].as<std::string>()
-                  == client_id) {
-                    produce_config.remove(i);
-                    break;
-                }
-            }
-            conf.kafka_client_group_byte_rate_quota.set_value(produce_config);
-        }).get();
+        auto franz_go_values = f.quota_store.local().get_quota(franz_go_key);
+        BOOST_REQUIRE(
+          franz_go_values.has_value()
+          && franz_go_values->producer_byte_rate.has_value());
+        franz_go_values->producer_byte_rate = std::nullopt;
+        f.quota_store.local().set_quota(franz_go_key, *franz_go_values);
+
+        // Wait for the quota update to propagate
+        ss::sleep(std::chrono::milliseconds(1)).get();
 
         // Check the produce rate has been updated on the group
-        auto it = buckets_map->find(k_group_name{client_id + "-group"});
+        auto it = buckets_map->find(k_group_name{client_id});
         BOOST_REQUIRE(it != buckets_map->end());
         BOOST_CHECK(!it->second->tp_produce_rate.has_value());
 
@@ -331,9 +321,6 @@ SEASTAR_THREAD_TEST_CASE(update_test) {
     }
 
     {
-        using cluster::client_quota::entity_key;
-        using cluster::client_quota::entity_value;
-
         // Update fetch config again using the quota store
         ss::sstring client_id = "franz-go";
         auto key = entity_key{entity_key::client_id_match{client_id}};

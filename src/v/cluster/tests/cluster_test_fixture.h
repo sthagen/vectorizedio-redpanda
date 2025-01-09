@@ -99,7 +99,6 @@ public:
           cloud_cfg,
           use_node_id,
           empty_seed_starts_cluster_val,
-          std::nullopt,
           false,
           enable_legacy_upload_mode,
           iceberg_enabled);
