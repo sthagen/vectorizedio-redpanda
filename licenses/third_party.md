@@ -200,45 +200,55 @@ cat /tmp/license.md | sort | uniq
 
 | software                                              | license                   |
 | :----------                                           | :------------:            |
-| cloud.google.com/go                                   | Apache License 2.0        |
+| cloud.google.com/go/compute/metadata                  | Apache License 2.0        |
+| connectrpc.com/connect                                | Apache License 2.0        |
 | github.com/AlecAivazis/survey/v2                      | MIT License               |
 | github.com/avast/retry-go                             | MIT License               |
 | github.com/aws/aws-sdk-go                             | Apache License 2.0        |
 | github.com/beevik/ntp                                 | BSD 2-Clause License      |
-| github.com/cespare/xxhash                             | MIT License               |
+| github.com/bufbuild/protocompile                      | Apache License 2.0        |
 | github.com/coreos/go-systemd/v22                      | Apache License 2.0        |
 | github.com/docker/docker                              | Apache License 2.0        |
 | github.com/docker/go-connections                      | Apache License 2.0        |
 | github.com/docker/go-units                            | Apache License 2.0        |
 | github.com/fatih/color                                | MIT License               |
+| github.com/google/uuid                               	| BSD 3-Clause License      |
+| github.com/hamba/avro/v2                              | MIT License               |
 | github.com/hashicorp/go-multierror                    | MPL-2.0                   |
+| github.com/kballard/go-shellquote                     | MIT License               |
+| github.com/kr/text                                    | MIT License               |
 | github.com/lestrrat-go/jwx                            | MIT License               |
+| github.com/linkedin/goavro/v2                         | Apache License 2.0        |
 | github.com/lorenzosaino/go-sysctl                     | BSD 3-Clause License      |
-| github.com/mattn/go-runewidth                         | MIT License               |
-| github.com/mitchellh/colorstring                      | MIT License               |
+| github.com/mattn/go-isatty                            | MIT License               |
 | github.com/moby/term                                  | Apache License 2.0        |
-| github.com/opencontainers/image-spec/specs-go         | Apache License 2.0        |
+| github.com/opencontainers/go-digest                   | Apache License 2.0        |
+| github.com/opencontainers/image-spec                  | Apache License 2.0        |
 | github.com/pkg/browser                                | BSD 2-Clause License      |
 | github.com/pkg/errors                                 | BSD 2-Clause License      |
-| github.com/prometheus/client_model/go                 | Apache License 2.0        |
+| github.com/prometheus/client_model                    | Apache License 2.0        |
 | github.com/prometheus/common                          | Apache License 2.0        |
-| github.com/rivo/uniseg                                | MIT License               |
+| github.com/rs/xid                                     | MIT License               |
 | github.com/safchain/ethtool                           | Apache License 2.0        |
+| github.com/santhosh-tekuri/jsonschema/v6              | Apache License 2.0        |
 | github.com/schollz/progressbar/v3                     | MIT License               |
-| github.com/sethgrid/pester                            | MIT License               |
 | github.com/spf13/afero                                | Apache License 2.0        |
 | github.com/spf13/cobra                                | Apache License 2.0        |
 | github.com/spf13/pflag                                | BSD 3-Clause License      |
 | github.com/tklauser/go-sysconf                        | BSD 3-Clause License      |
-| github.com/twmb/franz-go/pkg                          | BSD 3-Clause License      |
+| github.com/twmb/franz-go                              | BSD 3-Clause License      |
 | github.com/twmb/franz-go/pkg/kadm                     | BSD 3-Clause License      |
 | github.com/twmb/franz-go/pkg/kmsg                     | BSD 3-Clause License      |
+| github.com/twmb/franz-go/pkg/sr                       | BSD 3-Clause License      |
+| github.com/twmb/franz-go/plugin/kzap                  | BSD 3-Clause License      |
 | github.com/twmb/tlscfg                                | BSD 3-Clause License      |
 | github.com/twmb/types                                 | BSD 3-Clause License      |
 | go.uber.org/zap                                       | MIT License               |
-| golang.org/x/sync/errgroup                            | BSD 3-Clause License      |
-| golang.org/x/sys/unix                                 | BSD 3-Clause License      |
+| golang.org/x/exp                                      | BSD 3-Clause License      |
+| golang.org/x/sync                                     | BSD 3-Clause License      |
+| golang.org/x/sys                                      | BSD 3-Clause License      |
 | golang.org/x/term                                     | BSD 3-Clause License      |
+| google.golang.org/protobuf                            | BSD 3-Clause License      |
 | gopkg.in/yaml.v3                                      | MIT License               |
 | k8s.io/api                                            | Apache License 2.0        |
 | k8s.io/apimachinery/pkg                               | Apache License 2.0        |
