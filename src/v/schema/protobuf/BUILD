@@ -29,7 +29,7 @@ filegroup(
 proto_library(
     name = "schema_registry_protos",
     srcs = [":schema_registry_proto_files"],
-    strip_import_prefix = "/src/v/pandaproxy/schema_registry/protobuf/",
+    strip_import_prefix = "/src/v/schema/protobuf/",
     visibility = ["//visibility:public"],
     deps = [
         "@protobuf//:any_proto",
