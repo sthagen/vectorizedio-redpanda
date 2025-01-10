@@ -79,6 +79,7 @@ func executeK8SBundle(ctx context.Context, bp bundleParams) error {
 		saveMountedFilesystems(ps),
 		saveNTPDrift(ps),
 		saveResourceUsageData(ps, bp.y),
+		saveStartupLog(ps, bp.y),
 		saveSlabInfo(ps),
 		saveUname(ctx, ps),
 	}

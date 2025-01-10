@@ -152,6 +152,7 @@ func executeBundle(ctx context.Context, bp bundleParams) error {
 		saveResourceUsageData(ps, bp.y),
 		saveSingleAdminAPICalls(ctx, ps, bp.fs, bp.p, addrs, bp.cpuProfilerWait),
 		saveMetricsAPICalls(ctx, ps, bp.fs, bp.p, addrs, bp.metricsInterval, bp.metricsSampleCount),
+		saveStartupLog(ps, bp.y),
 		saveSlabInfo(ps),
 		saveSocketData(ctx, ps),
 		saveSysctl(ctx, ps),
@@ -1016,6 +1017,31 @@ func saveControllerLogDir(ps *stepParams, y *config.RedpandaYaml, logLimitBytes 
 			if err != nil {
 				return fmt.Errorf("unable to save controller logs: %v", err)
 			}
+		}
+		return nil
+	}
+}
+
+func saveStartupLog(ps *stepParams, y *config.RedpandaYaml) step {
+	return func() error {
+		if y.Redpanda.Directory == "" {
+			return fmt.Errorf("failed to save startup_log: 'redpanda.data_directory' is empty on the provided configuration file")
+		}
+		path := filepath.Join(y.Redpanda.Directory, "startup_log")
+		exists, err := afero.Exists(ps.fs, path)
+		if err != nil {
+			return fmt.Errorf("failed to save startup_log: unable to check existence of startup_log: %v", err)
+		}
+		if !exists {
+			return fmt.Errorf("skipping startup_log collection: unable to find file %q", path)
+		}
+		content, err := afero.ReadFile(ps.fs, path)
+		if err != nil {
+			return fmt.Errorf("failed to save startup_log: unable to read startup_log: %v", err)
+		}
+		err = writeFileToZip(ps, "startup_log", content)
+		if err != nil {
+			return fmt.Errorf("failed to save startup_log: %v", err)
 		}
 		return nil
 	}
