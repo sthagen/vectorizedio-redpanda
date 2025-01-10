@@ -322,8 +322,7 @@ public:
 
             auto result = co_await _ctx._stm->replicate(
               bid,
-              chunked_vector<model::record_batch>::single(
-                std::move(batches[0])),
+              std::move(batches[0]),
               raft::replicate_options(raft::consistency_level::quorum_ack));
             if (!result.has_value()) {
                 vlog(clusterlog.error, "Error {}", result.error());

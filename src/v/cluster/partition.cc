@@ -402,7 +402,7 @@ kafka_stages stages_with_units(
 
 kafka_stages partition::replicate_in_stages(
   model::batch_identity bid,
-  chunked_vector<model::record_batch> batches,
+  model::record_batch batch,
   raft::replicate_options opts) {
     using ret_t = result<kafka_result>;
 
@@ -430,13 +430,12 @@ kafka_stages partition::replicate_in_stages(
       hold_writes_enabled(),
       [this,
        bid = std::move(bid),
-       batches = std::move(batches),
+       batch = std::move(batch),
        opts = std::move(opts)]() mutable {
           if (_rm_stm) {
-              return _rm_stm->replicate_in_stages(
-                bid, std::move(batches), opts);
+              return _rm_stm->replicate_in_stages(bid, std::move(batch), opts);
           }
-          auto res = _raft->replicate_in_stages(std::move(batches), opts);
+          auto res = _raft->replicate_in_stages(std::move(batch), opts);
           auto replicate_finished = res.replicate_finished.then(
             [this](result<raft::replicate_result> r) {
                 if (!r) {
