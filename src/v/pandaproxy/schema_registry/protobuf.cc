@@ -937,7 +937,11 @@ struct protobuf_schema_definition::impl {
         for (const int i : oneofs) {
             const auto& decl = message.oneof_decl(i);
             fmt::print(os, "{:{}}oneof {} {{\n", "", indent + 2, decl.name());
-            for (const auto& field : message.field()) {
+            auto fields = maybe_sorted(
+              message.field(),
+              std::ranges::less{},
+              &pb::FieldDescriptorProto::number);
+            for (const auto& field : fields) {
                 if (field.has_oneof_index() && field.oneof_index() == i) {
                     auto d = descriptor->FindFieldByName(field.name());
                     render_field(os, edition, field, d, indent + 4);

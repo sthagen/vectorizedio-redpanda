@@ -980,8 +980,8 @@ message Bar {
   }
 
   oneof string_or_byte {
-    string string = 20;
     bytes bytes = 21;
+    string string = 20;
   }
 
   oneof integral {
@@ -1050,8 +1050,8 @@ message Bar {
   ];
 
   oneof string_or_byte {
-    string string = 20;
     bytes bytes = 21;
+    string string = 20;
   }
   oneof integral {
     double double = 7;
