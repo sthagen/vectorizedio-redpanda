@@ -10,8 +10,16 @@ redpanda_package(
         "//bazel/packaging/bin_wrapper:rpk",
     ],
     default_yaml_config = "//conf:redpanda.yaml",
+    include_sysroot_libs = True,
     redpanda_binary = "//:redpanda",
     rpk_binary = "//:rpk",
+)
+
+redpanda_package(
+    name = "vtools_input",
+    out = "bazel_out.tar.gz",
+    include_sysroot_libs = True,
+    redpanda_binary = "//:redpanda",
 )
 
 # This is the ID for the nonroot user in the distroless containers.
@@ -30,6 +38,7 @@ redpanda_package(
     rpk_binary = "//:rpk",
 )
 
+# NOTE: this image is currently experimental, don't use this for production.
 oci_image(
     name = "image",
     base = "@distroless_cc_debian12",

@@ -22,13 +22,13 @@ def _impl(ctx):
     # Collect all shared libraries from the sysroot that we used.
     shared_libraries = []
     cc_toolchain = find_cpp_toolchain(ctx)
-    if cc_toolchain.sysroot != None:
+    if cc_toolchain.sysroot != None and ctx.attr.include_sysroot_libs:
         for cc_file in cc_toolchain.all_files.to_list():
             if cc_file.path.startswith(cc_toolchain.sysroot) and _is_versioned_so(cc_file):
-                # TODO(bazel): figure out how to make this work properly and slim down the
-                # base image even more.
-                # shared_libraries.append(cc_file)
-                pass
+                # TODO(bazel): To make this work properly in containers/tarballs without
+                # vtools we need to run patchelf to set the interpreter to be the ld.so
+                # from the sysroot (vtools does this for us now).
+                shared_libraries.append(cc_file)
 
     # Collect all the shared libraries that we built as part of Redpanda.
     rp_runfiles = ctx.attr.redpanda_binary[DefaultInfo].default_runfiles.files.to_list()
@@ -42,23 +42,25 @@ def _impl(ctx):
     cfg_file = ctx.actions.declare_file("%s.config.json" % ctx.attr.name)
     cfg = {
         "redpanda_binary": ctx.file.redpanda_binary.path,
-        "rpk": ctx.file.rpk_binary.path,
+        "rpk": ctx.file.rpk_binary.path if ctx.file.rpk_binary else None,
         "shared_libraries": [solib.path for solib in shared_libraries],
-        "default_yaml_config": ctx.file.default_yaml_config.path,
+        "default_yaml_config": ctx.file.default_yaml_config.path if ctx.file.default_yaml_config else None,
         "bin_wrappers": [f.path for f in ctx.files.bin_wrappers],
         "owner": ctx.attr.owner,
     }
     ctx.actions.write(cfg_file, content = json.encode_indent(cfg))
 
+    inputs = [cfg_file, ctx.file.redpanda_binary] + shared_libraries + ctx.files.bin_wrappers
+
+    if ctx.file.rpk_binary:
+        inputs.append(ctx.file.rpk_binary)
+    if ctx.file.default_yaml_config:
+        inputs.append(ctx.file.default_yaml_config)
+
     # run the packaging tool
     ctx.actions.run(
         outputs = [ctx.outputs.out],
-        inputs = [
-            cfg_file,
-            ctx.file.redpanda_binary,
-            ctx.file.rpk_binary,
-            ctx.file.default_yaml_config,
-        ] + ctx.files.bin_wrappers + shared_libraries,
+        inputs = inputs,
         tools = [ctx.executable._tool],
         executable = ctx.executable._tool,
         arguments = [
@@ -81,20 +83,18 @@ redpanda_package = rule(
         ),
         "default_yaml_config": attr.label(
             allow_single_file = True,
-            mandatory = True,
         ),
         "bin_wrappers": attr.label_list(
             allow_files = True,
-            mandatory = True,
         ),
         "rpk_binary": attr.label(
             allow_single_file = True,
-            mandatory = True,
         ),
         "owner": attr.int(),
         "out": attr.output(
             mandatory = True,
         ),
+        "include_sysroot_libs": attr.bool(),
         "_tool": attr.label(
             executable = True,
             allow_files = True,

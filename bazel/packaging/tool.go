@@ -29,9 +29,9 @@ import (
 
 type pkgConfig struct {
 	RedpandaBinary    string   `json:"redpanda_binary"`
-	RPKBinary         string   `json:"rpk"`
+	RPKBinary         *string  `json:"rpk"`
 	SharedLibraries   []string `json:"shared_libraries"`
-	DefaultYAMLConfig string   `json:"default_yaml_config"`
+	DefaultYAMLConfig *string  `json:"default_yaml_config"`
 	BinWrappers       []string `json:"bin_wrappers"`
 	Owner             int      `json:"owner"`
 }
@@ -83,9 +83,11 @@ func createTarball(cfg pkgConfig, w io.Writer) error {
 		ops = append(ops, func() error { return writeDir(path) })
 	}
 
-	dir("etc/")
-	dir("etc/redpanda/")
-	file("etc/redpanda/redpanda.yaml", cfg.DefaultYAMLConfig)
+	if cfg.DefaultYAMLConfig != nil {
+		dir("etc/")
+		dir("etc/redpanda/")
+		file("etc/redpanda/redpanda.yaml", *cfg.DefaultYAMLConfig)
+	}
 	dir("opt/")
 	dir("opt/redpanda/")
 	dir("opt/redpanda/bin/")
@@ -98,7 +100,9 @@ func createTarball(cfg pkgConfig, w io.Writer) error {
 	}
 	dir("opt/redpanda/libexec/")
 	file("opt/redpanda/libexec/redpanda", cfg.RedpandaBinary)
-	file("opt/redpanda/libexec/rpk", cfg.RPKBinary)
+	if cfg.RPKBinary != nil {
+		file("opt/redpanda/libexec/rpk", *cfg.RPKBinary)
+	}
 	dir("var/")
 	dir("var/lib/")
 	dir("var/lib/redpanda/")
