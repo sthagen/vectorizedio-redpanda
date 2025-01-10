@@ -1,10 +1,8 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
 filegroup(
-    name = "schema_registry_proto_files",
+    name = "google_type_proto_files",
     srcs = [
-        "confluent/meta.proto",
-        "confluent/types/decimal.proto",
         "google/type/calendar_period.proto",
         "google/type/color.proto",
         "google/type/date.proto",
@@ -27,13 +25,11 @@ filegroup(
 )
 
 proto_library(
-    name = "schema_registry_protos",
-    srcs = [":schema_registry_proto_files"],
+    name = "google_type_protos",
+    srcs = [":google_type_proto_files"],
     strip_import_prefix = "/src/v/schema/protobuf/",
     visibility = ["//visibility:public"],
     deps = [
-        "@protobuf//:any_proto",
-        "@protobuf//:descriptor_proto",
         "@protobuf//:duration_proto",
         "@protobuf//:timestamp_proto",
         "@protobuf//:wrappers_proto",
@@ -41,7 +37,34 @@ proto_library(
 )
 
 cc_proto_library(
-    name = "schema_registry_cc_proto",
+    name = "google_type_cc_proto",
     visibility = ["//visibility:public"],
-    deps = [":schema_registry_protos"],
+    deps = [":google_type_protos"],
+)
+
+filegroup(
+    name = "confluent_type_proto_files",
+    srcs = [
+        "confluent/meta.proto",
+        "confluent/types/decimal.proto",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "confluent_type_protos",
+    srcs = [
+        ":confluent_type_proto_files",
+    ],
+    strip_import_prefix = "/src/v/schema/protobuf/",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@protobuf//:descriptor_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "confluent_type_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":confluent_type_protos"],
 )
