@@ -13,7 +13,6 @@
 
 #include "config/bounded_property.h"
 #include "config/broker_endpoint.h"
-#include "config/client_group_byte_rate_quota.h"
 #include "config/config_store.h"
 #include "config/convert.h"
 #include "config/data_directory_path.h"
@@ -108,8 +107,6 @@ private:
 
 struct configuration final : public config_store {
     using meta = base_property::metadata;
-    constexpr static auto target_produce_quota_byte_rate_default
-      = 0; // disabled
 
     // WAL
     bounded_property<uint64_t> log_segment_size;
@@ -192,9 +189,9 @@ struct configuration final : public config_store {
     bounded_property<int16_t> default_num_windows;
     bounded_property<std::chrono::milliseconds> default_window_sec;
     property<std::chrono::milliseconds> quota_manager_gc_sec;
-    bounded_property<uint32_t> target_quota_byte_rate;
-    property<std::optional<uint32_t>> target_fetch_quota_byte_rate;
-    bounded_property<std::optional<uint32_t>> kafka_admin_topic_api_rate;
+    deprecated_property target_quota_byte_rate;
+    deprecated_property target_fetch_quota_byte_rate;
+    deprecated_property kafka_admin_topic_api_rate;
     property<std::optional<ss::sstring>> cluster_id;
     property<bool> disable_metrics;
     property<bool> disable_public_metrics;
@@ -359,10 +356,8 @@ struct configuration final : public config_store {
     property<std::optional<uint32_t>> kafka_connections_max;
     property<std::optional<uint32_t>> kafka_connections_max_per_ip;
     property<std::vector<ss::sstring>> kafka_connections_max_overrides;
-    one_or_many_map_property<client_group_quota>
-      kafka_client_group_byte_rate_quota;
-    one_or_many_map_property<client_group_quota>
-      kafka_client_group_fetch_byte_rate_quota;
+    deprecated_property kafka_client_group_byte_rate_quota;
+    deprecated_property kafka_client_group_fetch_byte_rate_quota;
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_recv_buf;
     bounded_property<std::optional<int>> kafka_rpc_server_tcp_send_buf;
     bounded_property<std::optional<size_t>> kafka_rpc_server_stream_recv_buf;
@@ -668,6 +663,7 @@ struct configuration final : public config_store {
     config::property<size_t> kafka_schema_id_validation_cache_capacity;
 
     property<bool> schema_registry_normalize_on_startup;
+    property<bool> schema_registry_protobuf_renderer_v2;
     property<std::optional<uint32_t>> pp_sr_smp_max_non_local_requests;
     bounded_property<size_t> max_in_flight_schema_registry_requests_per_shard;
     bounded_property<size_t> max_in_flight_pandaproxy_requests_per_shard;

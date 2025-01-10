@@ -17,6 +17,7 @@
 #include "pandaproxy/schema_registry/schema_id_cache.h"
 #include "pandaproxy/schema_registry/service.h"
 #include "pandaproxy/schema_registry/sharded_store.h"
+#include "pandaproxy/schema_registry/types.h"
 #include "pandaproxy/schema_registry/validation_metrics.h"
 
 #include <seastar/core/coroutine.hh>
@@ -44,7 +45,8 @@ api::api(
 api::~api() noexcept = default;
 
 ss::future<> api::start() {
-    _store = std::make_unique<sharded_store>();
+    _store = std::make_unique<sharded_store>(protobuf_renderer_v2{
+      config::shard_local_cfg().schema_registry_protobuf_renderer_v2});
     co_await _store->start(is_mutable(_cfg.mode_mutability), _sg);
     co_await _schema_id_validation_probe.start();
     co_await _schema_id_validation_probe.invoke_on_all(

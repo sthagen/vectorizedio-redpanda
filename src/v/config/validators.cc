@@ -11,7 +11,6 @@
 
 #include "config/validators.h"
 
-#include "config/client_group_byte_rate_quota.h"
 #include "config/configuration.h"
 #include "model/namespace.h"
 #include "model/validation.h"
@@ -76,36 +75,6 @@ validate_connection_rate(const std::vector<ss::sstring>& ips_with_limit) {
         if (!ip_set.insert(addr).second) {
             return fmt::format(
               "Duplicate setting for ip: {}", parsing_setting->first);
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<ss::sstring> validate_client_groups_byte_rate_quota(
-  const std::unordered_map<ss::sstring, config::client_group_quota>&
-    groups_with_limit) {
-    for (const auto& gal : groups_with_limit) {
-        if (gal.second.quota <= 0) {
-            return fmt::format(
-              "Quota must be a non zero positive number, got: {}",
-              gal.second.quota);
-        }
-
-        for (const auto& another_group : groups_with_limit) {
-            if (another_group.first == gal.first) {
-                continue;
-            }
-            if (std::string_view(gal.second.clients_prefix)
-                  .starts_with(
-                    std::string_view(another_group.second.clients_prefix))) {
-                return fmt::format(
-                  "Group client prefix can not be prefix for another group "
-                  "name. "
-                  "Violation: {}, {}",
-                  gal.second.clients_prefix,
-                  another_group.second.clients_prefix);
-            }
         }
     }
 

@@ -548,28 +548,9 @@ configuration::configuration()
       "Quota manager GC frequency in milliseconds.",
       {.visibility = visibility::tunable},
       std::chrono::milliseconds(30000))
-  , target_quota_byte_rate(
-      *this,
-      "target_quota_byte_rate",
-      "Target request size quota byte rate (bytes per second)",
-      {.needs_restart = needs_restart::no,
-       .example = "1073741824",
-       .visibility = visibility::user},
-      target_produce_quota_byte_rate_default,
-      {.min = 0})
-  , target_fetch_quota_byte_rate(
-      *this,
-      "target_fetch_quota_byte_rate",
-      "Target fetch size quota byte rate (bytes per second) - disabled default",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      std::nullopt)
-  , kafka_admin_topic_api_rate(
-      *this,
-      "kafka_admin_topic_api_rate",
-      "Target quota rate (partition mutations per default_window_sec)",
-      {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      std::nullopt,
-      {.min = 1})
+  , target_quota_byte_rate(*this, "target_quota_byte_rate")
+  , target_fetch_quota_byte_rate(*this, "target_fetch_quota_byte_rate")
+  , kafka_admin_topic_api_rate(*this, "kafka_admin_topic_api_rate")
   , cluster_id(
       *this,
       "cluster_id",
@@ -1700,28 +1681,9 @@ configuration::configuration()
       {},
       validate_connection_rate)
   , kafka_client_group_byte_rate_quota(
-      *this,
-      "kafka_client_group_byte_rate_quota",
-      "Per-group target produce quota byte rate (bytes per second). Client is "
-      "considered part of the group if client_id contains clients_prefix.",
-      {.needs_restart = needs_restart::no,
-       .example
-       = R"([{'group_name': 'first_group','clients_prefix': 'group_1','quota': 10240}])",
-       .visibility = visibility::user},
-      {},
-      validate_client_groups_byte_rate_quota)
+      *this, "kafka_client_group_byte_rate_quota")
   , kafka_client_group_fetch_byte_rate_quota(
-      *this,
-      "kafka_client_group_fetch_byte_rate_quota",
-      "Per-group target fetch quota byte rate (bytes per second). "
-      "Client is considered part of the group if client_id contains "
-      "clients_prefix",
-      {.needs_restart = needs_restart::no,
-       .example
-       = R"([{'group_name': 'first_group','clients_prefix': 'group_1','quota': 10240}])",
-       .visibility = visibility::user},
-      {},
-      validate_client_groups_byte_rate_quota)
+      *this, "kafka_client_group_fetch_byte_rate_quota")
   , kafka_rpc_server_tcp_recv_buf(
       *this,
       "kafka_rpc_server_tcp_recv_buf",
@@ -3525,6 +3487,12 @@ configuration::configuration()
       "schema_registry_normalize_on_startup",
       "Normalize schemas as they are read from the topic on startup.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      false)
+  , schema_registry_protobuf_renderer_v2(
+      *this,
+      "schema_registry_protobuf_renderer_v2",
+      "Enables experimental protobuf renderer to support normalize=true.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
       false)
   , pp_sr_smp_max_non_local_requests(
       *this,
