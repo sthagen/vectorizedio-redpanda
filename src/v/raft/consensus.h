@@ -253,6 +253,8 @@ public:
       replicate(model::record_batch, replicate_options);
     replicate_stages replicate_in_stages(
       chunked_vector<model::record_batch>, replicate_options);
+    replicate_stages
+      replicate_in_stages(model::record_batch, replicate_options);
     uint64_t get_snapshot_size() const { return _snapshot_size; }
 
     std::optional<state_machine_manager>& stm_manager() { return _stm_manager; }
@@ -286,7 +288,8 @@ public:
       replicate(model::term_id, model::record_batch, replicate_options);
     replicate_stages replicate_in_stages(
       model::term_id, chunked_vector<model::record_batch>, replicate_options);
-
+    replicate_stages replicate_in_stages(
+      model::term_id, model::record_batch, replicate_options);
     ss::future<model::record_batch_reader> make_reader(
       storage::log_reader_config,
       std::optional<clock_type::time_point> = std::nullopt);
