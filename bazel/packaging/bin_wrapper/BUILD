@@ -7,7 +7,7 @@ go_binary(
     srcs = ["main.go"],
     visibility = ["//bazel/packaging:__pkg__"],
     x_defs = {
-        "BinaryPath": "/opt/redpanda/libexec/rpk",
+        "binaryPath": "/opt/redpanda/libexec/rpk",
     },
 )
 
@@ -16,7 +16,7 @@ go_binary(
     srcs = ["main.go"],
     visibility = ["//bazel/packaging:__pkg__"],
     x_defs = {
-        "BinaryPath": "/opt/redpanda/libexec/redpanda",
-        "LDLibraryPath": "/opt/redpanda/lib",
+        "binaryPath": "/opt/redpanda/libexec/redpanda",
+        "ldLibraryPath": "/opt/redpanda/lib",
     },
 )

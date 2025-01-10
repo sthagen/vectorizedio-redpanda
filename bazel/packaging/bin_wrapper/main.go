@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	LDLibraryPath = ""
-	BinaryPath    = ""
+	ldLibraryPath = ""
+	binaryPath    = ""
 )
 
 func main() {
@@ -31,8 +31,8 @@ func main() {
 	}
 	env := slices.DeleteFunc(os.Environ(), func(envvar string) bool { return strings.HasPrefix(envvar, "PATH=") })
 	env = append(env, path)
-	if LDLibraryPath != "" {
-		env = append(env, "LD_LIBRARY_PATH="+LDLibraryPath)
+	if ldLibraryPath != "" {
+		env = append(env, "LD_LIBRARY_PATH="+ldLibraryPath)
 	}
-	syscall.Exec(BinaryPath, os.Args, env)
+	syscall.Exec(binaryPath, os.Args, env)
 }
