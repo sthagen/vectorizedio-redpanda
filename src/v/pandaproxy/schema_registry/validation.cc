@@ -355,7 +355,7 @@ public:
         co_return valid;
     }
 
-    ss::future<result> operator()(model::record_batch batch) {
+    ss::future<result> operator()(std::unique_ptr<model::record_batch> batch) {
         if (!_api) {
             // If Schema Registry is not enabled, the safe default is to reject
             co_return kafka::error_code::invalid_record;
@@ -366,13 +366,13 @@ public:
             co_return std::move(batch);
         }
 
-        auto valid = co_await validate(batch);
+        auto valid = co_await validate(*batch);
 
         if (!valid) {
             // It's possible that the schema registry doesn't have a newly
             // written schema, update and retry.
             co_await _api->_sequencer.local().read_sync();
-            valid = co_await validate(batch);
+            valid = co_await validate(*batch);
         }
 
         if (!valid) {
@@ -448,7 +448,7 @@ std::optional<schema_id_validator> maybe_make_schema_id_validator(
 }
 
 ss::future<schema_id_validator::result> schema_id_validator::operator()(
-  model::record_batch batch, cluster::partition_probe* probe) {
+  std::unique_ptr<model::record_batch> batch, cluster::partition_probe* probe) {
     using futurator = ss::futurize<schema_id_validator::result>;
     return (*_impl)(std::move(batch))
       .handle_exception([](std::exception_ptr e) {

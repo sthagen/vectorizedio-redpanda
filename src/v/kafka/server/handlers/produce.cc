@@ -165,13 +165,13 @@ static partition_produce_stages partition_append(
   model::partition_id id,
   ss::lw_shared_ptr<replicated_partition> partition,
   model::batch_identity bid,
-  model::record_batch batch,
+  std::unique_ptr<model::record_batch> batch,
   int16_t acks,
   int32_t num_records,
   int64_t num_bytes,
   std::chrono::milliseconds timeout_ms) {
     auto stages = partition->replicate(
-      bid, std::move(batch), acks_to_replicate_options(acks, timeout_ms));
+      bid, std::move(*batch), acks_to_replicate_options(acks, timeout_ms));
     return partition_produce_stages{
       .dispatched = std::move(stages.request_enqueued),
       .produced = stages.replicate_finished.then_wrapped(
@@ -316,7 +316,8 @@ static partition_produce_stages produce_topic_partition(
     }
 
     // steal the batch from the adapter
-    auto batch = std::move(part.records->adapter.batch.value());
+    auto batch = std::make_unique<model::record_batch>(
+      std::move(part.records->adapter.batch.value()));
 
     auto topic_cfg = octx.rctx.metadata_cache().get_topic_cfg(
       model::topic_namespace_view(model::kafka_namespace, topic.name));
@@ -335,15 +336,15 @@ static partition_produce_stages produce_topic_partition(
     // validate the batch timestamps by checking skew against broker time
     if (
       auto new_timestamp = validate_batch_timestamps(
-        ntp, batch.header(), timestamp_type, octx.rctx.server_probe())) {
-        batch.set_max_timestamp(
+        ntp, batch->header(), timestamp_type, octx.rctx.server_probe())) {
+        batch->set_max_timestamp(
           model::timestamp_type::append_time, new_timestamp.value());
     }
 
-    const auto& hdr = batch.header();
+    const auto& hdr = batch->header();
     auto bid = model::batch_identity::from(hdr);
-    auto batch_size = batch.size_bytes();
-    auto num_records = batch.record_count();
+    auto batch_size = batch->size_bytes();
+    auto num_records = batch->record_count();
     auto validator
       = pandaproxy::schema_registry::maybe_make_schema_id_validator(
         octx.rctx.schema_registry(), topic.name, topic_cfg->properties);
@@ -411,8 +412,9 @@ static partition_produce_stages produce_topic_partition(
                          source_shard,
                          num_records,
                          batch_size,
-                         timeout](result<model::record_batch, kafka::error_code>
-                                    batch) mutable {
+                         timeout](result<
+                                  std::unique_ptr<model::record_batch>,
+                                  kafka::error_code> batch) mutable {
                       if (batch.has_error()) {
                           return finalize_request_with_error_code(
                             batch.error(),
