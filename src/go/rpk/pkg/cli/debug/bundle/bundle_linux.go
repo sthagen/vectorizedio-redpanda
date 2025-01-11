@@ -135,6 +135,7 @@ func executeBundle(ctx context.Context, bp bundleParams) error {
 		saveCmdLine(ps),
 		saveConfig(ps, bp.y),
 		saveControllerLogDir(ps, bp.y, bp.controllerLogLimitBytes),
+		saveCrashReports(ps, bp.y),
 		saveDNSData(ctx, ps),
 		saveDataDirStructure(ps, bp.y),
 		saveDiskUsage(ctx, ps, bp.y),
@@ -1042,6 +1043,27 @@ func saveStartupLog(ps *stepParams, y *config.RedpandaYaml) step {
 		err = writeFileToZip(ps, "startup_log", content)
 		if err != nil {
 			return fmt.Errorf("failed to save startup_log: %v", err)
+		}
+		return nil
+	}
+}
+
+func saveCrashReports(ps *stepParams, y *config.RedpandaYaml) step {
+	return func() error {
+		if y.Redpanda.Directory == "" {
+			return fmt.Errorf("failed to save crash_reports: 'redpanda.data_directory' is empty on the provided configuration file")
+		}
+		crashReportDir := filepath.Join(y.Redpanda.Directory, "crash_reports")
+		exists, err := afero.Exists(ps.fs, crashReportDir)
+		if err != nil {
+			return fmt.Errorf("failed to save crash_reports: unable to check existence of the crash_reports directory")
+		}
+		if !exists {
+			return fmt.Errorf("skipping crash_reports collection: directory %q does not exists", crashReportDir)
+		}
+		err = writeDirToZip(ps, crashReportDir, "crash_reports", nil)
+		if err != nil {
+			return fmt.Errorf("failed to save crash_reports: %v", err)
 		}
 		return nil
 	}
