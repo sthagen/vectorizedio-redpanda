@@ -47,18 +47,22 @@ static batches_with_identity make_rreader(
   int first_seq,
   int count,
   bool is_transactional) {
-    return batches_with_identity{
-      .id = model::
-        batch_identity{.pid = pid, .first_seq = first_seq, .last_seq = first_seq + count - 1, .record_count = count, .is_transactional = is_transactional},
-      .batches = random_batches(model::test::record_batch_spec{
-                                  .offset = model::offset(0),
-                                  .allow_compression = true,
-                                  .count = count,
-                                  .producer_id = pid.id,
-                                  .producer_epoch = pid.epoch,
-                                  .base_sequence = first_seq,
-                                  .is_transactional = is_transactional})
-                   .get()};
+    batches_with_identity result;
+    result.id = {
+      .pid = pid,
+      .first_seq = first_seq,
+      .last_seq = first_seq + count - 1,
+      .record_count = count,
+      .is_transactional = is_transactional};
+    result.batches.push_back(model::test::make_random_batch(
+      {.offset = model::offset(0),
+       .allow_compression = true,
+       .count = count,
+       .producer_id = pid.id,
+       .producer_epoch = pid.epoch,
+       .base_sequence = first_seq,
+       .is_transactional = is_transactional}));
+    return result;
 }
 
 void check_snapshot_sizes(cluster::rm_stm& stm, raft::consensus* c) {
