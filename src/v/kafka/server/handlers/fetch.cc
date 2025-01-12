@@ -80,20 +80,17 @@ make_partition_response_error(model::partition_id p_id, error_code error) {
  */
 static ss::future<read_result> read_from_partition(
   kafka::partition_proxy part,
+  model::offset lso,
   fetch_config config,
   bool foreign_read,
   std::optional<model::timeout_clock::time_point> deadline) {
-    auto lso = part.last_stable_offset();
-    if (unlikely(!lso)) {
-        co_return read_result(lso.error());
-    }
     auto hw = part.high_watermark();
     auto start_o = part.start_offset();
     // if we have no data read, return fast
     if (
       hw < config.start_offset || config.skip_read
       || config.start_offset > config.max_offset) {
-        co_return read_result(start_o, hw, lso.value());
+        co_return read_result(start_o, hw, lso);
     }
 
     storage::log_reader_config reader_config(
@@ -173,7 +170,7 @@ static ss::future<read_result> read_from_partition(
           ss::make_foreign<read_result::data_t>(std::move(data)),
           start_o,
           hw,
-          lso.value(),
+          lso,
           delta_from_tip_ms,
           std::move(aborted_transactions));
     }
@@ -182,7 +179,7 @@ static ss::future<read_result> read_from_partition(
       std::move(data),
       start_o,
       hw,
-      lso.value(),
+      lso,
       delta_from_tip_ms,
       std::move(aborted_transactions));
 }
@@ -345,15 +342,16 @@ static ss::future<read_result> do_read_from_ntp(
       ntp_config.cfg.read_from_follower,
       default_fetch_timeout + model::timeout_clock::now());
 
+    auto maybe_lso = kafka_partition->last_stable_offset();
+    if (unlikely(!maybe_lso)) {
+        // partition is still bootstrapping
+        co_return read_result(maybe_lso.error());
+    }
+
     if (config::shard_local_cfg().enable_transactions.value()) {
         if (
           ntp_config.cfg.isolation_level
           == model::isolation_level::read_committed) {
-            auto maybe_lso = kafka_partition->last_stable_offset();
-            if (unlikely(!maybe_lso)) {
-                // partition is still bootstrapping
-                co_return read_result(maybe_lso.error());
-            }
             ntp_config.cfg.max_offset = model::prev_offset(maybe_lso.value());
         }
     }
@@ -374,10 +372,6 @@ static ss::future<read_result> do_read_from_ntp(
         }
         auto p_info = std::move(p_info_res.value());
 
-        auto lso = kafka_partition->last_stable_offset();
-        if (unlikely(!lso)) {
-            co_return read_result(lso.error());
-        }
         auto preferred_replica = replica_selector.select_replica(
           consumer_info{
             .fetch_offset = ntp_config.cfg.start_offset,
@@ -392,12 +386,16 @@ static ss::future<read_result> do_read_from_ntp(
             co_return read_result(
               kafka_partition->start_offset(),
               kafka_partition->high_watermark(),
-              lso.value(),
+              maybe_lso.value(),
               preferred_replica);
         }
     }
     read_result result = co_await read_from_partition(
-      std::move(*kafka_partition), ntp_config.cfg, foreign_read, deadline);
+      std::move(*kafka_partition),
+      maybe_lso.value(),
+      ntp_config.cfg,
+      foreign_read,
+      deadline);
 
     adjust_memory_units(
       memory_sem, memory_fetch_sem, memory_units, result.data_size_bytes());
