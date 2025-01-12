@@ -250,7 +250,10 @@ struct read_result {
     };
 
     explicit read_result(error_code e)
-      : error(e) {}
+      : start_offset(-1)
+      , high_watermark(-1)
+      , last_stable_offset(-1)
+      , error(e) {}
 
     // special case for offset_out_of_range_error
     read_result(
