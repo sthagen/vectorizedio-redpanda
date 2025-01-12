@@ -5,8 +5,10 @@ v_cc_library(
   NAME datalake_test_utils
   HDRS
     record_generator.h
+    test_utils.h
   SRCS
     record_generator.cc
+    test_utils.cc
   DEPS
     Avro::avro
     Seastar::seastar

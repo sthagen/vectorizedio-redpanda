@@ -13,7 +13,6 @@
 #include "datalake/coordinator/file_committer.h"
 #include "datalake/coordinator/state.h"
 #include "datalake/coordinator/translated_offset_range.h"
-#include "datalake/table_creator.h"
 #include "model/fundamental.h"
 
 #include <gtest/gtest.h>

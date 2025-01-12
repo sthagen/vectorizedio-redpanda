@@ -551,15 +551,10 @@ redpanda_cc_library(
     hdrs = [
         "table_creator.h",
     ],
-    implementation_deps = [
-        ":record_translator",
-        ":table_id_provider",
-    ],
     include_prefix = "datalake",
     visibility = [":__subpackages__"],
     deps = [
-        ":catalog_schema_manager",
-        ":record_schema_resolver",
+        ":schema_identifier",
     ],
 )
 
