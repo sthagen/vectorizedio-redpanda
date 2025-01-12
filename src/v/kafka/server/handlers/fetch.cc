@@ -467,10 +467,22 @@ static void fill_fetch_responses(
         auto& res = results[idx];
         const auto& resp_it = responses[idx];
 
+        fetch_response::partition_response resp;
+        resp.partition_index = res.partition;
+        resp.error_code = res.error;
+
+        // These are set to -1 in the general error case.
+        // Set to actual values in the success case or when the error is
+        // offset_out_of_range as the client can make use of the returned
+        // offsets.
+        resp.log_start_offset = res.start_offset;
+        resp.high_watermark = res.high_watermark;
+        resp.last_stable_offset = res.last_stable_offset;
+
         // error case
-        if (unlikely(res.error != error_code::none)) {
-            resp_it->set(
-              make_partition_response_error(res.partition, res.error));
+        if (unlikely(resp.error_code != error_code::none)) {
+            resp.records = batch_reader();
+            resp_it->set(std::move(resp));
             continue;
         }
 
@@ -486,12 +498,6 @@ static void fill_fetch_responses(
          * Over response budget, we will just waste this read, it will cause
          * data to be stored in the cache so next read is fast
          */
-        fetch_response::partition_response resp;
-        resp.partition_index = res.partition;
-        resp.error_code = error_code::none;
-        resp.log_start_offset = res.start_offset;
-        resp.high_watermark = res.high_watermark;
-        resp.last_stable_offset = res.last_stable_offset;
         if (res.preferred_replica) {
             resp.preferred_read_replica = *res.preferred_replica;
         }
