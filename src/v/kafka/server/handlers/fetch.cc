@@ -71,6 +71,7 @@ make_partition_response_error(model::partition_id p_id, error_code error) {
       .error_code = error,
       .high_watermark = model::offset(-1),
       .last_stable_offset = model::offset(-1),
+      .log_start_offset = model::offset(-1),
       .records = batch_reader(),
     };
 }
