@@ -19,7 +19,6 @@
 #include "datalake/coordinator/state_machine.h"
 #include "datalake/logger.h"
 #include "datalake/record_schema_resolver.h"
-#include "datalake/table_creator.h"
 #include "iceberg/manifest_io.h"
 #include "model/fundamental.h"
 #include "schema/registry.h"
@@ -54,8 +53,6 @@ coordinator_manager::~coordinator_manager() = default;
 ss::future<> coordinator_manager::start() {
     catalog_ = co_await catalog_factory_->create_catalog();
     schema_mgr_ = std::make_unique<catalog_schema_manager>(*catalog_);
-    table_creator_ = std::make_unique<direct_table_creator>(
-      *type_resolver_, *schema_mgr_);
     file_committer_ = std::make_unique<iceberg_file_committer>(
       *catalog_, manifest_io_);
 
@@ -120,7 +117,8 @@ void coordinator_manager::start_managing(cluster::partition& p) {
     auto crd = ss::make_lw_shared<coordinator>(
       std::move(stm),
       topics_,
-      *table_creator_,
+      *type_resolver_,
+      *schema_mgr_,
       [this](const model::topic& t, model::revision_id rev) {
           return remove_tombstone(t, rev);
       },

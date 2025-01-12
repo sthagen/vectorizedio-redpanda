@@ -12,11 +12,12 @@
 #include "base/vlog.h"
 #include "cluster/topic_table.h"
 #include "container/fragmented_vector.h"
+#include "datalake/catalog_schema_manager.h"
 #include "datalake/coordinator/state_update.h"
 #include "datalake/logger.h"
-#include "datalake/table_creator.h"
+#include "datalake/record_translator.h"
+#include "datalake/table_id_provider.h"
 #include "model/fundamental.h"
-#include "model/record_batch_reader.h"
 #include "ssx/future-util.h"
 #include "ssx/sleep_abortable.h"
 #include "storage/record_batch_builder.h"
@@ -280,15 +281,28 @@ coordinator::sync_ensure_table_exists(
 
     // TODO: verify stm state after replication
 
-    auto ensure_res = co_await table_creator_.ensure_table(
-      topic, topic_revision, std::move(comps));
+    auto table_id = table_id_provider::table_id(topic);
+
+    std::optional<resolved_type> val_type;
+    if (comps.val_identifier) {
+        auto type_res = co_await type_resolver_.resolve_identifier(
+          comps.val_identifier.value());
+        if (type_res.has_error()) {
+            co_return errc::failed;
+        }
+        val_type = std::move(type_res.value());
+    }
+
+    auto record_type = default_translator{}.build_type(std::move(val_type));
+    auto ensure_res = co_await schema_mgr_.ensure_table_schema(
+      table_id, record_type.type);
     if (ensure_res.has_error()) {
         switch (ensure_res.error()) {
-        case table_creator::errc::incompatible_schema:
+        case schema_manager::errc::not_supported:
             co_return errc::incompatible_schema;
-        case table_creator::errc::failed:
+        case schema_manager::errc::failed:
             co_return errc::failed;
-        case table_creator::errc::shutting_down:
+        case schema_manager::errc::shutting_down:
             co_return errc::shutting_down;
         }
     }

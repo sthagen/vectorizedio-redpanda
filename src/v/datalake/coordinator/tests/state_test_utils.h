@@ -22,15 +22,6 @@
 
 namespace datalake::coordinator {
 
-class noop_table_creator : public table_creator {
-    ss::future<checked<std::nullopt_t, errc>> ensure_table(
-      const model::topic&,
-      model::revision_id,
-      record_schema_components) const final {
-        co_return std::nullopt;
-    }
-};
-
 // Simple committer that returns the set of updates that would mark all the
 // pending files as committed. Doesn't affect any external state.
 class simple_file_committer : public file_committer {

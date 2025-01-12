@@ -38,9 +38,12 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         "//src/v/base",
+        "//src/v/datalake:catalog_schema_manager",
         "//src/v/datalake:logger",
+        "//src/v/datalake:record_schema_resolver",
+        "//src/v/datalake:record_translator",
         "//src/v/datalake:schema_identifier",
-        "//src/v/datalake:table_creator",
+        "//src/v/datalake:table_id_provider",
         "//src/v/datalake:types",
         "//src/v/ssx:future_util",
         "//src/v/ssx:sleep_abortable",
