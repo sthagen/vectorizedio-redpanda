@@ -151,7 +151,8 @@ static ss::future<read_result> read_from_partition(
                 co_return read_result(
                   error_code::offset_out_of_range,
                   start_o,
-                  part.high_watermark());
+                  part.high_watermark(),
+                  lso);
             }
         }
 
@@ -360,7 +361,8 @@ static ss::future<read_result> do_read_from_ntp(
         co_return read_result(
           offset_ec,
           kafka_partition->start_offset(),
-          kafka_partition->high_watermark());
+          kafka_partition->high_watermark(),
+          maybe_lso.value());
     }
     if (
       config::shard_local_cfg().enable_rack_awareness.value()
