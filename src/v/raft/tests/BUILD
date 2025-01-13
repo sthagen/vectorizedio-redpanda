@@ -1,7 +1,7 @@
 load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
-    name = "simple_raft_fixture_btest",
+    name = "simple_raft_fixture",
     hdrs = [
         "simple_raft_fixture.h",
     ],
@@ -15,28 +15,7 @@ redpanda_test_cc_library(
         "//src/v/random:generators",
         "//src/v/rpc",
         "//src/v/storage",
-        "//src/v/test_utils:seastar_boost",
-        "//src/v/utils:unresolved_address",
-        "@seastar",
-    ],
-)
-
-redpanda_test_cc_library(
-    name = "simple_raft_fixture_gtest",
-    hdrs = [
-        "simple_raft_fixture.h",
-    ],
-    include_prefix = "raft/tests",
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/v/base",
-        "//src/v/config",
-        "//src/v/model",
-        "//src/v/raft",
-        "//src/v/random:generators",
-        "//src/v/rpc",
-        "//src/v/storage",
-        "//src/v/test_utils:gtest",
+        "//src/v/test_utils:fixture",
         "//src/v/utils:unresolved_address",
         "@seastar",
     ],
@@ -682,7 +661,7 @@ redpanda_cc_gtest(
         "//src/v/raft",
         "//src/v/raft/tests:raft_fixiture_retry_policy",
         "//src/v/raft/tests:raft_fixture",
-        "//src/v/raft/tests:simple_raft_fixture_gtest",
+        "//src/v/raft/tests:simple_raft_fixture",
         "//src/v/reflection:adl",
         "//src/v/storage:record_batch_builder",
         "//src/v/storage/tests:disk_log_builder",
