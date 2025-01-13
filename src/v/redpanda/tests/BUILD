@@ -24,7 +24,7 @@ redpanda_test_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":fixture_base",
-        "//src/v/cloud_storage/tests:s3_imposter_btest",
+        "//src/v/cloud_storage/tests:s3_imposter",
     ],
 )
 
@@ -39,6 +39,6 @@ redpanda_test_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":fixture_base",
-        "//src/v/cloud_storage/tests:s3_imposter_gtest",
+        "//src/v/cloud_storage/tests:s3_imposter",
     ],
 )
