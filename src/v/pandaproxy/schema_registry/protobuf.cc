@@ -833,12 +833,12 @@ struct protobuf_schema_definition::impl {
       int indent) const {
         auto type = field.has_value() ? field->type()
                                       : pb::FieldDescriptorProto::TYPE_MESSAGE;
-        if (type == pb::FieldDescriptorProto::TYPE_MESSAGE) {
-            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
-        } else if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
+        if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
             bool is_group = true;
             render_field(
               os, edition, *field, field_descriptor, indent, is_group);
+        } else {
+            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
         }
 
         if (message.has_options()) {
