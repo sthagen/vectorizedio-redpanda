@@ -12,6 +12,7 @@
 
 #include "datalake/logger.h"
 #include "datalake/translation/types.h"
+#include "datalake/translation/utils.h"
 
 namespace {
 raft::replicate_options make_replicate_options() {
@@ -116,8 +117,9 @@ model::offset translation_stm::max_collectible_offset() {
     if (_highest_translated_offset == kafka::offset{}) {
         return model::offset{};
     }
-    return _raft->log()->to_log_offset(
-      kafka::offset_cast(_highest_translated_offset));
+
+    return highest_log_offset_below_next(
+      _raft->log(), _highest_translated_offset);
 }
 
 ss::future<raft::local_snapshot_applied> translation_stm::apply_local_snapshot(
