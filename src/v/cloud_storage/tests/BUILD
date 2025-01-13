@@ -35,22 +35,7 @@ redpanda_test_cc_library(
 )
 
 redpanda_test_cc_library(
-    name = "read_replica_e2e_fixture_btest",
-    hdrs = [
-        "read_replica_e2e_fixture.h",
-    ],
-    implementation_deps = [
-    ],
-    include_prefix = "cloud_storage/tests",
-    deps = [
-        "//src/v/cloud_storage/tests:s3_imposter",
-        "//src/v/redpanda/tests:fixture",
-        "//src/v/test_utils:scoped_config",
-    ],
-)
-
-redpanda_test_cc_library(
-    name = "read_replica_e2e_fixture_gtest",
+    name = "read_replica_e2e_fixture",
     hdrs = [
         "read_replica_e2e_fixture.h",
     ],
