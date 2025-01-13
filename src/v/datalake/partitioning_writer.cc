@@ -12,8 +12,6 @@
 #include "base/vlog.h"
 #include "datalake/data_writer_interface.h"
 #include "datalake/logger.h"
-#include "datalake/table_definition.h"
-#include "iceberg/struct_accessor.h"
 
 #include <exception>
 

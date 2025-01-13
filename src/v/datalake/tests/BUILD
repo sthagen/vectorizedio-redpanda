@@ -148,6 +148,7 @@ redpanda_test_cc_library(
     ],
     implementation_deps = [
         "//src/v/datalake:record_translator",
+        "//src/v/datalake:table_definition",
         "//src/v/datalake:table_id_provider",
     ],
     include_prefix = "datalake/tests",

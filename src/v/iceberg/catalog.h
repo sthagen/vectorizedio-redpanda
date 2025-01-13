@@ -62,7 +62,7 @@ public:
     ss::future<checked<table_metadata, errc>> load_or_create_table(
       const table_identifier& table_ident,
       const struct_type& type,
-      const partition_spec& spec);
+      const unresolved_partition_spec& spec);
 
     // Drops the table from the catalog. If `purge` is true, will also delete
     // associated data and metadata from cloud storage.

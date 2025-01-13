@@ -24,6 +24,7 @@ using namespace iceberg;
 
 namespace {
 const auto table_ident = table_identifier{.ns = {"redpanda"}, .table = "foo"};
+const auto empty_pspec = iceberg::unresolved_partition_spec{};
 } // namespace
 
 class CatalogSchemaManagerTest
@@ -93,7 +94,8 @@ TEST_F(CatalogSchemaManagerTest, TestCreateTable) {
     reset_field_ids(type);
 
     // Create the table
-    auto create_res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto create_res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_FALSE(create_res.has_error());
 
     // Fill the field IDs in `type`.
@@ -181,7 +183,8 @@ TEST_F(CatalogSchemaManagerTest, TestFillSuperset) {
           std::move(nested)));
     }
     // Alter the table schema
-    auto ensure_res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto ensure_res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_FALSE(ensure_res.has_error());
 
     // Fill the ids in `type`
@@ -218,7 +221,8 @@ TEST_F(CatalogSchemaManagerTest, TestFillSupersetSubtype) {
             int_type{}));
     }
     // Alter the table schema
-    auto ensure_res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto ensure_res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_FALSE(ensure_res.has_error());
 
     // Fill the ids
@@ -250,14 +254,15 @@ TEST_F(CatalogSchemaManagerTest, TestOptionalMismatch) {
 
     // Make the destinations both optional.
     type.fields[0]->required = field_required::no;
-    auto res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_TRUE(res.has_error());
     EXPECT_EQ(res.error(), schema_manager::errc::not_supported);
 
     // Make the destinations both required.
     type.fields[0]->required = field_required::yes;
     type.fields[1]->required = field_required::yes;
-    res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    res = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_TRUE(res.has_error());
     EXPECT_EQ(res.error(), schema_manager::errc::not_supported);
 }
@@ -269,7 +274,8 @@ TEST_F(CatalogSchemaManagerTest, TestTypeMismatch) {
     reset_field_ids(type);
     std::swap(type.fields.front(), type.fields.back());
 
-    auto res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_TRUE(res.has_error());
     EXPECT_EQ(res.error(), schema_manager::errc::not_supported);
 }
@@ -286,7 +292,8 @@ TEST_F(CatalogSchemaManagerTest, AcceptsValidTypePromotion) {
     reset_field_ids(type);
 
     // so schema_mgr should accept the new schema
-    auto ensure_res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto ensure_res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_FALSE(ensure_res.has_error()) << ensure_res.error();
 
     auto load_res = schema_mgr.get_table_info(table_ident).get();
@@ -310,7 +317,8 @@ TEST_F(CatalogSchemaManagerTest, RejectsInvalidTypePromotion) {
     reset_field_ids(type);
 
     // so schema_mgr should reject the new schema
-    auto ensure_res = schema_mgr.ensure_table_schema(table_ident, type).get();
+    auto ensure_res
+      = schema_mgr.ensure_table_schema(table_ident, type, empty_pspec).get();
     ASSERT_TRUE(ensure_res.has_error());
     EXPECT_EQ(ensure_res.error(), schema_manager::errc::not_supported)
       << ensure_res.error();

@@ -10,10 +10,10 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":logger",
-        ":table_definition",
         "//src/v/base",
         "//src/v/iceberg:compatibility",
         "//src/v/iceberg:field_collecting_visitor",
+        "//src/v/iceberg:partition",
         "//src/v/iceberg:schema",
         "//src/v/iceberg:transaction",
     ],
@@ -113,7 +113,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":logger",
-        ":table_definition",
         "//src/v/base",
         "//src/v/iceberg:struct_accessor",
     ],
