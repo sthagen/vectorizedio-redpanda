@@ -26,7 +26,7 @@ redpanda_test_cc_library(
     deps = [
         "//src/v/http",
         "//src/v/pandaproxy",
-        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/redpanda/tests:fixture",
     ],
 )
 

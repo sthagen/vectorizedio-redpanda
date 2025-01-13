@@ -44,7 +44,7 @@ redpanda_test_cc_library(
     include_prefix = "cloud_storage/tests",
     deps = [
         "//src/v/cloud_storage/tests:s3_imposter",
-        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/redpanda/tests:fixture",
         "//src/v/test_utils:scoped_config",
     ],
 )
@@ -59,7 +59,7 @@ redpanda_test_cc_library(
     include_prefix = "cloud_storage/tests",
     deps = [
         "//src/v/cloud_storage/tests:s3_imposter",
-        "//src/v/redpanda/tests:fixture_gtest",
+        "//src/v/redpanda/tests:fixture",
         "//src/v/test_utils:scoped_config",
     ],
 )
@@ -88,7 +88,7 @@ redpanda_test_cc_library(
         "//src/v/kafka/server/tests:kafka_test_utils",
         "//src/v/model",
         "//src/v/model/tests:random",
-        "//src/v/redpanda/tests:fixture_btest",
+        "//src/v/redpanda/tests:fixture",
         "//src/v/storage",
         "//src/v/storage:record_batch_utils",
         "//src/v/storage/tests:disk_log_builder",
@@ -126,7 +126,7 @@ redpanda_test_cc_library(
         "//src/v/kafka/server/tests:kafka_test_utils",
         "//src/v/model",
         "//src/v/model/tests:random",
-        "//src/v/redpanda/tests:fixture_gtest",
+        "//src/v/redpanda/tests:fixture",
         "//src/v/storage",
         "//src/v/storage:record_batch_utils",
         "//src/v/storage/tests:disk_log_builder",
@@ -622,7 +622,7 @@ redpanda_cc_gtest(
         "//src/v/kafka/server/tests:kafka_test_utils",
         "//src/v/model",
         "//src/v/redpanda:application",
-        "//src/v/redpanda/tests:fixture_gtest",
+        "//src/v/redpanda/tests:fixture",
         "//src/v/test_utils:gtest",
         "//src/v/test_utils:scoped_config",
         "//src/v/utils:retry_chain_node",
