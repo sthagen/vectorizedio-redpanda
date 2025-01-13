@@ -703,11 +703,9 @@ struct protobuf_schema_definition::impl {
                 switch (fd->type()) {
                 case pb::FieldDescriptor::TYPE_GROUP:
                 case pb::FieldDescriptor::TYPE_MESSAGE:
-                    return is_normalized ? fd->message_type()->full_name()
-                                         : fd->message_type()->name();
+                    return fd->message_type()->full_name();
                 case pb::FieldDescriptor::TYPE_ENUM:
-                    return is_normalized ? fd->enum_type()->full_name()
-                                         : fd->enum_type()->name();
+                    return fd->enum_type()->full_name();
                 default:
                     return fd->type_name();
                 };

@@ -745,26 +745,35 @@ import public "google/protobuf/duration.proto";
 SEASTAR_THREAD_TEST_CASE(test_protobuf_normalize_map) {
     auto schema = R"(syntax = "proto3";
 package foo;
+import "google/protobuf/struct.proto";
 import "google/protobuf/any.proto";
 message Value {
   google.protobuf.Any any = 1;
 }
 message HasMap {
   map<string, Value> map_string_value = 1;
-})";
+}
+message HasGoogleMap {
+  map<string, google.protobuf.Value> map_string_value = 1;
+}
+)";
 
     BOOST_CHECK_EQUAL(
       sanitize(schema, pps::normalize::no, pps::protobuf_renderer_v2::yes),
       (R"(syntax = "proto3";
 package foo;
 
+import "google/protobuf/struct.proto";
 import "google/protobuf/any.proto";
 
 message Value {
   google.protobuf.Any any = 1;
 }
 message HasMap {
-  map<string, Value> map_string_value = 1;
+  map<string, foo.Value> map_string_value = 1;
+}
+message HasGoogleMap {
+  map<string, google.protobuf.Value> map_string_value = 1;
 }
 
 )"));
@@ -773,12 +782,16 @@ message HasMap {
 package foo;
 
 import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
 
 message Value {
   .google.protobuf.Any any = 1;
 }
 message HasMap {
   map<string, foo.Value> map_string_value = 1;
+}
+message HasGoogleMap {
+  map<string, google.protobuf.Value> map_string_value = 1;
 }
 
 )"));
