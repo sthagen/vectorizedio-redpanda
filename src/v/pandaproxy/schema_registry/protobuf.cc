@@ -701,11 +701,9 @@ struct protobuf_schema_definition::impl {
                 switch (fd->type()) {
                 case pb::FieldDescriptor::TYPE_GROUP:
                 case pb::FieldDescriptor::TYPE_MESSAGE:
-                    return is_normalized ? fd->message_type()->full_name()
-                                         : fd->message_type()->name();
+                    return fd->message_type()->full_name();
                 case pb::FieldDescriptor::TYPE_ENUM:
-                    return is_normalized ? fd->enum_type()->full_name()
-                                         : fd->enum_type()->name();
+                    return fd->enum_type()->full_name();
                 default:
                     return fd->type_name();
                 };
@@ -833,12 +831,12 @@ struct protobuf_schema_definition::impl {
       int indent) const {
         auto type = field.has_value() ? field->type()
                                       : pb::FieldDescriptorProto::TYPE_MESSAGE;
-        if (type == pb::FieldDescriptorProto::TYPE_MESSAGE) {
-            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
-        } else if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
+        if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
             bool is_group = true;
             render_field(
               os, edition, *field, field_descriptor, indent, is_group);
+        } else {
+            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
         }
 
         if (message.has_options()) {
@@ -937,7 +935,11 @@ struct protobuf_schema_definition::impl {
         for (const int i : oneofs) {
             const auto& decl = message.oneof_decl(i);
             fmt::print(os, "{:{}}oneof {} {{\n", "", indent + 2, decl.name());
-            for (const auto& field : message.field()) {
+            auto fields = maybe_sorted(
+              message.field(),
+              std::ranges::less{},
+              &pb::FieldDescriptorProto::number);
+            for (const auto& field : fields) {
                 if (field.has_oneof_index() && field.oneof_index() == i) {
                     auto d = descriptor->FindFieldByName(field.name());
                     render_field(os, edition, field, d, indent + 4);
