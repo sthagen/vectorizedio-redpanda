@@ -1,7 +1,7 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
-proto_library(
-    name = "schema_registry_protos",
+filegroup(
+    name = "schema_registry_proto_files",
     srcs = [
         "confluent/meta.proto",
         "confluent/types/decimal.proto",
@@ -23,6 +23,12 @@ proto_library(
         "google/type/quaternion.proto",
         "google/type/timeofday.proto",
     ],
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "schema_registry_protos",
+    srcs = [":schema_registry_proto_files"],
     strip_import_prefix = "/src/v/pandaproxy/schema_registry/protobuf/",
     visibility = ["//visibility:public"],
     deps = [
