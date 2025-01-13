@@ -11,6 +11,7 @@ package connect
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -68,7 +69,7 @@ func NewCommand(fs afero.Fs, p *config.Params, execFn func(string, []string) err
 					cmd.Help()
 					return
 				}
-				fmt.Println("Downloading latest Redpanda Connect")
+				fmt.Fprintln(os.Stderr, "Downloading latest Redpanda Connect")
 				path, _, err := installConnect(cmd.Context(), fs, "latest")
 				out.MaybeDie(err, "unable to install Redpanda Connect: %v; if running on an air-gapped environment you may install 'redpanda-connect' with your package manager.", err)
 				pluginPath = path
