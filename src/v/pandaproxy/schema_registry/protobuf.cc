@@ -551,10 +551,7 @@ struct protobuf_schema_definition::impl {
 
     canonical_schema_definition::raw_string raw() const {
         if (!v2_renderer) {
-            iobuf buf;
-            auto proto = debug_string();
-            buf.append(proto.data(), proto.size());
-            return canonical_schema_definition::raw_string{std::move(buf)};
+            return canonical_schema_definition::raw_string{debug_string()};
         }
         iobuf_ostream osb;
         if (is_normalized) {
