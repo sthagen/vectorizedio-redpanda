@@ -336,3 +336,42 @@ TEST_F(CatalogSchemaManagerTest, RejectsInvalidTypePromotion) {
     ASSERT_TRUE(loaded_table.has_value());
     ASSERT_EQ(loaded_table.value().schema_struct, original_type);
 }
+
+TEST_F(CatalogSchemaManagerTest, CustomPartitionSpec) {
+    auto schema_type = std::get<struct_type>(test_nested_schema_type());
+
+    auto pspec_fields
+      = chunked_vector<unresolved_partition_spec::field>::single(
+        unresolved_partition_spec::field{
+          .source_name = {"bar"},
+          .transform = identity_transform{},
+          .name = "field1"});
+
+    auto ensure_res = schema_mgr
+                        .ensure_table_schema(
+                          table_ident,
+                          schema_type,
+                          unresolved_partition_spec{
+                            .fields = std::move(pspec_fields)})
+                        .get();
+    ASSERT_FALSE(ensure_res.has_error());
+
+    auto load_res = catalog.load_table(table_ident).get();
+    ASSERT_TRUE(load_res.has_value());
+
+    auto pspec = load_res.value().get_partition_spec(
+      load_res.value().default_spec_id);
+    ASSERT_TRUE(pspec);
+
+    chunked_vector<partition_field> expected_fields{partition_field{
+      .source_id = nested_field::id_t{2},
+      .field_id = partition_field::id_t{1000},
+      .name = "field1",
+      .transform = identity_transform{},
+    }};
+    auto expected = partition_spec{
+      .spec_id = partition_spec::id_t{0},
+      .fields = std::move(expected_fields),
+    };
+    ASSERT_EQ(*pspec, expected);
+}
