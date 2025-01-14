@@ -1,5 +1,5 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("//bazel:test.bzl", "redpanda_cc_gtest", "redpanda_test_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 proto_library(
     name = "person_proto",
@@ -349,5 +349,28 @@ redpanda_cc_gtest(
         "@fmt",
         "@googletest//:gtest",
         "@seastar",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "record_multiplexer_rpbench",
+    srcs = [
+        "record_multiplexer_bench.cc",
+    ],
+    deps = [
+        "//src/v/container:fragmented_vector",
+        "//src/v/datalake:catalog_schema_manager",
+        "//src/v/datalake:record_multiplexer",
+        "//src/v/datalake:record_schema_resolver",
+        "//src/v/datalake:record_translator",
+        "//src/v/datalake:table_creator",
+        ":catalog_and_registry_fixture",
+        ":record_generator",
+        ":test_data_writer",
+        "//src/v/model",
+        "//src/v/serde/avro/tests:data_generator",
+        "//src/v/serde/protobuf/tests:data_generator",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )
