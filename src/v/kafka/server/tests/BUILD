@@ -823,3 +823,22 @@ redpanda_cc_bench(
         "@seastar//:benchmark",
     ],
 )
+
+redpanda_cc_bench(
+    name = "quota_manager_rpbench",
+    srcs = [
+        "quota_manager_bench.cc",
+    ],
+    cpu = 2,
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    deps = [
+        "//src/v/cluster",
+        "//src/v/config",
+        "//src/v/kafka/server",
+        "@fmt",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)

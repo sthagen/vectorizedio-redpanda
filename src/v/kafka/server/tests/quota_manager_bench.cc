@@ -13,14 +13,12 @@
 #include "config/configuration.h"
 #include "kafka/server/quota_manager.h"
 
-#include <seastar/core/sleep.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/testing/perf_tests.hh>
 #include <seastar/util/later.hh>
 
 #include <fmt/format.h>
 
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -32,7 +30,7 @@ static const size_t unique_client_id_count = 1000;
 std::vector<ss::sstring> initialize_client_ids() {
     std::vector<ss::sstring> client_ids;
     client_ids.reserve(unique_client_id_count);
-    for (int i = 0; i < unique_client_id_count; ++i) {
+    for (size_t i = 0; i < unique_client_id_count; ++i) {
         client_ids.push_back("client-id-" + std::to_string(i));
     }
     return client_ids;
@@ -155,7 +153,7 @@ future<size_t> run_latency_test(latency_test_case tc) {
     co_await sqm.start(std::ref(quota_store));
     co_await sqm.invoke_on_all(&kafka::quota_manager::start);
 
-    auto shard = tc.on_shard_0 ? 0 : 1;
+    unsigned shard = tc.on_shard_0 ? 0 : 1;
     BOOST_ASSERT_MSG(
       shard < ss::smp::count, "Not enough cores available for the benchmark");
 
@@ -190,11 +188,11 @@ future<size_t> run_latency_test(latency_test_case tc) {
           auto client_ids = std::vector<ss::sstring>{};
           client_ids.reserve(n_repeats);
           if (tc.is_new_client) {
-              for (int i = 0; i < n_repeats; i++) {
+              for (size_t i = 0; i < n_repeats; i++) {
                   client_ids.emplace_back(fmt::format("new-client-{}", i));
               }
           } else {
-              for (int i = 0; i < n_repeats; i++) {
+              for (size_t i = 0; i < n_repeats; i++) {
                   client_ids.emplace_back(fixed_client_id);
               }
               // Ensure that the client id used is already "known"
@@ -205,7 +203,7 @@ future<size_t> run_latency_test(latency_test_case tc) {
           perf_tests::start_measuring_time();
 
           // Run repeatedly to reduce the overhead of start/stop_measuring_time
-          for (int i = 0; i < n_repeats; i++) {
+          for (size_t i = 0; i < n_repeats; i++) {
               if (tc.is_produce_not_fetch) {
                   // Produce
                   auto res = co_await qm.record_produce_tp_and_throttle(
