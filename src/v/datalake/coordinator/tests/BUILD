@@ -67,6 +67,7 @@ redpanda_cc_gtest(
         "//src/v/iceberg:manifest_entry",
         "//src/v/iceberg:manifest_io",
         "//src/v/iceberg:metadata_query",
+        "//src/v/iceberg:table_identifier",
         "//src/v/iceberg:transaction",
         "//src/v/iceberg:values_bytes",
         "//src/v/test_utils:gtest",

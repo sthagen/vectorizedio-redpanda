@@ -108,7 +108,8 @@ bool schema_manager::table_info::fill_registered_ids(
 
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
 simple_schema_manager::ensure_table_schema(
-  const model::topic& t, const iceberg::struct_type& desired_type) {
+  const iceberg::table_identifier& table_id,
+  const iceberg::struct_type& desired_type) {
     iceberg::schema s{
       .schema_struct = desired_type.copy(),
       .schema_id = {},
@@ -117,10 +118,10 @@ simple_schema_manager::ensure_table_schema(
     s.assign_fresh_ids();
 
     // TODO: check schema compatibility
-    topic2table_.insert_or_assign(
-      t,
+    table_info_by_id.insert_or_assign(
+      table_id.copy(),
       table_info{
-        .id = table_id_for_topic(t),
+        .id = table_id.copy(),
         .schema = std::move(s),
         .partition_spec = hour_partition_spec(),
       });
@@ -129,9 +130,10 @@ simple_schema_manager::ensure_table_schema(
 }
 
 ss::future<checked<schema_manager::table_info, schema_manager::errc>>
-simple_schema_manager::get_table_info(const model::topic& t) {
-    auto it = topic2table_.find(t);
-    if (it == topic2table_.end()) {
+simple_schema_manager::get_table_info(
+  const iceberg::table_identifier& table_id) {
+    auto it = table_info_by_id.find(table_id);
+    if (it == table_info_by_id.end()) {
         co_return errc::failed;
     }
     co_return table_info{
@@ -143,8 +145,8 @@ simple_schema_manager::get_table_info(const model::topic& t) {
 
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
 catalog_schema_manager::ensure_table_schema(
-  const model::topic& topic, const iceberg::struct_type& desired_type) {
-    auto table_id = table_id_for_topic(topic);
+  const iceberg::table_identifier& table_id,
+  const iceberg::struct_type& desired_type) {
     auto load_res = co_await catalog_.load_or_create_table(
       table_id, desired_type, hour_partition_spec());
     if (load_res.has_error()) {
@@ -198,8 +200,8 @@ catalog_schema_manager::ensure_table_schema(
 }
 
 ss::future<checked<schema_manager::table_info, schema_manager::errc>>
-catalog_schema_manager::get_table_info(const model::topic& topic) {
-    auto table_id = table_id_for_topic(topic);
+catalog_schema_manager::get_table_info(
+  const iceberg::table_identifier& table_id) {
     auto load_res = co_await catalog_.load_table(table_id);
     if (load_res.has_error()) {
         co_return log_and_convert_catalog_err(
@@ -230,7 +232,7 @@ catalog_schema_manager::get_table_info(const model::topic& topic) {
     }
 
     co_return table_info{
-      .id = std::move(table_id),
+      .id = table_id.copy(),
       .schema = cur_schema->copy(),
       .partition_spec = cur_spec->copy(),
     };
