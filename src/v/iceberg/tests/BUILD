@@ -639,7 +639,6 @@ redpanda_cc_gtest(
 
 redpanda_cc_bench(
     name = "uri_bench",
-    timeout = "short",
     srcs = [
         "uri_bench.cc",
     ],
@@ -652,7 +651,6 @@ redpanda_cc_bench(
 
 redpanda_cc_bench(
     name = "compatibility_bench",
-    timeout = "short",
     srcs = [
         "compatibility_bench.cc",
     ],

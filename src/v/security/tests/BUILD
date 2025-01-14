@@ -216,7 +216,6 @@ redpanda_cc_btest(
 
 redpanda_cc_bench(
     name = "role_store_bench",
-    timeout = "moderate",
     srcs = [
         "role_store_bench.cc",
     ],

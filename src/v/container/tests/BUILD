@@ -93,7 +93,6 @@ redpanda_cc_btest(
 
 redpanda_cc_bench(
     name = "vector_bench",
-    timeout = "short",
     srcs = [
         "vector_bench.cc",
     ],
@@ -108,7 +107,6 @@ redpanda_cc_bench(
 
 redpanda_cc_bench(
     name = "map_bench",
-    timeout = "short",
     srcs = [
         "map_bench.cc",
     ],

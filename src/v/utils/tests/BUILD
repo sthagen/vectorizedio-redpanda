@@ -116,7 +116,6 @@ redpanda_cc_gtest(
 
 redpanda_cc_bench(
     name = "vint_bench",
-    timeout = "short",
     srcs = [
         "vint_bench.cc",
     ],
@@ -260,7 +259,6 @@ redpanda_cc_btest(
 
 redpanda_cc_bench(
     name = "coro_bench",
-    timeout = "short",
     srcs = [
         "coro_bench.cc",
     ],
@@ -274,7 +272,6 @@ redpanda_cc_bench(
 
 redpanda_cc_bench(
     name = "seastar_histogram_bench",
-    timeout = "short",
     srcs = [
         "seastar_histogram_bench.cc",
     ],
@@ -484,7 +481,6 @@ redpanda_cc_btest(
 
 redpanda_cc_bench(
     name = "delta_for_bench",
-    timeout = "short",
     srcs = [
         "delta_for_bench.cc",
     ],
