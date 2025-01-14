@@ -16,7 +16,6 @@
 
 #include <seastar/core/sstring.hh>
 #include <seastar/testing/perf_tests.hh>
-#include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/log.hh>
 
 #include <vector>
@@ -39,7 +38,7 @@ struct fixture {
         raft::group_id gr{0};
         std::vector<raft::group_id> ret;
         ret.reserve(cnt);
-        for (auto i = 0; i < cnt; ++i) {
+        for (size_t i = 0; i < cnt; ++i) {
             ret.push_back(gr);
             gr += raft::group_id(random_generators::get_int(1, 200));
         }
@@ -82,7 +81,7 @@ struct fixture {
         auto i = 0;
         for (auto& hb_meta : old_req.heartbeats) {
             raft::group_heartbeat group_beat{.group = hb_meta.meta.group};
-            if (i < full_heartbeat_count) {
+            if (std::cmp_less(i, full_heartbeat_count)) {
                 group_beat.data = raft::heartbeat_request_data{
                   .source_revision = hb_meta.node_id.revision(),
                   .target_revision = hb_meta.target_node_id.revision(),
