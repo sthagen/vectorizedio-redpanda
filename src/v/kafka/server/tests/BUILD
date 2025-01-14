@@ -801,3 +801,25 @@ redpanda_cc_bench(
         "@seastar//:benchmark",
     ],
 )
+
+redpanda_cc_bench(
+    name = "kafka_produce_partition_rpbench",
+    srcs = [
+        "produce_partition_bench.cc",
+    ],
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    tags = ["exclusive"],
+    deps = [
+        "//src/v/container:fragmented_vector",
+        "//src/v/kafka/protocol/schemata:produce_request",
+        "//src/v/kafka/server",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)

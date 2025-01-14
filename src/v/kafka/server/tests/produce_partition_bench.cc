@@ -9,29 +9,17 @@
  * by the Apache License, Version 2.0
  */
 #include "container/fragmented_vector.h"
-#include "kafka/client/types.h"
-#include "kafka/protocol/fetch.h"
 #include "kafka/protocol/schemata/produce_request.h"
-#include "kafka/protocol/types.h"
 #include "kafka/server/handlers/produce.h"
 #include "model/fundamental.h"
-#include "model/record.h"
 #include "random/generators.h"
 #include "redpanda/tests/fixture.h"
-#include "test_utils/fixture.h"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/testing/perf_tests.hh>
-#include <seastar/testing/thread_test_case.hh>
 
-#include <boost/range/iterator_range_core.hpp>
-#include <boost/test/tools/interface.hpp>
-#include <boost/test/tools/old/interface.hpp>
 #include <boost/test/unit_test_log.hpp>
-#include <fmt/ostream.h>
-
-#include <tuple>
 
 using namespace std::chrono_literals; // NOLINT
 
