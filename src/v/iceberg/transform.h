@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ostream>
 #include <variant>
 
 namespace iceberg {
@@ -36,5 +37,7 @@ using transform = std::variant<
   hour_transform,
   void_transform>;
 bool operator==(const transform& lhs, const transform& rhs);
+
+std::ostream& operator<<(std::ostream&, const transform&);
 
 } // namespace iceberg

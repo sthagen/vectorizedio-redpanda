@@ -24,9 +24,14 @@ struct unresolved_partition_spec {
         std::vector<ss::sstring> source_name;
         transform transform;
         ss::sstring name;
+
+        friend std::ostream& operator<<(std::ostream&, const field&);
     };
 
     chunked_vector<field> fields;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const unresolved_partition_spec&);
 };
 
 struct partition_field {
@@ -38,6 +43,8 @@ struct partition_field {
 
     friend bool operator==(const partition_field&, const partition_field&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream&, const partition_field&);
 };
 
 struct partition_spec {
@@ -53,6 +60,9 @@ struct partition_spec {
 
     friend bool operator==(const partition_spec&, const partition_spec&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream&, const partition_spec&);
+
     partition_spec copy() const {
         return {
           .spec_id = spec_id,

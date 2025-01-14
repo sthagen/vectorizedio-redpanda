@@ -943,6 +943,9 @@ redpanda_cc_library(
     hdrs = [
         "transform.h",
     ],
+    implementation_deps = [
+        "@fmt",
+    ],
     include_prefix = "iceberg",
     visibility = ["//visibility:public"],
 )

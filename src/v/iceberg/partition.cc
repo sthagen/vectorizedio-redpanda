@@ -11,6 +11,38 @@
 
 namespace iceberg {
 
+std::ostream&
+operator<<(std::ostream& o, const unresolved_partition_spec::field& f) {
+    fmt::print(
+      o,
+      "{{source_name: {}, transform: {}, name: {}}}",
+      f.source_name,
+      f.transform,
+      f.name);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const unresolved_partition_spec& ps) {
+    fmt::print(o, "{{fields: {}}}", ps.fields);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const partition_field& f) {
+    fmt::print(
+      o,
+      "{{source_id: {}, transform: {}, field_id: {}, name: {}}}",
+      f.source_id,
+      f.transform,
+      f.field_id,
+      f.name);
+    return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const partition_spec& ps) {
+    fmt::print(o, "{{spec_id: {}, fields: {}}}", ps.spec_id, ps.fields);
+    return o;
+}
+
 std::optional<partition_spec> partition_spec::resolve(
   const unresolved_partition_spec& spec, const struct_type& schema_type) {
     auto cur_field_id = partition_field::id_t{1000};
