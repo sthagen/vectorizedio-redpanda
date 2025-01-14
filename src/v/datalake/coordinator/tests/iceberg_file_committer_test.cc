@@ -17,10 +17,10 @@
 #include "iceberg/manifest_entry.h"
 #include "iceberg/manifest_io.h"
 #include "iceberg/metadata_query.h"
+#include "iceberg/table_identifier.h"
 #include "iceberg/transaction.h"
 #include "iceberg/values_bytes.h"
 #include "test_utils/async.h"
-#include "test_utils/test.h"
 
 #include <seastar/util/defer.hh>
 
@@ -30,6 +30,7 @@ using namespace datalake::coordinator;
 
 namespace {
 const model::topic topic{"test-topic"};
+const iceberg::table_identifier table_ident{.ns = {"redpanda"}, .table = topic};
 using pairs_t = std::vector<std::pair<int64_t, int64_t>>;
 void add_partition_state(
   std::vector<pairs_t> offset_bounds_by_pid,
@@ -100,7 +101,7 @@ public:
     void create_table() {
         auto res = schema_mgr
                      .ensure_table_schema(
-                       topic, datalake::schemaless_struct_type())
+                       table_ident, datalake::schemaless_struct_type())
                      .get();
         ASSERT_FALSE(res.has_error());
     }
@@ -137,10 +138,7 @@ TEST_F(FileCommitterTest, TestCommit) {
 }
 
 TEST_F(FileCommitterTest, TestMissingTable) {
-    auto load_res = catalog
-                      .load_table(
-                        iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                      .get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_TRUE(load_res.has_error());
     ASSERT_EQ(load_res.error(), iceberg::catalog::errc::not_found);
 
@@ -159,10 +157,7 @@ TEST_F(FileCommitterTest, TestMissingTable) {
     res = committer.commit_topic_files_to_catalog(topic, state).get();
     ASSERT_FALSE(res.has_error());
     ASSERT_TRUE(res.value().empty());
-    load_res = catalog
-                 .load_table(
-                   iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                 .get();
+    load_res = catalog.load_table(table_ident).get();
     // The table should be created.
     ASSERT_FALSE(load_res.has_error());
     ASSERT_FALSE(load_res.value().snapshots.has_value());
@@ -173,10 +168,7 @@ TEST_F(FileCommitterTest, TestMissingTable) {
     ASSERT_FALSE(res.has_error());
     ASSERT_EQ(1, res.value().size());
 
-    load_res = catalog
-                 .load_table(
-                   iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                 .get();
+    load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
 
     // Simple check for the schema.
@@ -194,10 +186,7 @@ TEST_F(FileCommitterTest, TestMissingTopic) {
     ASSERT_TRUE(res.value().empty());
 
     // If our state didn't have the topic, we won't bother creating a table.
-    auto load_res = catalog
-                      .load_table(
-                        iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                      .get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_TRUE(load_res.has_error());
     ASSERT_EQ(load_res.error(), iceberg::catalog::errc::not_found);
 }
@@ -325,10 +314,7 @@ TEST_F(FileCommitterTest, TestDeduplicateAllFiles) {
 
     auto res = committer.commit_topic_files_to_catalog(topic, state).get();
     ASSERT_FALSE(res.has_error());
-    auto load_res = catalog
-                      .load_table(
-                        iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                      .get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(1, load_res.value().snapshots.value().size());
@@ -344,10 +330,7 @@ TEST_F(FileCommitterTest, TestDeduplicateAllFiles) {
     ASSERT_FALSE(res.has_error());
 
     // There should be no update to Iceberg.
-    load_res = catalog
-                 .load_table(
-                   iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                 .get();
+    load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(1, load_res.value().snapshots.value().size());
@@ -373,10 +356,7 @@ TEST_F(FileCommitterTest, TestDeduplicateSomeFiles) {
 
     auto res = committer.commit_topic_files_to_catalog(topic, state).get();
     ASSERT_FALSE(res.has_error());
-    auto load_res = catalog
-                      .load_table(
-                        iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                      .get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(1, load_res.value().snapshots.value().size());
@@ -396,10 +376,7 @@ TEST_F(FileCommitterTest, TestDeduplicateSomeFiles) {
 
     // There should be an update to Iceberg, since there were new files
     // committed.
-    load_res = catalog
-                 .load_table(
-                   iceberg::table_identifier{{"redpanda"}, "test-topic"})
-                 .get();
+    load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(2, load_res.value().snapshots.value().size());
@@ -434,8 +411,7 @@ TEST_F(FileCommitterTest, TestDeduplicateFromAncestor) {
       updates[0].tp, model::topic_partition(topic, model::partition_id{0}));
     ASSERT_EQ(updates[0].new_committed(), 199);
 
-    const auto table_id = iceberg::table_identifier{{"redpanda"}, "test-topic"};
-    auto load_res = catalog.load_table(table_id).get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(1, load_res.value().snapshots.value().size());
@@ -457,8 +433,9 @@ TEST_F(FileCommitterTest, TestDeduplicateFromAncestor) {
     });
     auto append_res = tx.merge_append(manifest_io, std::move(new_files)).get();
     ASSERT_FALSE(append_res.has_error());
-    EXPECT_FALSE(catalog.commit_txn(table_id, std::move(tx)).get().has_error());
-    load_res = catalog.load_table(table_id).get();
+    EXPECT_FALSE(
+      catalog.commit_txn(table_ident, std::move(tx)).get().has_error());
+    load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(2, load_res.value().snapshots.value().size());
@@ -477,7 +454,7 @@ TEST_F(FileCommitterTest, TestDeduplicateFromAncestor) {
       updates[0].tp, model::topic_partition(topic, model::partition_id{0}));
     ASSERT_EQ(updates[0].new_committed(), 199);
 
-    load_res = catalog.load_table(table_id).get();
+    load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     ASSERT_TRUE(load_res.value().snapshots.has_value());
     ASSERT_EQ(2, load_res.value().snapshots.value().size());
@@ -507,8 +484,7 @@ TEST_F(FileCommitterTest, TestDeduplicateConcurrently) {
     }
     stop.cancel();
 
-    const auto table_id = iceberg::table_identifier{{"redpanda"}, "test-topic"};
-    auto load_res = catalog.load_table(table_id).get();
+    auto load_res = catalog.load_table(table_ident).get();
     ASSERT_FALSE(load_res.has_error());
     const auto& table = load_res.value();
     ASSERT_TRUE(table.snapshots.has_value());
