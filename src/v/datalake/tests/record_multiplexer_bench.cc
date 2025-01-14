@@ -28,6 +28,7 @@
 #include <string_view>
 
 namespace {
+
 std::string generate_nested_proto_internal(size_t total_depth) {
     constexpr auto proto_template = R"(
     message Foo{} {{
@@ -487,7 +488,6 @@ PERF_TEST_CN(
     static ::testing::protobuf_generator_config gen_config = {
       .string_length_range{4, 4}, .max_nesting_level = 40};
     static std::string proto_schema = generate_nested_proto(31);
-
     co_await configure_bench(
       gen_config, proto_schema, batches, records_per_batch);
     co_return co_await run_bench();
