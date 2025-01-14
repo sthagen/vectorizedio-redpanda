@@ -1,3 +1,5 @@
+find_package(Protobuf REQUIRED)
+
 set(PROTO_FILES
   confluent/meta.proto
   confluent/types/decimal.proto
