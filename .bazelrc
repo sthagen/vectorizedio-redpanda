@@ -6,6 +6,9 @@ common --@toolchains_llvm//toolchain/config:compiler-rt=False
 build --linkopt --unwindlib=libgcc
 build --linkopt -stdlib=libc++
 
+# By default build without CGO
+build --@rules_go//go/config:pure
+
 common:clang-19 --extra_toolchains=@llvm_19_toolchain//:all
 
 build:system-clang --extra_toolchains=@local_config_cc_toolchains//:all
