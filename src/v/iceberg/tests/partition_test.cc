@@ -9,6 +9,7 @@
 
 #include "container/fragmented_vector.h"
 #include "iceberg/partition.h"
+#include "iceberg/tests/test_schemas.h"
 
 #include <gtest/gtest.h>
 
@@ -122,4 +123,114 @@ TEST(PartitionTest, TestPartitionSpec) {
     ASSERT_NE(t1, t5);
     ASSERT_NE(t1, t6);
     ASSERT_NE(t1, t7);
+}
+
+TEST(PartitionTest, TestSpecResolve) {
+    auto schema_field_type = test_nested_schema_type();
+    const auto& schema_type = std::get<struct_type>(schema_field_type);
+
+    {
+        // empty spec
+        auto resolved = partition_spec::resolve(
+          unresolved_partition_spec{}, schema_type);
+        auto expected = partition_spec{
+          .spec_id = partition_spec::id_t{0},
+        };
+        ASSERT_EQ(resolved, expected);
+    }
+
+    {
+        // single-field spec
+        auto input = chunked_vector<unresolved_partition_spec::field>::single(
+          unresolved_partition_spec::field{
+            .source_name = {"bar"},
+            .transform = identity_transform{},
+            .name = "field1"});
+        auto resolved = partition_spec::resolve(
+          unresolved_partition_spec{.fields = std::move(input)}, schema_type);
+        chunked_vector<partition_field> expected_fields{partition_field{
+          .source_id = nested_field::id_t{2},
+          .field_id = partition_field::id_t{1000},
+          .name = "field1",
+          .transform = identity_transform{},
+        }};
+        auto expected = partition_spec{
+          .spec_id = partition_spec::id_t{0},
+          .fields = std::move(expected_fields),
+        };
+        ASSERT_EQ(resolved, expected);
+    }
+
+    {
+        // nested field
+        auto input = chunked_vector<unresolved_partition_spec::field>::single(
+          unresolved_partition_spec::field{
+            .source_name = {"person", "name"},
+            .transform = truncate_transform{.length = 2},
+            .name = "field1"});
+        auto resolved = partition_spec::resolve(
+          unresolved_partition_spec{.fields = std::move(input)}, schema_type);
+        chunked_vector<partition_field> expected_fields{partition_field{
+          .source_id = nested_field::id_t{16},
+          .field_id = partition_field::id_t{1000},
+          .name = "field1",
+          .transform = truncate_transform{.length = 2},
+        }};
+        auto expected = partition_spec{
+          .spec_id = partition_spec::id_t{0},
+          .fields = std::move(expected_fields),
+        };
+        ASSERT_EQ(resolved, expected);
+    }
+
+    {
+        // composite spec
+        auto input = chunked_vector<unresolved_partition_spec::field>{
+          unresolved_partition_spec::field{
+            .source_name = {"person", "name"},
+            .transform = truncate_transform{.length = 2},
+            .name = "field1"},
+          unresolved_partition_spec::field{
+            .source_name = {"bar"},
+            .transform = identity_transform{},
+            .name = "field2"},
+        };
+        auto resolved = partition_spec::resolve(
+          unresolved_partition_spec{.fields = std::move(input)}, schema_type);
+        chunked_vector<partition_field> expected_fields{
+          partition_field{
+            .source_id = nested_field::id_t{16},
+            .field_id = partition_field::id_t{1000},
+            .name = "field1",
+            .transform = truncate_transform{.length = 2},
+          },
+          partition_field{
+            .source_id = nested_field::id_t{2},
+            .field_id = partition_field::id_t{1001},
+            .name = "field2",
+            .transform = identity_transform{},
+          }};
+        auto expected = partition_spec{
+          .spec_id = partition_spec::id_t{0},
+          .fields = std::move(expected_fields),
+        };
+        ASSERT_EQ(resolved, expected);
+    }
+
+    {
+        // spec with non-existent source field
+        auto input = chunked_vector<unresolved_partition_spec::field>{
+          unresolved_partition_spec::field{
+            .source_name = {"person", "name"},
+            .transform = truncate_transform{.length = 2},
+            .name = "field1"},
+          unresolved_partition_spec::field{
+            .source_name = {"nonexistent"},
+            .transform = identity_transform{},
+            .name = "field2"},
+        };
+        auto resolved = partition_spec::resolve(
+          unresolved_partition_spec{.fields = std::move(input)}, schema_type);
+        ASSERT_EQ(resolved, std::nullopt);
+    }
 }
