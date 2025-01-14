@@ -29,11 +29,13 @@ filegroup(
 alias(
     name = "redpanda",
     actual = "//src/v/redpanda:redpanda",
+    visibility = ["//visibility:public"],
 )
 
 alias(
     name = "rpk",
     actual = "//src/go/rpk/cmd/rpk:rpk",
+    visibility = ["//visibility:public"],
 )
 
 alias(

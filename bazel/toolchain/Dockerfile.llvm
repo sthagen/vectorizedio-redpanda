@@ -14,7 +14,7 @@ ADD --chmod=755 https://github.com/kadwanev/retry/raw/20997c7712a4/retry /usr/bi
 
 WORKDIR /opt
 
-ARG LLVM_VERSION=17.0.6
+ARG LLVM_VERSION=19.1.6
 
 RUN git clone --branch llvmorg-${LLVM_VERSION} --single-branch https://github.com/llvm/llvm-project.git
 

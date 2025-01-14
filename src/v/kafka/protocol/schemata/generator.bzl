@@ -82,10 +82,11 @@ def generate_kafka_messages(name = "generate_kafka_messages"):
                     source,
                     header,
                 ],
-                cmd = "$(execpath //src/v/kafka/protocol/schemata:generator) $< $(OUTS)",
+                cmd = "$(PYTHON3) $(execpath //src/v/kafka/protocol/schemata:generator) $< $(OUTS)",
                 tools = [
                     "//src/v/kafka/protocol/schemata:generator",
                 ],
+                toolchains = ["@rules_python//python:current_py_toolchain"],
             )
 
             redpanda_cc_library(

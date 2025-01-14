@@ -249,6 +249,9 @@ COMMON FILES
  - Broker metrics: The broker's Prometheus metrics, fetched through its
    admin API (/metrics and /public_metrics).
 
+ - Crash information: Both startup_log and crash_reports will be collected if
+   present in the configured data directory.
+
 BARE-METAL
 
  - Kernel: The kernel logs ring buffer (syslog) and parameters (sysctl).

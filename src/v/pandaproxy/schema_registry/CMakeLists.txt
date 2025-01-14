@@ -5,7 +5,6 @@ seastar_generate_swagger(
   OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/../api/api-doc/
 )
 
-find_package(Protobuf REQUIRED)
 find_package(Avro)
 find_package(jsoncons REQUIRED)
 
@@ -46,4 +45,3 @@ v_cc_library(
 
 add_subdirectory(test)
 add_subdirectory(requests)
-add_subdirectory(protobuf)

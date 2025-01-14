@@ -70,6 +70,13 @@ class RpkDebugBundleTest(RedpandaTest):
                 continue
             if re.match(r".* error querying .*\.ntp\..* i\/o timeout", l):
                 self.logger.error(f"Non-fatal transitory NTP error: {l}")
+            if re.match(
+                    r".*skipping\s+(startup_log collection|crash_reports collection):\s*(unable to find file|directory).*",
+                    l):
+                # this tests runs a development container, it will not have a
+                # startup_log and we don't expect a crash_reports dir to be
+                # in the data_directory as the container is new.
+                continue
             else:
                 self.logger.error(f"Bad output line: {l}")
                 filtered_errors.append(l)

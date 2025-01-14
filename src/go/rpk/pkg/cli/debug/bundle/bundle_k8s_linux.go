@@ -70,6 +70,7 @@ func executeK8SBundle(ctx context.Context, bp bundleParams) error {
 		saveCmdLine(ps),
 		saveConfig(ps, bp.yActual),
 		saveControllerLogDir(ps, bp.y, bp.controllerLogLimitBytes),
+		saveCrashReports(ps, bp.y),
 		saveDataDirStructure(ps, bp.y),
 		saveDiskUsage(ctx, ps, bp.y),
 		saveInterrupts(ps),
@@ -79,6 +80,7 @@ func executeK8SBundle(ctx context.Context, bp bundleParams) error {
 		saveMountedFilesystems(ps),
 		saveNTPDrift(ps),
 		saveResourceUsageData(ps, bp.y),
+		saveStartupLog(ps, bp.y),
 		saveSlabInfo(ps),
 		saveUname(ctx, ps),
 	}
