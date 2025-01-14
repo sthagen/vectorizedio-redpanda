@@ -59,7 +59,7 @@ redpanda_cc_gtest(
         ":state_test_utils",
         "//src/v/cloud_io:remote",
         "//src/v/cloud_io/tests:scoped_remote",
-        "//src/v/cloud_storage/tests:s3_imposter_gtest",
+        "//src/v/cloud_storage/tests:s3_imposter",
         "//src/v/datalake:logger",
         "//src/v/datalake:table_definition",
         "//src/v/datalake/coordinator:iceberg_file_committer",
