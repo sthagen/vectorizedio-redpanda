@@ -777,3 +777,27 @@ redpanda_cc_bench(
         "@seastar//:benchmark",
     ],
 )
+
+redpanda_cc_bench(
+    name = "kafka_fetch_plan_rpbench",
+    srcs = [
+        "fetch_plan_bench.cc",
+    ],
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    tags = ["exclusive"],
+    deps = [
+        "//src/v/base",
+        "//src/v/kafka/client",
+        "//src/v/kafka/protocol",
+        "//src/v/kafka/protocol:fetch",
+        "//src/v/kafka/protocol/schemata:fetch_request",
+        "//src/v/kafka/server",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture",
+        "@boost//:test",
+        "@seastar//:benchmark",
+    ],
+)

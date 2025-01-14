@@ -8,6 +8,7 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
+#include "base/seastarx.h"
 #include "kafka/client/types.h"
 #include "kafka/protocol/fetch.h"
 #include "kafka/protocol/schemata/fetch_request.h"
@@ -15,24 +16,15 @@
 #include "kafka/server/fetch_session.h"
 #include "kafka/server/fetch_session_cache.h"
 #include "kafka/server/handlers/fetch.h"
-#include "kafka/server/handlers/fetch/fetch_planner.h"
 #include "model/fundamental.h"
-#include "model/namespace.h"
+#include "model/metadata.h"
 #include "random/generators.h"
 #include "redpanda/tests/fixture.h"
-#include "test_utils/fixture.h"
 
-#include <seastar/core/sstring.hh>
 #include <seastar/testing/perf_tests.hh>
-#include <seastar/testing/thread_test_case.hh>
 
-#include <boost/range/iterator_range_core.hpp>
-#include <boost/test/tools/interface.hpp>
 #include <boost/test/tools/old/interface.hpp>
 #include <boost/test/unit_test_log.hpp>
-#include <fmt/ostream.h>
-
-#include <tuple>
 
 static ss::logger fpt_logger("fpt_test");
 
@@ -90,9 +82,9 @@ PERF_TEST_F(fetch_plan_fixture, test_fetch_plan) {
         ft.name = t;
 
         // add the partitions to the fetch request
-        for (int pid = 0; pid < session_partition_count; pid++) {
+        for (size_t pid = 0; pid < session_partition_count; pid++) {
             kafka::fetch_partition fp;
-            fp.partition_index = model::partition_id(pid);
+            fp.partition_index = model::partition_id(static_cast<int32_t>(pid));
             fp.fetch_offset = model::offset(0);
             fp.current_leader_epoch = kafka::leader_epoch(-1);
             fp.log_start_offset = model::offset(-1);
@@ -160,9 +152,12 @@ PERF_TEST_F(fetch_plan_fixture, test_fetch_plan) {
 
     // add all partitions to fetch metadata
     auto& mdc = rctx.get_fetch_metadata_cache();
-    for (int i = 0; i < total_partition_count; i++) {
+    for (size_t i = 0; i < total_partition_count; i++) {
         mdc.insert_or_assign(
-          {t, i}, model::offset(0), model::offset(100), model::offset(100));
+          {t, static_cast<int32_t>(i)},
+          model::offset(0),
+          model::offset(100),
+          model::offset(100));
     }
 
     vassert(mdc.size() == total_partition_count, "mdc.size(): {}", mdc.size());
