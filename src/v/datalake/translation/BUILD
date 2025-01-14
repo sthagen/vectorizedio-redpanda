@@ -14,6 +14,24 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "utils",
+    srcs = [
+        "utils.cc",
+    ],
+    hdrs = [
+        "utils.h",
+    ],
+    include_prefix = "datalake/translation",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/model",
+        "//src/v/serde",
+        "//src/v/storage",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "stm",
     srcs = [
         "state_machine.cc",
@@ -25,6 +43,7 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model",
+        ":utils",
         "//src/v/cluster:state_machine_registry",
         "//src/v/datalake:logger",
         "//src/v/raft",
@@ -45,6 +64,7 @@ redpanda_cc_library(
     deps = [
         ":model",
         ":stm",
+        ":utils",
         "//src/v/base",
         "//src/v/cluster",
         "//src/v/datalake:cloud_data_io",

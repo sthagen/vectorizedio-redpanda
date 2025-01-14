@@ -12,7 +12,7 @@ import (
 func TestEmbeddedFiles(t *testing.T) {
 	t.Run("Test Embedded files in rpk, equal to Redpanda", func(t *testing.T) {
 		// /src/v/pandaproxy/schema_registry/protobuf
-		redpandaProtoFS := os.DirFS("../../../../../v/pandaproxy/schema_registry/protobuf/")
+		redpandaProtoFS := os.DirFS("../../../../../v/pandaproxy/schema_registry/protobuf")
 		redpandaMap := make(map[string]string)
 		err := fs.WalkDir(redpandaProtoFS, ".", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {

@@ -222,6 +222,29 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_btest(
+    name = "compatibility_protobuf_test",
+    timeout = "short",
+    srcs = [
+        "compatibility_protobuf.cc",
+    ],
+    cpu = 1,
+    data = [
+    ],
+    deps = [
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/pandaproxy",
+        "//src/v/pandaproxy/schema_registry/test:compatibility_common",
+        "//src/v/pandaproxy/schema_registry/test:compatibility_protobuf",
+        "//src/v/test_utils:seastar_boost",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@boost//:test",
+        "@fmt",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_btest(
     name = "compatibility_avro_test",
     timeout = "short",
     srcs = [

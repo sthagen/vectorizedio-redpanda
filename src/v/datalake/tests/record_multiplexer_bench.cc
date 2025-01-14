@@ -266,8 +266,9 @@ class record_multiplexer_bench_fixture
   : public datalake::tests::catalog_and_registry_fixture {
 public:
     record_multiplexer_bench_fixture()
-      : _schema_mgr(catalog)
-      , _type_resolver(registry)
+      : _schema_cache({10, 5})
+      , _schema_mgr(catalog)
+      , _type_resolver(registry, _schema_cache)
       , _record_gen(&registry)
       , _table_creator(_type_resolver, _schema_mgr)
       , _as([] { return std::nullopt; }) {}
@@ -309,6 +310,7 @@ public:
 
 private:
     std::unordered_set<std::string> _added_names;
+    datalake::chunked_schema_cache _schema_cache;
     datalake::catalog_schema_manager _schema_mgr;
     datalake::record_schema_resolver _type_resolver;
     datalake::tests::record_generator _record_gen;

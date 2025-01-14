@@ -79,6 +79,10 @@ public:
     struct stat : public cache_stat {
         /// Current size of the cache index.
         size_t index_size;
+        /// Number of cache accesses.
+        size_t access_count;
+        /// Number of cache hits.
+        size_t hit_count;
     };
 
     /**
@@ -106,6 +110,9 @@ private:
     chunked_hash_map<Key, entry_t, Hash, EqualTo> _map;
     cache_t _cache;
     ghost_fifo_t _ghost_fifo;
+
+    size_t _hit_count{0};
+    size_t _access_count{0};
 
     void gc_ghost_fifo();
 };
@@ -153,6 +160,7 @@ template<typename Key, typename Value, typename Hash, typename EqualTo>
 ss::optimized_optional<ss::shared_ptr<Value>>
 chunked_kv_cache<Key, Value, Hash, EqualTo>::get_value(const Key& key) {
     gc_ghost_fifo();
+    _access_count++;
 
     auto e_it = _map.find(key);
     if (e_it == _map.end()) {
@@ -165,6 +173,7 @@ chunked_kv_cache<Key, Value, Hash, EqualTo>::get_value(const Key& key) {
     }
 
     entry.hook.touch();
+    _hit_count++;
     return entry.value;
 }
 
@@ -189,6 +198,9 @@ chunked_kv_cache<Key, Value, Hash, EqualTo>::stat() const noexcept {
         _cache.stat()
     };
     s.index_size = _map.size();
+    s.hit_count = _hit_count;
+    s.access_count = _access_count;
+
     return s;
 }
 

@@ -71,7 +71,9 @@ public:
 
     ss::future<bool> has_schema(schema_id id);
     ss::future<subject_schema> has_schema(
-      canonical_schema schema, include_deleted inc_del = include_deleted::no);
+      canonical_schema schema,
+      include_deleted inc_del = include_deleted::no,
+      normalize norm = normalize::no);
 
     ///\brief Return a schema definition by id.
     ss::future<canonical_schema_definition>

@@ -18,26 +18,6 @@
 #include "pandaproxy/schema_registry/compatibility.h"
 #include "pandaproxy/schema_registry/errors.h"
 #include "pandaproxy/schema_registry/sharded_store.h"
-#include "pandaproxy/schema_registry/types.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/confluent/meta.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/confluent/types/decimal.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/calendar_period.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/color.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/date.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/datetime.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/dayofweek.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/decimal.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/expr.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/fraction.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/interval.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/latlng.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/localized_text.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/money.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/month.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/phone_number.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/postal_address.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/quaternion.pb.h"
-#include "src/v/pandaproxy/schema_registry/protobuf/google/type/timeofday.pb.h"
 #include "ssx/sformat.h"
 #include "utils/base64.h"
 
@@ -48,7 +28,8 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <boost/algorithm/string/trim.hpp>
-#include <boost/container/flat_set.hpp>
+#include <confluent/meta.pb.h>
+#include <confluent/types/decimal.pb.h>
 #include <fmt/core.h>
 #include <fmt/ostream.h>
 #include <google/protobuf/any.pb.h>
@@ -67,6 +48,23 @@
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/type.pb.h>
 #include <google/protobuf/wrappers.pb.h>
+#include <google/type/calendar_period.pb.h>
+#include <google/type/color.pb.h>
+#include <google/type/date.pb.h>
+#include <google/type/datetime.pb.h>
+#include <google/type/dayofweek.pb.h>
+#include <google/type/decimal.pb.h>
+#include <google/type/expr.pb.h>
+#include <google/type/fraction.pb.h>
+#include <google/type/interval.pb.h>
+#include <google/type/latlng.pb.h>
+#include <google/type/localized_text.pb.h>
+#include <google/type/money.pb.h>
+#include <google/type/month.pb.h>
+#include <google/type/phone_number.pb.h>
+#include <google/type/postal_address.pb.h>
+#include <google/type/quaternion.pb.h>
+#include <google/type/timeofday.pb.h>
 
 #include <algorithm>
 #include <charconv>
@@ -703,11 +701,9 @@ struct protobuf_schema_definition::impl {
                 switch (fd->type()) {
                 case pb::FieldDescriptor::TYPE_GROUP:
                 case pb::FieldDescriptor::TYPE_MESSAGE:
-                    return is_normalized ? fd->message_type()->full_name()
-                                         : fd->message_type()->name();
+                    return fd->message_type()->full_name();
                 case pb::FieldDescriptor::TYPE_ENUM:
-                    return is_normalized ? fd->enum_type()->full_name()
-                                         : fd->enum_type()->name();
+                    return fd->enum_type()->full_name();
                 default:
                     return fd->type_name();
                 };
@@ -835,12 +831,12 @@ struct protobuf_schema_definition::impl {
       int indent) const {
         auto type = field.has_value() ? field->type()
                                       : pb::FieldDescriptorProto::TYPE_MESSAGE;
-        if (type == pb::FieldDescriptorProto::TYPE_MESSAGE) {
-            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
-        } else if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
+        if (type == pb::FieldDescriptorProto::TYPE_GROUP) {
             bool is_group = true;
             render_field(
               os, edition, *field, field_descriptor, indent, is_group);
+        } else {
+            fmt::print(os, "{:{}}message {} {{\n", "", indent, message.name());
         }
 
         if (message.has_options()) {
@@ -939,7 +935,11 @@ struct protobuf_schema_definition::impl {
         for (const int i : oneofs) {
             const auto& decl = message.oneof_decl(i);
             fmt::print(os, "{:{}}oneof {} {{\n", "", indent + 2, decl.name());
-            for (const auto& field : message.field()) {
+            auto fields = maybe_sorted(
+              message.field(),
+              std::ranges::less{},
+              &pb::FieldDescriptorProto::number);
+            for (const auto& field : fields) {
                 if (field.has_oneof_index() && field.oneof_index() == i) {
                     auto d = descriptor->FindFieldByName(field.name());
                     render_field(os, edition, field, d, indent + 4);

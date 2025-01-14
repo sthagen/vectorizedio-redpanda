@@ -24,22 +24,24 @@ from confluent_kafka import TopicPartition
 
 class DatalakeVerifier():
     """
-     Verifier that does the verification of the data in the redpanda Iceberg table. 
-     The verifier consumes offsets from specified topic and verifies it the data 
+     Verifier that does the verification of the data in the redpanda Iceberg table.
+     The verifier consumes offsets from specified topic and verifies it the data
      in the iceberg table matches.
-     
-     The verifier runs two threads: 
-     - one of them consumes messages from the specified topic and buffers them in memory. 
+
+     The verifier runs two threads:
+     - one of them consumes messages from the specified topic and buffers them in memory.
        The semaphore is used to limit the number of messages buffered in memory.
-       
-     - second thread executes a per partition query that fetches the messages 
+
+     - second thread executes a per partition query that fetches the messages
        from the iceberg table
     """
 
     #TODO: add an ability to pass lambda to verify the message content
-    #TODO: add tolerance for compacted topics
-    def __init__(self, redpanda: RedpandaService, topic: str,
-                 query_engine: QueryEngineBase):
+    def __init__(self,
+                 redpanda: RedpandaService,
+                 topic: str,
+                 query_engine: QueryEngineBase,
+                 compacted: bool = False):
         self.redpanda = redpanda
         self.topic = topic
         self.logger = redpanda.logger
@@ -76,6 +78,18 @@ class DatalakeVerifier():
         # map of last queried offset for each partition
         self._max_queried_offsets = {}
         self._last_checkpoint = {}
+
+        self._compacted = compacted
+        # When consuming from a compacted topic, there may be records in the
+        # Iceberg table that have since been compacted away in the log. We
+        # maintain a set of compacted keys during message verification. If
+        # the offset for a record read from the Iceberg table differs from
+        # the offset for the record read from the log, the record's key is
+        # added to the set. The key is removed from the set when a later
+        # record with the same key is seen in the log. Finally, after
+        # consuming, we assert that the size of this set is zero (otherwise,
+        # it would imply an anomaly between the Iceberg table and the log).
+        self._expected_compacted_keys = set()
 
     def create_consumer(self):
         c = Consumer({
@@ -131,13 +145,13 @@ class DatalakeVerifier():
 
     def _get_query(self, partition, last_queried_offset, max_consumed_offset):
         return f"\
-        SELECT redpanda.offset FROM redpanda.{self._query.escape_identifier(self.topic)} \
+        SELECT redpanda.offset, redpanda.key FROM redpanda.{self._query.escape_identifier(self.topic)} \
         WHERE redpanda.partition={partition} \
         AND redpanda.offset>{last_queried_offset} \
         AND redpanda.offset<={max_consumed_offset} \
         ORDER BY redpanda.offset"
 
-    def _verify_next_message(self, partition, iceberg_offset):
+    def _verify_next_message(self, partition, iceberg_offset, iceberg_key):
         if partition not in self._consumed_messages:
             self._errors.append(
                 f"Partition {partition} returned from Iceberg query  not found in consumed messages"
@@ -148,7 +162,8 @@ class DatalakeVerifier():
         if len(p_messages) == 0:
             return
 
-        consumer_offset = self._consumed_messages[partition][0].offset()
+        message = p_messages[0]
+        consumer_offset = message.offset()
         if iceberg_offset > consumer_offset:
             self._errors.append(
                 f"Offset from Iceberg table {iceberg_offset} is greater than next consumed offset {consumer_offset} for partition {partition}, most likely there is a gap in the table"
@@ -164,10 +179,19 @@ class DatalakeVerifier():
         self._max_queried_offsets[partition] = iceberg_offset
 
         if consumer_offset != iceberg_offset:
-            self._errors.append(
-                f"Offset from iceberg table {iceberg_offset} for {partition} does not match the next consumed offset {consumer_offset}"
-            )
-            return
+            if self._compacted:
+                self._expected_compacted_keys.add(iceberg_key)
+                return
+            else:
+                self._errors.append(
+                    f"Offset from iceberg table {iceberg_offset} for {partition} does not match the next consumed offset {consumer_offset}"
+                )
+                return
+        else:
+            if self._compacted:
+                if iceberg_key in self._expected_compacted_keys:
+                    self._expected_compacted_keys.remove(iceberg_key)
+
         self._consumed_messages[partition].pop(0)
         self._num_msgs_pending_verification -= 1
         self._msg_semaphore.release()
@@ -198,7 +222,7 @@ class DatalakeVerifier():
                     with self._query.run_query(query) as cursor:
                         with self._lock:
                             for row in cursor:
-                                self._verify_next_message(partition, row[0])
+                                self._verify_next_message(partition, *row)
                                 if len(self._errors) > 0:
                                     self.logger.error(
                                         f"violations detected: {self._errors}, stopping verifier"
@@ -282,5 +306,9 @@ class DatalakeVerifier():
             self.logger.debug(f"queried offsets: {self._max_queried_offsets}")
 
             assert self._max_queried_offsets == self._max_consumed_offsets, "Mismatch between maximum offsets in topic vs iceberg table"
+
+            assert len(
+                self._expected_compacted_keys
+            ) == 0, f"Some keys which were compacted away were not seen later in the consumer's log"
         finally:
             self._consumer.close()

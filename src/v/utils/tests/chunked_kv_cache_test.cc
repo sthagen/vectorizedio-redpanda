@@ -25,6 +25,29 @@ TEST(ChunkedKVTest, InsertGetTest) {
     EXPECT_EQ(**v, str);
 }
 
+TEST(ChunkedKVTest, StatTest) {
+    using cache_type = utils::chunked_kv_cache<int, std::string>;
+
+    cache_type cache(cache_type::config{.cache_size = 2, .small_size = 1});
+    auto str = "avaluestr";
+
+    EXPECT_EQ(cache.try_insert(1, ss::make_shared<std::string>(str)), true);
+
+    auto stats = cache.stat();
+    EXPECT_EQ(stats.access_count, 0);
+    EXPECT_EQ(stats.hit_count, 0);
+
+    cache.get_value(1);
+    stats = cache.stat();
+    EXPECT_EQ(stats.access_count, 1);
+    EXPECT_EQ(stats.hit_count, 1);
+
+    cache.get_value(2);
+    stats = cache.stat();
+    EXPECT_EQ(stats.access_count, 2);
+    EXPECT_EQ(stats.hit_count, 1);
+}
+
 TEST(ChunkedKVTest, InvalidGetTest) {
     using cache_type = utils::chunked_kv_cache<int, std::string>;
 

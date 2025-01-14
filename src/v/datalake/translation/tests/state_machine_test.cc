@@ -8,6 +8,7 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 #include "datalake/translation/state_machine.h"
+#include "datalake/translation/utils.h"
 #include "raft/tests/stm_test_fixture.h"
 #include "storage/disk_log_impl.h"
 #include "test_utils/scoped_config.h"
@@ -139,8 +140,9 @@ TEST_F_CORO(translator_stm_fixture, state_machine_ops) {
     model::offset max_collectible_offset{};
     {
         auto log = std::get<0>(node_stms.begin()->second)->raft()->log();
-        max_collectible_offset = log->to_log_offset(
-          kafka::offset_cast(new_translated_offset));
+        max_collectible_offset
+          = datalake::translation::highest_log_offset_below_next(
+            log, new_translated_offset);
     }
     co_await check_max_collectible_offset(max_collectible_offset);
     co_await check_highest_translated_offset(new_translated_offset);

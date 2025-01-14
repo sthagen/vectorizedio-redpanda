@@ -378,6 +378,8 @@ redpanda_cc_library(
         ":schema_avro",
         ":schema_protobuf",
         ":schema_registry",
+        "//src/v/config",
+        "//src/v/metrics",
         "//src/v/pandaproxy",
         "//src/v/schema:registry",
         "@avro",
@@ -389,6 +391,7 @@ redpanda_cc_library(
         ":schema_identifier",
         "//src/v/base",
         "//src/v/iceberg:datatypes",
+        "//src/v/utils:chunked_kv_cache",
         "@seastar",
     ],
 )
