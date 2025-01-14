@@ -38,6 +38,9 @@ tls_config::get_credentials_builder() const& {
               if (_require_client_auth) {
                   builder.set_client_auth(ss::tls::client_auth::REQUIRE);
               }
+              if (config::shard_local_cfg().tls_enable_renegotiation()) {
+                  builder.enable_tls_renegotiation();
+              }
 
               auto f = _truststore_file
                          ? builder.set_x509_trust_file(
