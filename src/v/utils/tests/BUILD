@@ -115,7 +115,7 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_bench(
-    name = "vint_bench",
+    name = "vint_rpbench",
     srcs = [
         "vint_bench.cc",
     ],
@@ -258,7 +258,7 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_bench(
-    name = "coro_bench",
+    name = "coro_rpbench",
     srcs = [
         "coro_bench.cc",
     ],
@@ -271,7 +271,7 @@ redpanda_cc_bench(
 )
 
 redpanda_cc_bench(
-    name = "seastar_histogram_bench",
+    name = "seastar_histogram_rpbench",
     srcs = [
         "seastar_histogram_bench.cc",
     ],
@@ -480,7 +480,7 @@ redpanda_cc_btest(
 )
 
 redpanda_cc_bench(
-    name = "delta_for_bench",
+    name = "delta_for_rpbench",
     srcs = [
         "delta_for_bench.cc",
     ],
