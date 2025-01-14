@@ -10,13 +10,8 @@
  */
 
 #include "base/vassert.h"
-#include "base/vlog.h"
 #include "cluster/topics_frontend.h"
-#include "container/fragmented_vector.h"
-#include "kafka/protocol/kafka_batch_adapter.h"
-#include "kafka/protocol/produce.h"
 #include "kafka/server/handlers/fetch.h"
-#include "kafka/server/handlers/produce.h"
 #include "kafka/server/request_context.h"
 #include "kafka/server/tests/produce_consume_utils.h"
 #include "model/fundamental.h"
@@ -24,15 +19,9 @@
 #include "model/namespace.h"
 #include "redpanda/tests/fixture.h"
 #include "test_utils/async.h"
-#include "test_utils/fixture.h"
 #include "test_utils/scoped_config.h"
 
 #include <seastar/testing/perf_tests.hh>
-#include <seastar/testing/thread_test_case.hh>
-
-#include <boost/test/tools/old/interface.hpp>
-
-#include <tuple>
 
 struct fetch_bench_config {
     int num_fetches;
@@ -173,12 +162,14 @@ struct fetch_bench_fixture : redpanda_thread_fixture {
         auto client = co_await make_kafka_client();
         tests::kafka_produce_transport producer(std::move(client));
         co_await producer.start();
-        for (int pid = 0; pid < total_partition_count; pid++) {
-            for (int i = 0; i < batches_per_partition; i++) {
+        for (size_t pid = 0; pid < total_partition_count; pid++) {
+            for (size_t i = 0; i < batches_per_partition; i++) {
                 tests::kv_t msg{
                   "", random_generators::gen_alphanum_string(cfg.batch_size)};
                 co_await producer.produce_to_partition(
-                  t, model::partition_id(pid), {std::move(msg)});
+                  t,
+                  model::partition_id(static_cast<int32_t>(pid)),
+                  {std::move(msg)});
             }
         }
     }
@@ -199,7 +190,7 @@ struct fetch_bench_fixture : redpanda_thread_fixture {
               model::topic_partition(t, model::partition_id(pid)));
         };
 
-        for (auto i = 0; i < total_partition_count; i++) {
+        for (size_t i = 0; i < total_partition_count; i++) {
             co_await wait_for_leader(ntp_for_pid(i));
         }
 
