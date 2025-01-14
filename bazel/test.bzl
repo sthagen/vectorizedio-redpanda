@@ -250,34 +250,6 @@ def redpanda_cc_btest(
         tags = tags,
     )
 
-def redpanda_cc_bench(
-        name,
-        timeout,
-        srcs = [],
-        defines = [],
-        deps = [],
-        args = [],
-        env = {},
-        cpu = None,
-        memory = None,
-        data = []):
-    _redpanda_cc_test(
-        dash_dash_protocol = False,
-        cpu = cpu or 1,
-        memory = memory or "1GiB",
-        data = data,
-        env = env,
-        name = name,
-        timeout = timeout,
-        srcs = srcs,
-        defines = defines,
-        deps = deps,
-        custom_args = args,
-        tags = [
-            "bench",
-        ],
-    )
-
 def redpanda_cc_fuzz_test(
         name,
         timeout,
@@ -347,4 +319,64 @@ def redpanda_test_cc_library(
         features = [
             "layering_check",
         ],
+    )
+
+def redpanda_cc_bench(
+        name,
+        srcs = [],
+        defines = [],
+        deps = [],
+        args = [],
+        env = {},
+        cpu = 1,
+        memory = "1GiB",
+        data = [],
+        tags = []):
+    """
+    Create a seastar benchmark target
+
+    Args:
+      name: the name of the target
+      srcs: the cc files for the benchmark
+      defines: any preprocessor defines
+      deps: the dependencies for the benchmark binary
+      args: any custom arguments for the binary
+      env: any custom environment variables for the binary
+      cpu: the number of cores the benchmark needs
+      memory: the amount of RAM needed for the benchmark
+      data: any data files available to the benchmark as runfiles
+      tags: custom tags for the test
+    """
+    args = [
+        "--blocked-reactor-notify-ms 2000000",
+        "--abort-on-seastar-bad-alloc",
+    ] + args
+
+    if has_flags(args, "-m", "--memory"):
+        fail("Use `memory=\"XGiB\"` test parameter instead of -m/--memory")
+    if has_flags(args, "-c", "--smp"):
+        fail("Use `cpu=N` test parameter instead of -c/--smp")
+
+    args.append("-m{}".format(memory))
+    args.append("-c{}".format(cpu))
+    resource_tags = [
+        "resources:cpu:{}".format(cpu),
+        # This is always defined in MiB for Bazel
+        "resources:memory:{}".format(parse_bytes(memory) / (1 << 20)),
+    ]
+
+    native.cc_binary(
+        name = name,
+        srcs = srcs,
+        defines = defines,
+        deps = deps,
+        testonly = True,
+        copts = redpanda_copts(),
+        args = args,
+        features = [
+            "layering_check",
+        ],
+        tags = resource_tags + tags,
+        env = env,
+        data = data,
     )

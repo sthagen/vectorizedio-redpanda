@@ -260,7 +260,6 @@ redpanda_cc_gtest(
 
 redpanda_cc_bench(
     name = "transform_bench",
-    timeout = "moderate",
     srcs = [
         "wasm_transform_bench.cc",
     ],

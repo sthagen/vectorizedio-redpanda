@@ -215,7 +215,6 @@ redpanda_cc_gtest(
 
 redpanda_cc_bench(
     name = "thread_worker_bench",
-    timeout = "short",
     srcs = [
         "thread_worker_bench.cc",
     ],
@@ -229,7 +228,6 @@ redpanda_cc_bench(
 
 redpanda_cc_bench(
     name = "sformat_bench",
-    timeout = "short",
     srcs = [
         "sformat_bench.cc",
     ],
