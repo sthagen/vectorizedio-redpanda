@@ -181,6 +181,7 @@ redpanda_cc_library(
         "//src/v/base",
         "//src/v/datalake:logger",
         "//src/v/datalake:table_definition",
+        "//src/v/datalake:table_id_provider",
         "//src/v/iceberg:manifest_entry",
         "//src/v/iceberg:partition_key",
         "//src/v/iceberg:table_metadata",

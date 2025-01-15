@@ -47,8 +47,6 @@ public:
     get_table_info(const iceberg::table_identifier&) = 0;
 
     virtual ~schema_manager() = default;
-
-    iceberg::table_identifier table_id_for_topic(const model::topic& t) const;
 };
 
 // Used in unit tests
