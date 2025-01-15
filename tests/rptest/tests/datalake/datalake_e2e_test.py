@@ -6,15 +6,14 @@
 # As of the Change Date specified in that file, in accordance with
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
-from typing import Optional
-from rptest.clients.serde_client_utils import SchemaType, SerdeClientType
-from rptest.clients.types import TopicSpec
+from time import time
 from rptest.clients.rpk import RpkTool
 from rptest.services.cluster import cluster
 from random import randint
 
+from confluent_kafka import avro
+from confluent_kafka.avro import AvroProducer
 from rptest.services.redpanda import PandaproxyConfig, SchemaRegistryConfig, SISettings
-from rptest.services.serde_client import SerdeClient
 from rptest.services.redpanda import CloudStorageType, SISettings
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.tests.datalake.datalake_services import DatalakeServices
@@ -23,6 +22,18 @@ from rptest.tests.datalake.utils import supported_storage_types
 from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 from rptest.services.metrics_check import MetricCheck
+
+avro_schema_str = """
+{
+    "type": "record",
+    "namespace": "com.redpanda.examples.avro",
+    "name": "ClickEvent",
+    "fields": [
+        {"name": "number", "type": "long"},
+        {"name": "timestamp_us", "type": {"type": "long", "logicalType": "timestamp-micros"}}
+    ]
+}
+"""
 
 
 class DatalakeE2ETests(RedpandaTest):
@@ -46,32 +57,6 @@ class DatalakeE2ETests(RedpandaTest):
         # redpanda will be started by DatalakeServices
         pass
 
-    def _get_serde_client(
-            self,
-            schema_type: SchemaType,
-            client_type: SerdeClientType,
-            topic: str,
-            count: int,
-            skip_known_types: Optional[bool] = None,
-            subject_name_strategy: Optional[str] = None,
-            payload_class: Optional[str] = None,
-            compression_type: Optional[TopicSpec.CompressionTypes] = None):
-        schema_reg = self.redpanda.schema_reg().split(',', 1)[0]
-        sec_cfg = self.redpanda.kafka_client_security().to_dict()
-
-        return SerdeClient(self.test_context,
-                           self.redpanda.brokers(),
-                           schema_reg,
-                           schema_type,
-                           client_type,
-                           count,
-                           topic=topic,
-                           security_config=sec_cfg if sec_cfg else None,
-                           skip_known_types=skip_known_types,
-                           subject_name_strategy=subject_name_strategy,
-                           payload_class=payload_class,
-                           compression_type=compression_type)
-
     @cluster(num_nodes=4)
     @matrix(cloud_storage_type=supported_storage_types(),
             query_engine=[QueryEngineType.SPARK, QueryEngineType.TRINO],
@@ -90,7 +75,7 @@ class DatalakeE2ETests(RedpandaTest):
             dl.produce_to_topic(self.topic_name, 1024, count)
             dl.wait_for_translation(self.topic_name, msg_count=count)
 
-    @cluster(num_nodes=4)
+    @cluster(num_nodes=3)
     @matrix(cloud_storage_type=supported_storage_types(),
             query_engine=[QueryEngineType.SPARK, QueryEngineType.TRINO])
     def test_avro_schema(self, cloud_storage_type, query_engine):
@@ -103,11 +88,20 @@ class DatalakeE2ETests(RedpandaTest):
                               include_query_engines=[query_engine]) as dl:
             dl.create_iceberg_enabled_topic(
                 self.topic_name, iceberg_mode="value_schema_id_prefix")
-            avro_serde_client = self._get_serde_client(SchemaType.AVRO,
-                                                       SerdeClientType.Golang,
-                                                       self.topic_name, count)
-            avro_serde_client.start()
-            avro_serde_client.wait()
+
+            schema = avro.loads(avro_schema_str)
+            producer = AvroProducer(
+                {
+                    'bootstrap.servers': self.redpanda.brokers(),
+                    'schema.registry.url':
+                    self.redpanda.schema_reg().split(",")[0]
+                },
+                default_value_schema=schema)
+            for _ in range(count):
+                t = time()
+                record = {"number": int(t), "timestamp_us": int(t * 1000000)}
+                producer.produce(topic=self.topic_name, value=record)
+            producer.flush()
             dl.wait_for_translation(self.topic_name, msg_count=count)
 
             if query_engine == QueryEngineType.TRINO:
@@ -115,7 +109,8 @@ class DatalakeE2ETests(RedpandaTest):
                 trino_expected_out = [(
                     'redpanda',
                     'row(partition integer, offset bigint, timestamp timestamp(6), headers array(row(key varbinary, value varbinary)), key varbinary)',
-                    '', ''), ('val', 'bigint', '', '')]
+                    '', ''), ('number', 'bigint', '', ''),
+                                      ('timestamp_us', 'timestamp(6)', '', '')]
                 trino_describe_out = trino.run_query_fetch_all(
                     f"describe {table_name}")
                 assert trino_describe_out == trino_expected_out, str(
@@ -125,8 +120,9 @@ class DatalakeE2ETests(RedpandaTest):
                 spark_expected_out = [(
                     'redpanda',
                     'struct<partition:int,offset:bigint,timestamp:timestamp_ntz,headers:array<struct<key:binary,value:binary>>,key:binary>',
-                    None), ('val', 'bigint', None), ('', '', ''),
-                                      ('# Partitioning', '', ''),
+                    None), ('number', 'bigint', None),
+                                      ('timestamp_us', 'timestamp_ntz', None),
+                                      ('', '', ''), ('# Partitioning', '', ''),
                                       ('Part 0', 'hours(redpanda.timestamp)',
                                        '')]
                 spark_describe_out = spark.run_query_fetch_all(
