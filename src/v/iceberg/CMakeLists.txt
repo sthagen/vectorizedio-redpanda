@@ -73,6 +73,7 @@ v_cc_library(
     values.cc
     values_avro.cc
     values_bytes.cc
+    values_json.cc
     rest_client/json.cc
     rest_client/retry_policy.cc
     rest_client/catalog_client.cc

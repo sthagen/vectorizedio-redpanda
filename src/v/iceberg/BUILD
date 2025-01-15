@@ -195,6 +195,29 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "values_json",
+    srcs = [
+        "values_json.cc",
+    ],
+    hdrs = [
+        "values_json.h",
+    ],
+    include_prefix = "iceberg",
+    deps = [
+        ":datatypes",
+        ":json_utils",
+        ":json_writer",
+        ":values",
+        "//src/v/json",
+        "//src/v/strings:string_switch",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@boost//:iostreams",
+        "@boost//:range",
+    ],
+)
+
+redpanda_cc_library(
     name = "field_collecting_visitor",
     hdrs = [
         "field_collecting_visitor.h",
