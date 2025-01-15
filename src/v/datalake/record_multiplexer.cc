@@ -274,6 +274,30 @@ record_multiplexer::handle_invalid_record(
     vlog(_log.debug, "Dropping invalid record at offset {}", offset);
     // TODO: add a metric!
     // TODO: dead-letter table?
+
+    if (!_invalid_record_writer) {
+        auto ensure_res = co_await _table_creator.ensure_dlq_table(
+          _ntp.tp.topic, _topic_revision);
+
+        if (ensure_res.has_error()) {
+            auto e = ensure_res.error();
+            switch (e) {
+            case table_creator::errc::incompatible_schema:
+                [[fallthrough]];
+            case table_creator::errc::failed:
+                [[fallthrough]];
+            case table_creator::errc::shutting_down:
+                vlog(
+                  _log.warn,
+                  "Error ensuring DLQ table schema for invalid record {}",
+                  offset);
+                co_return writer_error::parquet_conversion_error;
+            }
+        }
+
+        _invalid_record_writer = true;
+    }
+
     co_return std::nullopt;
 }
 } // namespace datalake

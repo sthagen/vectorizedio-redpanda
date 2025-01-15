@@ -78,6 +78,7 @@ private:
       record_schema_components,
       std::unique_ptr<partitioning_writer>>
       _writers;
+    bool _invalid_record_writer{};
 
     std::optional<writer_error> _error;
     std::optional<write_result> _result;
