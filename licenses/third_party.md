@@ -16,7 +16,6 @@ please keep this up to date with every new library use.
 | CRoaring        | Apache License 2                   |
 | clang           | Apache License 2                   |
 | crc32c          | BSD 3                              |
-| DPDK            | BSD                                |
 | fmt             | BSD                                |
 | HdrHistogram    | BSD 2                              |
 | hwloc           | BSD                                |
