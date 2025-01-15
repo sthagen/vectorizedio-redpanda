@@ -80,8 +80,11 @@ public:
     }
 
     ss::future<result<local_file_metadata, writer_error>> finish() override {
-        return ss::make_ready_future<result<local_file_metadata, writer_error>>(
-          _result);
+        auto result = co_await _writer->finish();
+        if (result != writer_error::ok) {
+            co_return result;
+        }
+        co_return _result;
     }
 
 private:
