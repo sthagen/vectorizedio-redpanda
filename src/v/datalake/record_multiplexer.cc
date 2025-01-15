@@ -16,6 +16,7 @@
 #include "datalake/record_schema_resolver.h"
 #include "datalake/record_translator.h"
 #include "datalake/table_creator.h"
+#include "datalake/table_id_provider.h"
 #include "model/record.h"
 #include "storage/parser_utils.h"
 
@@ -167,7 +168,7 @@ record_multiplexer::operator()(model::record_batch batch) {
                 co_return ss::stop_iteration::yes;
             }
 
-            auto table_id = _schema_mgr.table_id_for_topic(_ntp.tp.topic);
+            auto table_id = table_id_provider::table_id(_ntp.tp.topic);
             auto load_res = co_await _schema_mgr.get_table_info(table_id);
             if (load_res.has_error()) {
                 auto e = load_res.error();

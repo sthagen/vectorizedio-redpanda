@@ -346,6 +346,7 @@ redpanda_cc_library(
         ":record_schema_resolver",
         ":record_translator",
         ":table_creator",
+        ":table_id_provider",
         "//src/v/base",
         "//src/v/storage:parser_utils",
         "//src/v/utils:lazy_abort_source",
@@ -552,11 +553,25 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":record_translator",
+        ":table_id_provider",
     ],
     include_prefix = "datalake",
     visibility = [":__subpackages__"],
     deps = [
         ":catalog_schema_manager",
         ":record_schema_resolver",
+    ],
+)
+
+redpanda_cc_library(
+    name = "table_id_provider",
+    hdrs = [
+        "table_id_provider.h",
+    ],
+    include_prefix = "datalake",
+    visibility = [":__subpackages__"],
+    deps = [
+        "//src/v/iceberg:table_identifier",
+        "//src/v/model",
     ],
 )
