@@ -164,6 +164,13 @@ rest_catalog::commit_txn(const table_identifier& t_id, transaction txn) {
           txn.error());
         co_return errc::unexpected_state;
     }
+    if (txn.updates().updates.empty()) {
+        vlog(
+          log.debug,
+          "Transaction has no updates to table {}, returning early",
+          t_id.table);
+        co_return std::nullopt;
+    }
 
     commit_table_request req;
     req.identifier = t_id.copy();
