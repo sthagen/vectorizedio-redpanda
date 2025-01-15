@@ -250,13 +250,20 @@ struct read_result {
     };
 
     explicit read_result(error_code e)
-      : error(e) {}
+      : start_offset(-1)
+      , high_watermark(-1)
+      , last_stable_offset(-1)
+      , error(e) {}
 
     // special case for offset_out_of_range_error
     read_result(
-      error_code e, model::offset start_offset, model::offset high_watermark)
+      error_code e,
+      model::offset start_offset,
+      model::offset hw,
+      model::offset lso)
       : start_offset(start_offset)
-      , high_watermark(high_watermark)
+      , high_watermark(hw)
+      , last_stable_offset(lso)
       , error(e) {}
 
     read_result(
