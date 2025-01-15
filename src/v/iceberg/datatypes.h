@@ -91,6 +91,11 @@ struct struct_type {
     chunked_vector<nested_field_ptr> fields;
     friend bool operator==(const struct_type& lhs, const struct_type& rhs);
     struct_type copy() const;
+
+    // `nested_name` contains components of the nested field name in increasing
+    // depth order. If the field is not found, returns nullptr.
+    const nested_field*
+    find_field_by_name(const std::vector<ss::sstring>& nested_name) const;
 };
 
 struct list_type {
