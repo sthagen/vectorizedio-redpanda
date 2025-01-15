@@ -12,6 +12,7 @@
 #include "base/seastarx.h"
 #include "container/fragmented_vector.h"
 #include "datalake/coordinator/state_update.h"
+#include "iceberg/table_identifier.h"
 
 #include <seastar/core/future.hh>
 
@@ -28,7 +29,7 @@ public:
     commit_topic_files_to_catalog(model::topic, const topics_state&) const = 0;
 
     virtual ss::future<checked<std::nullopt_t, errc>>
-    drop_table(const model::topic&) const = 0;
+    drop_table(const iceberg::table_identifier&) const = 0;
 
     virtual ~file_committer() = default;
 };

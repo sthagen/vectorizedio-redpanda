@@ -525,7 +525,8 @@ coordinator::update_lifecycle_state(
         if (tombstone_it != topic_table_.get_iceberg_tombstones().end()) {
             auto tombstone_rev = tombstone_it->second.last_deleted_revision;
             if (tombstone_rev >= topic.revision) {
-                auto drop_res = co_await file_committer_.drop_table(t);
+                auto table_id = table_id_provider::table_id(t);
+                auto drop_res = co_await file_committer_.drop_table(table_id);
                 if (drop_res.has_error()) {
                     switch (drop_res.error()) {
                     case file_committer::errc::shutting_down:
