@@ -355,6 +355,7 @@ redpanda_cc_gtest(
 
 redpanda_cc_bench(
     name = "record_multiplexer_rpbench",
+    timeout = "long",
     srcs = [
         "record_multiplexer_bench.cc",
     ],
