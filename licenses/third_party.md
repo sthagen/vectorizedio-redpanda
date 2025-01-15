@@ -34,7 +34,6 @@ please keep this up to date with every new library use.
 | protobuf        | Apache License 2                   |
 | rapidjson       | MIT                                |
 | re2             | BSD 3-Clause                       |
-| sasl2           | <https://github.com/cyrusimap/cyrus-sasl/blob/master/COPYING> |
 | seastar         | Apache License 2                   |
 | snappy          | <https://github.com/google/snappy/blob/master/COPYING> |
 | unordered_dense | MIT                                |
