@@ -33,6 +33,7 @@ jobs:
           wget -O $HOME/.local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
           chmod +x $HOME/.local/bin/bazel
       - name: Run clang-format
+        # Don't update the lockfile for this
         run: |
-          bazel run //tools:clang_format
+          bazel run --lockfile_mode=off //tools:clang_format
           git diff --exit-code
