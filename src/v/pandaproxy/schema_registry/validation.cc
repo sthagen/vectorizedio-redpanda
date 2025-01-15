@@ -355,7 +355,7 @@ public:
         co_return valid;
     }
 
-    ss::future<result> operator()(std::unique_ptr<model::record_batch> batch) {
+    ss::future<kafka::error_code> operator()(const model::record_batch& batch) {
         if (!_api) {
             // If Schema Registry is not enabled, the safe default is to reject
             co_return kafka::error_code::invalid_record;
@@ -363,16 +363,16 @@ public:
         if (
           config::shard_local_cfg().enable_schema_id_validation()
           == pandaproxy::schema_registry::schema_id_validation_mode::none) {
-            co_return std::move(batch);
+            co_return kafka::error_code::none;
         }
 
-        auto valid = co_await validate(*batch);
+        auto valid = co_await validate(batch);
 
         if (!valid) {
             // It's possible that the schema registry doesn't have a newly
             // written schema, update and retry.
             co_await _api->_sequencer.local().read_sync();
-            valid = co_await validate(*batch);
+            valid = co_await validate(batch);
         }
 
         if (!valid) {
@@ -390,7 +390,7 @@ public:
             co_return kafka::error_code::invalid_record;
         }
 
-        co_return std::move(batch);
+        co_return kafka::error_code::none;
     }
 
 private:
@@ -447,19 +447,19 @@ std::optional<schema_id_validator> maybe_make_schema_id_validator(
     return std::nullopt;
 }
 
-ss::future<schema_id_validator::result> schema_id_validator::operator()(
-  std::unique_ptr<model::record_batch> batch, cluster::partition_probe* probe) {
-    using futurator = ss::futurize<schema_id_validator::result>;
-    return (*_impl)(std::move(batch))
+ss::future<kafka::error_code> schema_id_validator::operator()(
+  const model::record_batch& batch, cluster::partition_probe* probe) {
+    using futurator = ss::futurize<kafka::error_code>;
+    return (*_impl)(batch)
       .handle_exception([](std::exception_ptr e) {
           vlog(plog.warn, "Invalid record due to exception: {}", e);
           return futurator::convert(kafka::error_code::invalid_record);
       })
       .then([probe](futurator::value_type res) {
-          if (!res.has_value()) {
+          if (res != kafka::error_code::none) {
               probe->add_schema_id_validation_failed();
           }
-          return futurator::convert(std::move(res));
+          return res;
       });
 }
 

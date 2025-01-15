@@ -402,32 +402,30 @@ static partition_produce_stages produce_topic_partition(
                 }
 
                 auto probe = std::addressof(partition->probe());
-                return pandaproxy::schema_registry::maybe_validate_schema_id(
-                         std::move(validator), std::move(batch), probe)
-                  .then([ntp{std::move(ntp)},
-                         partition{std::move(partition)},
-                         dispatch = std::move(dispatch),
-                         bid,
-                         acks,
-                         source_shard,
-                         num_records,
-                         batch_size,
-                         timeout](result<
-                                  std::unique_ptr<model::record_batch>,
-                                  kafka::error_code> batch) mutable {
-                      if (batch.has_error()) {
+                auto f = pandaproxy::schema_registry::maybe_validate_schema_id(
+                  std::move(validator), *batch, probe);
+
+                return std::move(f).then(
+                  [ntp{std::move(ntp)},
+                   partition{std::move(partition)},
+                   dispatch = std::move(dispatch),
+                   bid,
+                   acks,
+                   source_shard,
+                   num_records,
+                   batch_size,
+                   timeout,
+                   batch = std::move(batch)](kafka::error_code err) mutable {
+                      if (err != kafka::error_code::none) {
                           return finalize_request_with_error_code(
-                            batch.error(),
-                            std::move(dispatch),
-                            ntp,
-                            source_shard);
+                            err, std::move(dispatch), ntp, source_shard);
                       }
                       auto stages = partition_append(
                         ntp.tp.partition,
                         ss::make_lw_shared<replicated_partition>(
                           std::move(partition)),
                         bid,
-                        std::move(batch).value(),
+                        std::move(batch),
                         acks,
                         num_records,
                         batch_size,
