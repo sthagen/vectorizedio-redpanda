@@ -259,7 +259,7 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_bench(
-    name = "transform_bench",
+    name = "wasm_transform_rpbench",
     srcs = [
         "wasm_transform_bench.cc",
     ],

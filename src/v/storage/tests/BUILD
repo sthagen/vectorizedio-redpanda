@@ -1,4 +1,4 @@
-load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
     name = "storage_e2e_fixture",
@@ -872,5 +872,21 @@ redpanda_cc_btest(
         "@boost//:test",
         "@seastar",
         "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "storage_rpbench",
+    srcs = ["compaction_idx_bench.cc"],
+    deps = [
+        "//src/v/bytes:random",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/storage",
+        "//src/v/storage:logger",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )

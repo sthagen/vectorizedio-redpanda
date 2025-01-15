@@ -1,4 +1,4 @@
-load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
     name = "randoms",
@@ -548,5 +548,65 @@ redpanda_cc_btest(
         "@boost//:test",
         "@fmt",
         "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "partition_allocator_b_rpbench",
+    srcs = ["allocation_bench.cc"],
+    deps = [
+        ":partition_allocator_fixture",
+        "//src/v/base",
+        "//src/v/cluster",
+        "//src/v/raft",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_test_cc_library(
+    name = "health_monitor_test_utils",
+    hdrs = [
+        "health_monitor_test_utils.h",
+    ],
+    include_prefix = "cluster/tests",
+    deps = [
+        "//src/v/cluster",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "health_report_rpbench",
+    srcs = ["health_bench.cc"],
+    deps = [
+        ":health_monitor_test_utils",
+        "//src/v/base",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/raft",
+        "//src/v/random:generators",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "leader_balancer_bench_rpbench",
+    srcs = ["leader_balancer_bench.cc"],
+    deps = [
+        ":leader_balancer_test_utils",
+        "//src/v/cluster",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "health_monitor_rpbench",
+    srcs = ["health_monitor_bench.cc"],
+    deps = [
+        "//src/v/cluster",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )

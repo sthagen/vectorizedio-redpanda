@@ -3659,6 +3659,15 @@ configuration::configuration()
        tls_version::v1_1,
        tls_version::v1_2,
        tls_version::v1_3})
+  , tls_enable_renegotiation(
+      *this,
+      "tls_enable_renegotiation",
+      "TLS client-initiated renegotiation is considered unsafe and is by "
+      "default disabled.  Only re-enable it if you are experiencing issues "
+      "with your TLS-enabled client.  This option has no effect on TLSv1.3 "
+      "connections as client-initiated renegotiation was removed.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      false)
   , iceberg_enabled(
       *this,
       "iceberg_enabled",

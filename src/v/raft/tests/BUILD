@@ -1,4 +1,4 @@
-load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
     name = "simple_raft_fixture",
@@ -672,5 +672,17 @@ redpanda_cc_gtest(
         "@googletest//:gtest",
         "@seastar",
         "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "heartbeat_bench_rpbench",
+    srcs = ["heartbeat_bench.cc"],
+    deps = [
+        "//src/v/raft",
+        "//src/v/random:generators",
+        "//src/v/test_utils:random",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )

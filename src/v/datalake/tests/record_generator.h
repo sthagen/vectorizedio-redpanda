@@ -17,6 +17,7 @@
 #include "serde/avro/tests/data_generator.h"
 #include "serde/protobuf/tests/data_generator.h"
 #include "storage/record_batch_builder.h"
+#include "utils/absl_sstring_hash.h"
 #include "utils/named_type.h"
 
 #include <seastar/core/future.hh>
@@ -57,7 +58,11 @@ public:
       testing::protobuf_generator_config config = {});
 
 private:
-    chunked_hash_map<std::string_view, pandaproxy::schema_registry::schema_id>
+    chunked_hash_map<
+      ss::sstring,
+      pandaproxy::schema_registry::schema_id,
+      sstring_hash,
+      sstring_eq>
       _id_by_name;
     schema::registry* _sr;
 };

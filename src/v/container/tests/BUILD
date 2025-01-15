@@ -1,19 +1,5 @@
 load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
-redpanda_test_cc_library(
-    name = "bench_utils",
-    hdrs = [
-        "bench_utils.h",
-    ],
-    include_prefix = "container/tests",
-    visibility = ["//visibility:private"],
-    deps = [
-        "//src/v/base",
-        "//src/v/random:generators",
-        "@seastar//:benchmark",
-    ],
-)
-
 redpanda_cc_gtest(
     name = "chunked_hash_map_test",
     timeout = "short",
@@ -91,28 +77,31 @@ redpanda_cc_btest(
     ],
 )
 
-redpanda_cc_bench(
-    name = "vector_bench",
-    srcs = [
-        "vector_bench.cc",
+redpanda_test_cc_library(
+    name = "bench_utils",
+    hdrs = [
+        "bench_utils.h",
     ],
+    include_prefix = "container/tests",
+    visibility = ["//visibility:private"],
     deps = [
-        ":bench_utils",
         "//src/v/base",
-        "//src/v/container:fragmented_vector",
         "//src/v/random:generators",
         "@seastar//:benchmark",
     ],
 )
 
 redpanda_cc_bench(
-    name = "map_bench",
+    name = "container_rpbench",
     srcs = [
         "map_bench.cc",
+        "vector_bench.cc",
     ],
     deps = [
         ":bench_utils",
+        "//src/v/base",
         "//src/v/container:contiguous_range_map",
+        "//src/v/container:fragmented_vector",
         "//src/v/random:generators",
         "@abseil-cpp//absl/container:btree",
         "@boost//:range",

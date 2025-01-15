@@ -1,7 +1,7 @@
 load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest")
 
 redpanda_cc_bench(
-    name = "serde_bench",
+    name = "serde_rpbench",
     srcs = [
         "bench.cc",
     ],

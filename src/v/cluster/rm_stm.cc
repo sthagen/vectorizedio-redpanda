@@ -168,18 +168,31 @@ ss::future<> rm_stm::cleanup_evicted_producers() {
         auto pid = co_await _producers_pending_cleanup.pop_eventually();
         auto units = co_await _state_lock.hold_read_lock();
         auto it = _producers.find(pid.get_id());
-        if (it != _producers.end() && it->second->id() == pid) {
-            const auto& producer = *(it->second);
+        if (it == _producers.end()) {
+            vlog(
+              _ctx_log.error,
+              "No producer state found for pid: {}, skipping cleanup",
+              pid);
+            continue;
+        }
+        const auto& producer = *(it->second);
+        if (producer.is_evicted() && producer.id() == pid) {
             if (producer._active_transaction_hook.is_linked()) {
                 vlog(
                   _ctx_log.error,
                   "Ignoring cleanup request of producer {} due to in progress "
                   "transaction.",
                   producer);
-                co_return;
+                continue;
             }
             _producers.erase(it);
             vlog(_ctx_log.trace, "removed producer: {}", pid);
+        } else {
+            vlog(
+              _ctx_log.error,
+              "Skipping cleanup of evicted pid: {} and associated producer: {}",
+              pid,
+              producer);
         }
     }
 }
@@ -225,6 +238,20 @@ ss::future<checked<model::term_id, tx::errc>> rm_stm::begin_tx(
     }
     auto synced_term = _insync_term;
     auto [producer, _] = maybe_create_producer(new_pid);
+    auto log_level = ss::log_level::trace;
+    if (unlikely(producer->is_evicted())) {
+        log_level = ss::log_level::warn;
+    }
+    vlogl(
+      _ctx_log,
+      log_level,
+      "attempting begin_tx with producer: {}, pid: {}, sequence: {}, timeout: "
+      "{}, coordinator partition: {}",
+      *producer,
+      new_pid,
+      tx_seq,
+      transaction_timeout_ms,
+      tm);
     co_return co_await producer->run_with_lock(
       [this,
        synced_term,
@@ -448,6 +475,19 @@ ss::future<tx::errc> rm_stm::commit_tx(
     }
     auto synced_term = _insync_term;
     auto [producer, _] = maybe_create_producer(pid);
+    auto log_level = ss::log_level::trace;
+    if (unlikely(producer->is_evicted())) {
+        log_level = ss::log_level::warn;
+    }
+    vlogl(
+      _ctx_log,
+      log_level,
+      "attempting commit_tx with producer: {}, pid: {}, sequence: {}, timeout: "
+      "{}",
+      *producer,
+      pid,
+      tx_seq,
+      timeout);
     if (pid != producer->id()) {
         co_return tx::errc::fenced;
     }
@@ -590,6 +630,19 @@ ss::future<tx::errc> rm_stm::abort_tx(
     }
     auto synced_term = _insync_term;
     auto [producer, _] = maybe_create_producer(pid);
+    auto log_level = ss::log_level::trace;
+    if (unlikely(producer->is_evicted())) {
+        log_level = ss::log_level::warn;
+    }
+    vlogl(
+      _ctx_log,
+      log_level,
+      "attempting abort_tx with producer: {}, pid: {}, sequence: {}, timeout: "
+      "{}",
+      *producer,
+      pid,
+      tx_seq,
+      timeout);
     if (pid != producer->id()) {
         co_return tx::errc::invalid_producer_epoch;
     }

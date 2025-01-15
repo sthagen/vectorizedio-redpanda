@@ -1,7 +1,7 @@
 #
 # docs, prose, legal
 #
-licenses           @emaxerrno @dswang
+licenses           @emaxerrno
 
 #
 # cloud
@@ -31,11 +31,11 @@ licenses           @emaxerrno @dswang
 #
 # rpk
 #
-/src/go/rpk        @twmb @r-vasquez @gene-redpanda @Deflaimun
+/src/go/rpk        @r-vasquez @redpanda-data/ux-rpk @Deflaimun
 # There are now two copies goreleaser.yaml in the interim `rpk connect` arch
 # Adding devprod to code owners to review any changes (e.g. they should stay in sync)
-/src/go/.goreleaser.yaml @twmb @r-vasquez @gene-redpanda @Deflaimun @redpanda-data/devprod
-/src/go/.goreleaser_rpk_connect.yaml @twmb @r-vasquez @gene-redpanda @Deflaimun @redpanda-data/devprod
+/src/go/.goreleaser.yaml @r-vasquez @redpanda-data/ux-rpk @redpanda-data/devprod
+/src/go/.goreleaser_rpk_connect.yaml @r-vasquez @redpanda-data/ux-rpk @redpanda-data/devprod
 
 #
 # testing

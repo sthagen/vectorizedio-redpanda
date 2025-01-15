@@ -167,7 +167,8 @@ record_multiplexer::operator()(model::record_batch batch) {
                 co_return ss::stop_iteration::yes;
             }
 
-            auto load_res = co_await _schema_mgr.get_table_info(_ntp.tp.topic);
+            auto table_id = _schema_mgr.table_id_for_topic(_ntp.tp.topic);
+            auto load_res = co_await _schema_mgr.get_table_info(table_id);
             if (load_res.has_error()) {
                 auto e = load_res.error();
                 switch (e) {

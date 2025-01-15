@@ -1,5 +1,6 @@
 load(
     "//bazel:test.bzl",
+    "redpanda_cc_bench",
     "redpanda_cc_btest",
     "redpanda_cc_gtest",
     "redpanda_test_cc_library",
@@ -600,5 +601,24 @@ redpanda_cc_btest(
         "@fmt",
         "@seastar",
         "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "cloud_storage_rpbench",
+    srcs = [
+        "cache_bench.cc",
+        "segment_meta_cstore_bench.cc",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/cloud_storage",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/ssx:sformat",
+        "//src/v/utils:delta_for",
+        "@abseil-cpp//absl/container:btree",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )
