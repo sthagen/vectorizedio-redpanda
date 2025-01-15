@@ -23,14 +23,12 @@
 #include "serde/protobuf/tests/data_generator.h"
 
 #include <seastar/testing/perf_tests.hh>
-#include <seastar/testing/thread_test_case.hh>
-
-#include <boost/test/tools/old/interface.hpp>
 
 #include <optional>
 #include <string_view>
 
 namespace {
+
 std::string generate_nested_proto_internal(size_t total_depth) {
     constexpr auto proto_template = R"(
     message Foo{} {{
@@ -102,7 +100,7 @@ std::string generate_linear_proto(size_t total_fields) {
     }})";
 
     std::string fields = "";
-    for (int i = 1; i <= total_fields; i++) {
+    for (size_t i = 1; i <= total_fields; i++) {
         fields += std::format("string a{} = {};\n", i, i);
     }
 
@@ -255,7 +253,10 @@ struct counting_consumer {
     }
     ss::future<counting_consumer> end_of_stream() {
         auto res = co_await mux.end_of_stream();
-        BOOST_REQUIRE(!res.has_error());
+        if (res.has_error()) [[unlikely]] {
+            throw std::runtime_error(
+              fmt::format("failed to end stream: {}", res.error()));
+        }
         co_return std::move(*this);
     }
 };
@@ -343,7 +344,10 @@ private:
         }
 
         auto reg_res = co_await _record_gen.register_avro_schema(name, schema);
-        BOOST_REQUIRE(reg_res.has_value());
+        if (reg_res.has_error()) [[unlikely]] {
+            throw std::runtime_error(fmt::format(
+              "failed to register avro schema: {}", reg_res.error()));
+        }
     }
 
     ss::future<>
@@ -355,7 +359,10 @@ private:
 
         auto reg_res = co_await _record_gen.register_protobuf_schema(
           name, schema);
-        BOOST_REQUIRE(reg_res.has_value());
+        if (reg_res.has_error()) [[unlikely]] {
+            throw std::runtime_error(fmt::format(
+              "failed to register protobuf schema: {}", reg_res.error()));
+        }
     }
 
     ss::future<chunked_vector<model::record_batch>> generate_batches(
@@ -377,7 +384,10 @@ private:
                 auto res = co_await add_batch(batch_builder);
                 ++o;
 
-                BOOST_REQUIRE(!res.has_error());
+                if (res.has_error()) [[unlikely]] {
+                    throw std::runtime_error(
+                      fmt::format("unable to add record: {}", res.error()));
+                }
             }
             auto batch = std::move(batch_builder).build();
             ret.emplace_back(std::move(batch));
@@ -478,7 +488,6 @@ PERF_TEST_CN(
     static ::testing::protobuf_generator_config gen_config = {
       .string_length_range{4, 4}, .max_nesting_level = 40};
     static std::string proto_schema = generate_nested_proto(31);
-
     co_await configure_bench(
       gen_config, proto_schema, batches, records_per_batch);
     co_return co_await run_bench();

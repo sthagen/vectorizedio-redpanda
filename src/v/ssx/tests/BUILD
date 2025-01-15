@@ -214,26 +214,15 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_bench(
-    name = "thread_worker_bench",
+    name = "ssx_bench_rpbench",
     srcs = [
+        "sformat_bench.cc",
         "thread_worker_bench.cc",
     ],
     deps = [
         "//src/v/base",
-        "//src/v/ssx:thread_worker",
-        "@seastar",
-        "@seastar//:benchmark",
-    ],
-)
-
-redpanda_cc_bench(
-    name = "sformat_bench",
-    srcs = [
-        "sformat_bench.cc",
-    ],
-    deps = [
-        "//src/v/base",
         "//src/v/ssx:sformat",
+        "//src/v/ssx:thread_worker",
         "@boost//:uuid",
         "@seastar",
         "@seastar//:benchmark",

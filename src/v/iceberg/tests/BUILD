@@ -638,7 +638,7 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_bench(
-    name = "uri_bench",
+    name = "iceberg_uri_rpbench",
     srcs = [
         "uri_bench.cc",
     ],
@@ -650,7 +650,7 @@ redpanda_cc_bench(
 )
 
 redpanda_cc_bench(
-    name = "compatibility_bench",
+    name = "iceberg_compatibility_rpbench",
     srcs = [
         "compatibility_bench.cc",
     ],

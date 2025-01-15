@@ -85,9 +85,8 @@ template<typename T>
 [[gnu::noinline]] T do_bench_deserialize_node_health_report(iobuf buf) {
     return serde::from_iobuf<T>(std::move(buf));
 }
-template<typename GenFunc>
 void bench_deserialize_node_health_report(
-  size_t num_topics, size_t partitions_per_topic, GenFunc& f) {
+  size_t num_topics, size_t partitions_per_topic) {
     auto hr = make_node_health_report(num_topics, partitions_per_topic);
     auto buf = iobuf();
     serde::write(buf, std::move(hr));
@@ -100,13 +99,13 @@ void bench_deserialize_node_health_report(
 }
 
 PERF_TEST(node_health_report, deserialize_many_partitions) {
-    bench_deserialize_node_health_report(10, 5000, make_node_health_report);
+    bench_deserialize_node_health_report(10, 5000);
 }
 
 PERF_TEST(node_health_report, deserialize_many_topics) {
-    bench_deserialize_node_health_report(50000, 1, make_node_health_report);
+    bench_deserialize_node_health_report(50000, 1);
 }
 
 PERF_TEST(node_health_report, deserialize_many_topics_replicated_partitions) {
-    bench_deserialize_node_health_report(50000, 3, make_node_health_report);
+    bench_deserialize_node_health_report(50000, 3);
 }
