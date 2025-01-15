@@ -420,3 +420,60 @@ TEST_F(RemoveSnapshotsActionTest, TestRemoveSnapshotReferenceTransaction) {
     ASSERT_EQ(txn.table().snapshots->size(), 0);
     ASSERT_EQ(txn.table().refs->size(), 0);
 }
+
+TEST_F(RemoveSnapshotsActionTest, TestTableMaxAgeProperty) {
+    const auto expiry_age_ms = 1000;
+    auto table = create_table();
+    table.properties.emplace();
+    table.properties->emplace(
+      max_snapshot_age_ms_prop, fmt::to_string(expiry_age_ms));
+
+    const auto now = model::timestamp::now();
+    auto highest_id = add_snapshots(default_total_snaps, now.value(), &table);
+    add_branch(highest_id, "main", &table);
+
+    auto removal = compute_removal(table, now.value() + expiry_age_ms + 1);
+    EXPECT_EQ(
+      removal.snaps.size(),
+      default_total_snaps
+        - remove_snapshots_action::default_min_snapshots_retained);
+    EXPECT_TRUE(removal.refs.empty());
+}
+
+TEST_F(RemoveSnapshotsActionTest, TestTableMaxRefAgeProperty) {
+    const auto expiry_age_ms = 1000;
+    auto table = create_table();
+    table.properties.emplace();
+    // Set the snapshots and references to expire at the same time so snapshots
+    // with expired references are removed earlier than the default.
+    table.properties->emplace(
+      max_ref_age_ms_prop, fmt::to_string(expiry_age_ms));
+    table.properties->emplace(
+      max_snapshot_age_ms_prop, fmt::to_string(expiry_age_ms));
+
+    const auto now = model::timestamp::now();
+    auto id = add_snapshots(1, now.value(), &table);
+    add_tag(id, "tag", &table);
+
+    auto removal = compute_removal(table, now.value() + expiry_age_ms + 1);
+    EXPECT_EQ(removal.snaps.size(), 1);
+    EXPECT_EQ(removal.refs.size(), 1);
+}
+
+TEST_F(RemoveSnapshotsActionTest, TestTableMinSnapsKeptProperty) {
+    const auto min_to_keep = 10;
+    auto table = create_table();
+    table.properties.emplace();
+    table.properties->emplace(
+      min_snapshots_to_keep_prop, fmt::to_string(min_to_keep));
+
+    const auto now = model::timestamp::now();
+    auto highest_id = add_snapshots(default_total_snaps, now.value(), &table);
+    add_branch(highest_id, "branch", &table);
+
+    auto removal = compute_removal(
+      table,
+      now.value() + remove_snapshots_action::default_max_snapshot_age_ms + 1);
+    EXPECT_EQ(removal.snaps.size(), default_total_snaps - min_to_keep);
+    EXPECT_EQ(removal.refs.size(), 0);
+}

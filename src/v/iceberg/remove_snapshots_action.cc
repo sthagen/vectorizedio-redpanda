@@ -20,15 +20,49 @@ namespace iceberg {
 
 namespace {
 
-// TODO: use the table property instead.
-long table_max_snapshot_age_ms(const table_metadata&) {
-    return remove_snapshots_action::default_max_snapshot_age_ms;
+std::optional<ss::sstring>
+get_property(const table_metadata& table, std::string_view prop) {
+    if (!table.properties.has_value()) {
+        return std::nullopt;
+    }
+    auto it = table.properties->find(ss::sstring{prop});
+    if (it == table.properties->end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
-long table_max_snapshot_ref_age_ms(const table_metadata&) {
-    return remove_snapshots_action::default_max_ref_age_ms;
+
+std::optional<long> get_long_property(
+  const prefix_logger& logger,
+  const table_metadata& table,
+  std::string_view prop) {
+    auto p_str = get_property(table, prop);
+    if (!p_str.has_value()) {
+        return std::nullopt;
+    }
+    try {
+        return std::stol(*p_str);
+    } catch (...) {
+        vlog(logger.warn, "Invalid long for property '{}': '{}'", prop, *p_str);
+        return std::nullopt;
+    }
 }
-long table_min_snapshots_retained(const table_metadata&) {
-    return remove_snapshots_action::default_min_snapshots_retained;
+long table_max_snapshot_age_ms(
+  const prefix_logger& logger, const table_metadata& table) {
+    return get_long_property(logger, table, max_snapshot_age_ms_prop)
+      .value_or(remove_snapshots_action::default_max_snapshot_age_ms);
+}
+long table_max_snapshot_ref_age_ms(
+  const prefix_logger& logger, const table_metadata& table) {
+    return get_long_property(logger, table, max_ref_age_ms_prop)
+      .value_or(remove_snapshots_action::default_max_ref_age_ms);
+}
+long table_min_snapshots_retained(
+  const prefix_logger& logger, const table_metadata& table) {
+    // NOTE: the Java implementation uses an int32 for this property, but it
+    // seems harmless to use a bigger type.
+    return get_long_property(logger, table, min_snapshots_to_keep_prop)
+      .value_or(remove_snapshots_action::default_min_snapshots_retained);
 }
 
 // Arguments for collecting ancestors of a given snapshot.
@@ -164,9 +198,10 @@ void remove_snapshots_action::compute_removed_snapshots(
         // https://github.com/apache/iceberg/blob/df547908a9500ec5b886cfeb64ea5bf10ebde84f/core/src/main/java/org/apache/iceberg/RemoveSnapshots.java#L181-L183
         return;
     }
-    auto table_max_snap_age_ms = table_max_snapshot_age_ms(table_);
-    auto table_max_ref_age_ms = table_max_snapshot_ref_age_ms(table_);
-    auto table_min_snapshots_to_keep = table_min_snapshots_retained(table_);
+    auto table_max_snap_age_ms = table_max_snapshot_age_ms(logger_, table_);
+    auto table_max_ref_age_ms = table_max_snapshot_ref_age_ms(logger_, table_);
+    auto table_min_snapshots_to_keep = table_min_snapshots_retained(
+      logger_, table_);
 
     const auto& table_snaps = table_.snapshots.value();
     chunked_hash_set<snapshot_id> retained_snaps;

@@ -21,6 +21,13 @@ namespace iceberg {
 
 using namespace std::chrono_literals;
 
+static constexpr std::string_view max_snapshot_age_ms_prop
+  = "history.expire.max-snapshot-age-ms";
+static constexpr std::string_view min_snapshots_to_keep_prop
+  = "history.expire.min-snapshots-to-keep";
+static constexpr std::string_view max_ref_age_ms_prop
+  = "history.expire.max-ref-age-ms";
+
 // Action to remove a set of snapshots from the table metadata. Snapshot
 // retention is tied to snapshot references, which may refer to individual
 // snapshots (tags) or may refer to a tree of snapshots (branches).
@@ -39,7 +46,6 @@ using namespace std::chrono_literals;
 // NOTE: this does not perform IO to purge the corresponding manifest lists or
 // the underlying manifests and data files. Callers are expected to do so upon
 // committing this action and reloading the resulting table metadata.
-// TODO: table-wide configurations not yet implemented.
 class remove_snapshots_action : public action {
 public:
     static constexpr long default_max_snapshot_age_ms = 5 * 24 * 60 * 60 * 1000;
