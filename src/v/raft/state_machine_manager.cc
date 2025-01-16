@@ -207,9 +207,10 @@ ss::future<> state_machine_manager::stop() {
     _apply_mutex.broken();
     _as.request_abort();
 
-    co_await _gate.close();
+    auto gate_f = _gate.close();
     co_await ss::coroutine::parallel_for_each(
       _machines, [](auto p) { return p.second->stm->stop(); });
+    co_await std::move(gate_f);
 }
 
 ss::future<> state_machine_manager::apply_raft_snapshot() {
