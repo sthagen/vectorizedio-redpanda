@@ -335,7 +335,8 @@ def redpanda_cc_bench(
         runs = None,
         duration = None,
         data = [],
-        tags = []):
+        tags = [],
+        target_compatible_with = []):
     """
     Create a seastar benchmark target
 
@@ -353,6 +354,7 @@ def redpanda_cc_bench(
       data: any data files available to the benchmark as runfiles
       tags: custom tags for the test
       timeout: the timeout for smoke testing the benchmark
+      target_compatible_with: constraints for the test target
     """
     args = [
         "--blocked-reactor-notify-ms 2000000",
@@ -417,4 +419,5 @@ def redpanda_cc_bench(
         data = [
             ":" + name,
         ] + data,
+        target_compatible_with = target_compatible_with,
     )
