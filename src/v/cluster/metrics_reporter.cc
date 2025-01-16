@@ -271,6 +271,16 @@ metrics_reporter::build_metrics_snapshot() {
 
         snapshot.topic_count++;
         snapshot.partition_count += md.get_configuration().partition_count;
+        switch (md.get_configuration().properties.iceberg_mode) {
+        case model::iceberg_mode::disabled:
+            break;
+        case model::iceberg_mode::key_value:
+            ++snapshot.topics_with_iceberg_kv;
+            break;
+        case model::iceberg_mode::value_schema_id_prefix:
+            ++snapshot.topics_with_iceberg_sr;
+            break;
+        }
     }
 
     snapshot.nodes.reserve(metrics_map.size());
@@ -556,16 +566,20 @@ void rjson_serialize(
     w.Key("cluster_created_ts");
     w.Uint64(snapshot.cluster_creation_epoch);
     w.Key("topic_count");
-    w.Int(snapshot.topic_count);
+    w.Uint64(snapshot.topic_count);
+    w.Key("topics_with_iceberg_key_value");
+    w.Uint64(snapshot.topics_with_iceberg_kv);
+    w.Key("topics_with_iceberg_value_schema_id_prefix");
+    w.Uint64(snapshot.topics_with_iceberg_sr);
 
     w.Key("partition_count");
-    w.Int(snapshot.partition_count);
+    w.Uint64(snapshot.partition_count);
 
     w.Key("active_logical_version");
-    w.Int(snapshot.active_logical_version);
+    w.Int64(snapshot.active_logical_version);
 
     w.Key("original_logical_version");
-    w.Int(snapshot.original_logical_version);
+    w.Int64(snapshot.original_logical_version);
 
     w.Key("nodes");
     w.StartArray();
@@ -580,7 +594,7 @@ void rjson_serialize(
     w.Bool(snapshot.has_oidc);
 
     w.Key("rbac_role_count");
-    w.Int(snapshot.rbac_role_count);
+    w.Int64(snapshot.rbac_role_count);
 
     w.Key("data_transforms_count");
     w.Uint(snapshot.data_transforms_count);
