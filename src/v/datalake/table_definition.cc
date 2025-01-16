@@ -54,16 +54,14 @@ schema default_schema() {
     };
 }
 
-partition_spec hour_partition_spec() {
-    chunked_vector<partition_field> fields;
-    fields.emplace_back(partition_field{
-      .source_id = nested_field::id_t{4},
-      .field_id = partition_field::id_t{1000},
-      .name = "redpanda_timestamp_hour",
+unresolved_partition_spec hour_partition_spec() {
+    chunked_vector<unresolved_partition_spec::field> fields;
+    fields.push_back({
+      .source_name = {"redpanda", "timestamp"},
       .transform = hour_transform{},
+      .name = "redpanda_timestamp_hour",
     });
-    return partition_spec{
-      .spec_id = partition_spec::id_t{0},
+    return {
       .fields = std::move(fields),
     };
 }

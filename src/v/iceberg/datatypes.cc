@@ -314,6 +314,30 @@ struct_type struct_type::copy() const {
     return {std::move(fields_copy)};
 }
 
+const nested_field* struct_type::find_field_by_name(
+  const std::vector<ss::sstring>& nested_name) const {
+    const auto* cur_struct_type = this;
+    const nested_field* field = nullptr;
+    for (const auto& n : nested_name) {
+        if (!cur_struct_type) {
+            return nullptr;
+        }
+
+        for (const auto& f : cur_struct_type->fields) {
+            if (f->name == n) {
+                field = f.get();
+                break;
+            }
+        }
+        if (!field) {
+            return nullptr;
+        }
+
+        cur_struct_type = std::get_if<struct_type>(&field->type);
+    }
+    return field;
+}
+
 list_type list_type::create(
   int32_t element_id, field_required element_required, field_type element) {
     // NOTE: the element field doesn't have a name. Functionally, the list type

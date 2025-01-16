@@ -10,10 +10,10 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":logger",
-        ":table_definition",
         "//src/v/base",
         "//src/v/iceberg:compatibility",
         "//src/v/iceberg:field_collecting_visitor",
+        "//src/v/iceberg:partition",
         "//src/v/iceberg:schema",
         "//src/v/iceberg:transaction",
     ],
@@ -113,7 +113,6 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":logger",
-        ":table_definition",
         "//src/v/base",
         "//src/v/iceberg:struct_accessor",
     ],
@@ -551,15 +550,10 @@ redpanda_cc_library(
     hdrs = [
         "table_creator.h",
     ],
-    implementation_deps = [
-        ":record_translator",
-        ":table_id_provider",
-    ],
     include_prefix = "datalake",
     visibility = [":__subpackages__"],
     deps = [
-        ":catalog_schema_manager",
-        ":record_schema_resolver",
+        ":schema_identifier",
     ],
 )
 

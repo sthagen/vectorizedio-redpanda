@@ -240,6 +240,7 @@ redpanda_cc_gtest(
         "partition_test.cc",
     ],
     deps = [
+        ":test_schemas",
         "//src/v/container:fragmented_vector",
         "//src/v/iceberg:partition",
         "//src/v/test_utils:gtest",

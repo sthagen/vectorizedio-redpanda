@@ -9,8 +9,7 @@
  */
 #pragma once
 
-#include "datalake/catalog_schema_manager.h"
-#include "datalake/record_schema_resolver.h"
+#include "datalake/schema_identifier.h"
 
 namespace datalake {
 
@@ -32,21 +31,6 @@ public:
       = 0;
 
     virtual ~table_creator() = default;
-};
-
-// Creates or alters the table by interfacing directly with a catalog.
-class direct_table_creator : public table_creator {
-public:
-    direct_table_creator(type_resolver&, schema_manager&);
-
-    ss::future<checked<std::nullopt_t, errc>> ensure_table(
-      const model::topic&,
-      model::revision_id topic_revision,
-      record_schema_components) const final;
-
-private:
-    datalake::type_resolver& type_resolver_;
-    datalake::schema_manager& schema_mgr_;
 };
 
 } // namespace datalake

@@ -15,7 +15,6 @@
 #include "datalake/coordinator/state.h"
 #include "datalake/coordinator/state_update.h"
 #include "datalake/logger.h"
-#include "datalake/table_definition.h"
 #include "datalake/table_id_provider.h"
 #include "iceberg/catalog.h"
 #include "iceberg/manifest_entry.h"

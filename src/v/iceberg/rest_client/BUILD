@@ -118,6 +118,7 @@ redpanda_cc_library(
         "//src/v/http:request_builder",
         "//src/v/http:utils",
         "//src/v/iceberg:json_writer",
+        "//src/v/iceberg:logger",
         "//src/v/iceberg:table_identifier",
         "//src/v/iceberg:table_metadata",
         "//src/v/iceberg:table_metadata_json",
