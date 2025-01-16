@@ -10,12 +10,14 @@
 #include "cluster/data_migrated_resources.h"
 #include "cluster/topic_table.h"
 #include "config/mock_property.h"
+#include "datalake/catalog_schema_manager.h"
 #include "datalake/coordinator/coordinator.h"
 #include "datalake/coordinator/file_committer.h"
 #include "datalake/coordinator/state_machine.h"
 #include "datalake/coordinator/state_update.h"
 #include "datalake/coordinator/tests/state_test_utils.h"
 #include "datalake/logger.h"
+#include "datalake/record_schema_resolver.h"
 #include "raft/tests/raft_fixture.h"
 #include "random/generators.h"
 #include "test_utils/async.h"
@@ -65,7 +67,8 @@ struct coordinator_node {
       , crd(
           stm,
           topic_table,
-          table_creator,
+          type_resolver,
+          schema_mgr,
           [this](const model::topic& t, model::revision_id r) {
               return remove_tombstone(t, r);
           },
@@ -89,7 +92,8 @@ struct coordinator_node {
     config::mock_property<std::chrono::milliseconds> commit_interval_ms;
     cluster::data_migrations::migrated_resources mr;
     cluster::topic_table topic_table;
-    noop_table_creator table_creator;
+    datalake::binary_type_resolver type_resolver;
+    datalake::simple_schema_manager schema_mgr;
     std::unique_ptr<file_committer> file_committer;
     coordinator crd;
 };

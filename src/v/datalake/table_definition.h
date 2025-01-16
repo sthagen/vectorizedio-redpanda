@@ -23,6 +23,6 @@ iceberg::schema default_schema();
 inline constexpr std::string_view rp_struct_name = "redpanda";
 
 // Hourly partitioning on the timestamp of a schema with the above fields.
-iceberg::partition_spec hour_partition_spec();
+iceberg::unresolved_partition_spec hour_partition_spec();
 
 } // namespace datalake

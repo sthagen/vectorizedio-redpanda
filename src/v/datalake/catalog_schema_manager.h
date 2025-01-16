@@ -11,6 +11,7 @@
 
 #include "iceberg/catalog.h"
 #include "iceberg/datatypes.h"
+#include "iceberg/partition.h"
 #include "iceberg/table_identifier.h"
 
 namespace datalake {
@@ -30,7 +31,8 @@ public:
 
     virtual ss::future<checked<std::nullopt_t, errc>> ensure_table_schema(
       const iceberg::table_identifier&,
-      const iceberg::struct_type& desired_type)
+      const iceberg::struct_type& desired_type,
+      const iceberg::unresolved_partition_spec&)
       = 0;
 
     struct table_info {
@@ -55,7 +57,8 @@ public:
     ss::future<checked<std::nullopt_t, schema_manager::errc>>
     ensure_table_schema(
       const iceberg::table_identifier&,
-      const iceberg::struct_type& desired_type) override;
+      const iceberg::struct_type& desired_type,
+      const iceberg::unresolved_partition_spec&) override;
 
     ss::future<checked<table_info, schema_manager::errc>>
     get_table_info(const iceberg::table_identifier&) override;
@@ -79,7 +82,8 @@ public:
     ss::future<checked<std::nullopt_t, schema_manager::errc>>
     ensure_table_schema(
       const iceberg::table_identifier&,
-      const iceberg::struct_type& desired_type) override;
+      const iceberg::struct_type& desired_type,
+      const iceberg::unresolved_partition_spec&) override;
 
     // Loads the table metadata for the given topic.
     ss::future<checked<table_info, schema_manager::errc>>

@@ -16,7 +16,7 @@
 #include "datalake/record_schema_resolver.h"
 #include "datalake/record_translator.h"
 #include "datalake/serde_parquet_writer.h"
-#include "datalake/table_creator.h"
+#include "datalake/tests/test_utils.h"
 #include "datalake/translation_task.h"
 #include "model/record_batch_reader.h"
 #include "storage/record_batch_builder.h"

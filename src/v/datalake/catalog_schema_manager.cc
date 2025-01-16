@@ -11,7 +11,6 @@
 
 #include "base/vlog.h"
 #include "datalake/logger.h"
-#include "datalake/table_definition.h"
 #include "iceberg/compatibility.h"
 #include "iceberg/datatypes.h"
 #include "iceberg/field_collecting_visitor.h"
@@ -109,7 +108,8 @@ bool schema_manager::table_info::fill_registered_ids(
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
 simple_schema_manager::ensure_table_schema(
   const iceberg::table_identifier& table_id,
-  const iceberg::struct_type& desired_type) {
+  const iceberg::struct_type& desired_type,
+  const iceberg::unresolved_partition_spec& partition_spec) {
     iceberg::schema s{
       .schema_struct = desired_type.copy(),
       .schema_id = {},
@@ -117,13 +117,19 @@ simple_schema_manager::ensure_table_schema(
     };
     s.assign_fresh_ids();
 
+    auto resolve_res = iceberg::partition_spec::resolve(
+      partition_spec, s.schema_struct);
+    if (!resolve_res) {
+        co_return errc::failed;
+    }
+
     // TODO: check schema compatibility
     table_info_by_id.insert_or_assign(
       table_id.copy(),
       table_info{
         .id = table_id.copy(),
         .schema = std::move(s),
-        .partition_spec = hour_partition_spec(),
+        .partition_spec = std::move(resolve_res.value()),
       });
 
     co_return std::nullopt;
@@ -146,9 +152,10 @@ simple_schema_manager::get_table_info(
 ss::future<checked<std::nullopt_t, schema_manager::errc>>
 catalog_schema_manager::ensure_table_schema(
   const iceberg::table_identifier& table_id,
-  const iceberg::struct_type& desired_type) {
+  const iceberg::struct_type& desired_type,
+  const iceberg::unresolved_partition_spec& partition_spec) {
     auto load_res = co_await catalog_.load_or_create_table(
-      table_id, desired_type, hour_partition_spec());
+      table_id, desired_type, partition_spec);
     if (load_res.has_error()) {
         co_return log_and_convert_catalog_err(
           load_res.error(), fmt::format("Error loading table {}", table_id));

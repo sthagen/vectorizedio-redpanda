@@ -17,6 +17,23 @@
 
 namespace iceberg {
 
+struct unresolved_partition_spec {
+    struct field {
+        // Components of the nested source field name, in increasing depth
+        // order.
+        std::vector<ss::sstring> source_name;
+        transform transform;
+        ss::sstring name;
+
+        friend std::ostream& operator<<(std::ostream&, const field&);
+    };
+
+    chunked_vector<field> fields;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const unresolved_partition_spec&);
+};
+
 struct partition_field {
     using id_t = named_type<int32_t, struct field_id_tag>;
     nested_field::id_t source_id;
@@ -26,6 +43,8 @@ struct partition_field {
 
     friend bool operator==(const partition_field&, const partition_field&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream&, const partition_field&);
 };
 
 struct partition_spec {
@@ -33,8 +52,17 @@ struct partition_spec {
     id_t spec_id;
     chunked_vector<partition_field> fields;
 
+    // NOTE: this function assumes that this is the first spec in the table.
+    // Namely, the spec itself will get id 0, and partition fields will get
+    // fresh ids starting from 1000.
+    static std::optional<partition_spec>
+    resolve(const unresolved_partition_spec&, const struct_type& schema_type);
+
     friend bool operator==(const partition_spec&, const partition_spec&)
       = default;
+
+    friend std::ostream& operator<<(std::ostream&, const partition_spec&);
+
     partition_spec copy() const {
         return {
           .spec_id = spec_id,

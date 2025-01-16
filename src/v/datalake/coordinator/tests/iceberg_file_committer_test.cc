@@ -10,6 +10,7 @@
 #include "cloud_io/remote.h"
 #include "cloud_io/tests/scoped_remote.h"
 #include "cloud_storage/tests/s3_imposter.h"
+#include "datalake/catalog_schema_manager.h"
 #include "datalake/coordinator/iceberg_file_committer.h"
 #include "datalake/coordinator/tests/state_test_utils.h"
 #include "datalake/table_definition.h"
@@ -101,7 +102,9 @@ public:
     void create_table() {
         auto res = schema_mgr
                      .ensure_table_schema(
-                       table_ident, datalake::schemaless_struct_type())
+                       table_ident,
+                       datalake::schemaless_struct_type(),
+                       datalake::hour_partition_spec())
                      .get();
         ASSERT_FALSE(res.has_error());
     }
@@ -499,8 +502,12 @@ TEST_F(FileCommitterTest, TestDeduplicateConcurrently) {
 
         chunked_vector<ss::sstring> uris;
         chunked_hash_set<ss::sstring> uris_deduped;
+        auto schema = datalake::default_schema();
+        auto pspec = iceberg::partition_spec::resolve(
+          datalake::hour_partition_spec(), schema.schema_struct);
+        ASSERT_TRUE(pspec.has_value());
         auto pk_type = iceberg::partition_key_type::create(
-          datalake::hour_partition_spec(), datalake::default_schema());
+          pspec.value(), schema);
 
         // Collect all the data files for this snapshot.
         for (const auto& m : mlist.files) {

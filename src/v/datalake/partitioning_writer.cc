@@ -12,8 +12,6 @@
 #include "base/vlog.h"
 #include "datalake/data_writer_interface.h"
 #include "datalake/logger.h"
-#include "datalake/table_definition.h"
-#include "iceberg/struct_accessor.h"
 
 #include <exception>
 
@@ -23,10 +21,12 @@ std::ostream&
 operator<<(std::ostream& o, const partitioning_writer::partitioned_file& f) {
     fmt::print(
       o,
-      "{{local_file: {}, schema_id: {}, partition_spec_id: {}}}",
+      "{{local_file: {}, schema_id: {}, partition_spec_id: {}, "
+      "partition_key: {}}}",
       f.local_file,
       f.schema_id,
-      f.partition_spec_id);
+      f.partition_spec_id,
+      f.partition_key.val);
     return o;
 }
 

@@ -77,7 +77,6 @@ private:
     std::unique_ptr<iceberg::catalog> catalog_;
     std::unique_ptr<schema_manager> schema_mgr_;
     std::unique_ptr<type_resolver> type_resolver_;
-    std::unique_ptr<table_creator> table_creator_;
     std::unique_ptr<file_committer> file_committer_;
 
     std::optional<cluster::notification_id_type> manage_notifications_;

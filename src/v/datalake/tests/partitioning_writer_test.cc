@@ -72,8 +72,10 @@ TEST_P(PartitioningWriterExtraColumnsTest, TestSchemaHappyPath) {
       false);
     auto field = field_type{default_type_with_columns(extra_columns)};
     auto& default_type = std::get<struct_type>(field);
+    auto pspec = partition_spec::resolve(hour_partition_spec(), default_type);
+    ASSERT_TRUE(pspec.has_value());
     partitioning_writer writer(
-      *writer_factory, schema_id, default_type.copy(), hour_partition_spec());
+      *writer_factory, schema_id, default_type.copy(), pspec.value().copy());
 
     static constexpr int num_hrs = 5;
     static constexpr int records_per_hr = 5;
@@ -113,8 +115,10 @@ TEST(PartitioningWriterTest, TestWriterError) {
       true);
     auto field = field_type{default_type_with_columns(0)};
     auto& default_type = std::get<struct_type>(field);
+    auto pspec = partition_spec::resolve(hour_partition_spec(), default_type);
+    ASSERT_TRUE(pspec.has_value());
     partitioning_writer writer(
-      *writer_factory, schema_id, default_type.copy(), hour_partition_spec());
+      *writer_factory, schema_id, default_type.copy(), pspec.value().copy());
     auto err = writer
                  .add_data(
                    val_with_timestamp(field, model::timestamp::now()),
@@ -126,11 +130,11 @@ TEST(PartitioningWriterTest, TestWriterError) {
 TEST(PartitioningWriterTest, TestUnexpectedSchema) {
     auto writer_factory = std::make_unique<datalake::test_data_writer_factory>(
       false);
+    auto schema_type = default_type_with_columns(0);
+    auto pspec = partition_spec::resolve(hour_partition_spec(), schema_type);
+    ASSERT_TRUE(pspec.has_value());
     partitioning_writer writer(
-      *writer_factory,
-      schema_id,
-      default_type_with_columns(0),
-      hour_partition_spec());
+      *writer_factory, schema_id, schema_type.copy(), pspec.value().copy());
     auto unexpected_field_type = test_nested_schema_type();
     auto err = writer
                  .add_data(
@@ -185,17 +189,17 @@ TEST(PartitioningWriterTest, TestCompositeKey) {
 
     auto schema_field = field_type{schema_type.copy()};
 
-    partition_spec spec = hour_partition_spec();
-    spec.spec_id = partition_spec::id_t{123};
-    spec.fields.push_back(partition_field{
-      .source_id = schema_type.fields.back()->id,
-      .field_id = spec.fields.back().field_id + 1,
-      .name = "field2",
+    unresolved_partition_spec unresolved_spec = hour_partition_spec();
+    unresolved_spec.fields.push_back(unresolved_partition_spec::field{
+      .source_name = {"foo_str"},
       .transform = identity_transform{},
+      .name = "field2",
     });
+    auto spec = partition_spec::resolve(unresolved_spec, schema_type);
+    ASSERT_TRUE(spec.has_value());
 
     partitioning_writer writer(
-      *writer_factory, schema_id, schema_type.copy(), spec.copy());
+      *writer_factory, schema_id, schema_type.copy(), spec.value().copy());
 
     static constexpr auto num_hrs = 10;
     static constexpr auto records_per_hr = 5;
@@ -233,7 +237,7 @@ TEST(PartitioningWriterTest, TestCompositeKey) {
     // check that we've got a file for each possible partition key value.
     std::map<std::optional<bytes>, std::vector<int>> string2hours;
     for (const auto& file : files) {
-        ASSERT_EQ(file.partition_spec_id, spec.spec_id);
+        ASSERT_EQ(file.partition_spec_id, spec.value().spec_id);
         const auto& key_fields = file.partition_key.val->fields;
         ASSERT_EQ(key_fields.size(), 2);
         int hour = std::get<int_value>(
