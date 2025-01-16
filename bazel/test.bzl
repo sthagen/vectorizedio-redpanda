@@ -332,6 +332,8 @@ def redpanda_cc_bench(
         env = {},
         cpu = 1,
         memory = "1GiB",
+        runs = None,
+        duration = None,
         data = [],
         tags = []):
     """
@@ -346,6 +348,8 @@ def redpanda_cc_bench(
       env: any custom environment variables for the binary
       cpu: the number of cores the benchmark needs
       memory: the amount of RAM needed for the benchmark
+      runs: number of runs
+      duration: duration of a single run in seconds
       data: any data files available to the benchmark as runfiles
       tags: custom tags for the test
       timeout: the timeout for smoke testing the benchmark
@@ -359,6 +363,10 @@ def redpanda_cc_bench(
         fail("Use `memory=\"XGiB\"` test parameter instead of -m/--memory")
     if has_flags(args, "-c", "--smp"):
         fail("Use `cpu=N` test parameter instead of -c/--smp")
+    if has_flags(args, "--runs"):
+        fail("Use `runs=N` test parameter instead of --runs")
+    if has_flags(args, "--duration"):
+        fail("Use `duration=N` test parameter instead of --duration")
 
     args.append("-m{}".format(memory))
     args.append("-c{}".format(cpu))
@@ -368,6 +376,12 @@ def redpanda_cc_bench(
         "resources:memory:{}".format(parse_bytes(memory) / (1 << 20)),
     ]
 
+    binary_args = []
+    if runs != None:
+        binary_args.append("--runs={}".format(runs))
+    if duration != None:
+        binary_args.append("--duration={}".format(duration))
+
     native.cc_binary(
         name = name,
         srcs = srcs,
@@ -375,7 +389,7 @@ def redpanda_cc_bench(
         deps = deps,
         testonly = True,
         copts = redpanda_copts(),
-        args = args,
+        args = args + binary_args,
         features = [
             "layering_check",
         ],
