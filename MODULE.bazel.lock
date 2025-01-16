@@ -216,7 +216,7 @@
   "moduleExtensions": {
     "//bazel:extensions.bzl%non_module_dependencies": {
       "general": {
-        "bzlTransitiveDigest": "LPi5NzgXvqv/2bNKBhu85cmTe6IYd/t/29XTZKYA0Rw=",
+        "bzlTransitiveDigest": "u94kY8Gxu1TtExNHYlH8KHrudVKMtA9ditBgZUmyt0k=",
         "usagesDigest": "8eEn6X1e7HKkx2OPWUwQBOEnT9TIkMhEcXbu/wRjGno=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},

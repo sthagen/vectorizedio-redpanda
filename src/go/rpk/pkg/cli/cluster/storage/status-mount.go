@@ -51,8 +51,8 @@ Status for a mount/unmount operation
 
 			var mState rpadmin.MigrationState
 			if p.FromCloud {
-				cl, err := createDataplaneClient(p)
-				out.MaybeDieErr(err)
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
 
 				resp, err := cl.CloudStorage.GetMountTask(
 					cmd.Context(),

@@ -16,6 +16,7 @@
 #include "datalake/coordinator/state_update.h"
 #include "datalake/logger.h"
 #include "datalake/table_definition.h"
+#include "datalake/table_id_provider.h"
 #include "iceberg/catalog.h"
 #include "iceberg/manifest_entry.h"
 #include "iceberg/manifest_io.h"
@@ -110,7 +111,7 @@ iceberg_file_committer::commit_topic_files_to_catalog(
     }
     auto topic_revision = tp_it->second.revision;
 
-    auto table_id = table_id_for_topic(topic);
+    auto table_id = table_id_provider::table_id(topic);
     auto table_res = co_await load_table(table_id);
     if (table_res.has_error()) {
         vlog(
@@ -333,7 +334,7 @@ iceberg_file_committer::commit_topic_files_to_catalog(
 
 ss::future<checked<std::nullopt_t, file_committer::errc>>
 iceberg_file_committer::drop_table(const model::topic& topic) const {
-    auto table_id = table_id_for_topic(topic);
+    auto table_id = table_id_provider::table_id(topic);
     auto drop_res = co_await catalog_.drop_table(table_id, true);
     if (
       drop_res.has_error()
@@ -342,15 +343,6 @@ iceberg_file_committer::drop_table(const model::topic& topic) const {
           drop_res.error(), fmt::format("Failed to drop {}", table_id));
     }
     co_return std::nullopt;
-}
-
-iceberg::table_identifier
-iceberg_file_committer::table_id_for_topic(const model::topic& t) const {
-    return iceberg::table_identifier{
-      // TODO: namespace as a topic property? Keep it in the table metadata?
-      .ns = {"redpanda"},
-      .table = t,
-    };
 }
 
 ss::future<checked<iceberg::table_metadata, file_committer::errc>>

@@ -17,12 +17,12 @@ import (
 	"reflect"
 	"time"
 
+	"connectrpc.com/connect"
+	rpkos "github.com/redpanda-data/redpanda/src/go/rpk/pkg/os"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/publicapi"
 	"github.com/spf13/afero"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
-
-	rpkos "github.com/redpanda-data/redpanda/src/go/rpk/pkg/os"
 )
 
 // DefaultRpkYamlPath returns the OS equivalent of ~/.config/rpk/rpk.yaml, if
@@ -359,6 +359,16 @@ func (p *RpkProfile) ActualConfig() (*RpkYaml, bool) {
 		return nil, false
 	}
 	return p.c.ActualRpkYaml()
+}
+
+// DataplaneClient creates a publicapi.DataPlaneClientSet with the information
+// loaded in the profile.
+func (p *RpkProfile) DataplaneClient(opts ...connect.ClientOption) (*publicapi.DataPlaneClientSet, error) {
+	url, err := p.CloudCluster.CheckClusterURL()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get cluster information from your profile: %v", err)
+	}
+	return publicapi.NewDataPlaneClientSet(url, p.CurrentAuth().AuthToken, opts...)
 }
 
 // HasClientCredentials returns if both ClientID and ClientSecret are non-empty.

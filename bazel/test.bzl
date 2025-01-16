@@ -6,6 +6,7 @@ changes. For example, redpanda_cc_gtest will automatically configure Seastar for
 running tests, like setting a reasonable number of cores and amount of memory.
 """
 
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load(":internal.bzl", "redpanda_copts")
 
 def has_flags(args, *flags):
@@ -325,6 +326,7 @@ def redpanda_cc_bench(
         name,
         srcs = [],
         defines = [],
+        timeout = "short",
         deps = [],
         args = [],
         env = {},
@@ -346,6 +348,7 @@ def redpanda_cc_bench(
       memory: the amount of RAM needed for the benchmark
       data: any data files available to the benchmark as runfiles
       tags: custom tags for the test
+      timeout: the timeout for smoke testing the benchmark
     """
     args = [
         "--blocked-reactor-notify-ms 2000000",
@@ -376,7 +379,28 @@ def redpanda_cc_bench(
         features = [
             "layering_check",
         ],
-        tags = resource_tags + tags,
+        tags = tags,
         env = env,
         data = data,
+    )
+    write_file(
+        name = name + "_test_script",
+        out = name + "_test_wrapper.sh",
+        content = [
+            "#!/bin/bash",
+            "exec $@ --iterations=1 --runs=1 --duration=0 --no-stdout --overprovisioned",
+        ],
+    )
+    native.sh_test(
+        name = name + "_test",
+        timeout = timeout,
+        tags = resource_tags + tags,
+        srcs = [name + "_test_script"],
+        env = env,
+        args = [
+            "$(rootpath :{})".format(name),
+        ] + args,
+        data = [
+            ":" + name,
+        ] + data,
     )

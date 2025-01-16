@@ -60,8 +60,8 @@ Use filter to list only migrations in a specific state
 
 			var migrations []rpadmin.MigrationState
 			if p.FromCloud {
-				cl, err := createDataplaneClient(p)
-				out.MaybeDieErr(err)
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
 
 				resp, err := cl.CloudStorage.ListMountTasks(cmd.Context(), connect.NewRequest(&dataplanev1alpha2.ListMountTasksRequest{}))
 				out.MaybeDie(err, "unable to list mount/unmount operations: %v", err)
