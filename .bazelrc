@@ -126,7 +126,4 @@ test --test_output=errors
 # warn if a timeout is much longer than actual runtime
 test --test_verbose_timeout_warnings
 
-test:unit --test_tag_filters=-bench
-test:bench --test_tag_filters=bench
-
 try-import %workspace%/user.bazelrc
