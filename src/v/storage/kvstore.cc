@@ -459,6 +459,8 @@ ss::future<> kvstore::load_snapshot() {
     if (ex) {
         std::rethrow_exception(ex);
     }
+
+    co_await _snap.remove_partial_snapshots();
 }
 
 ss::future<> kvstore::load_snapshot_from_reader(snapshot_reader& reader) {
