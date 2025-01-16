@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strings"
 
+	dataplanev1alpha2 "buf.build/gen/go/redpandadata/dataplane/protocolbuffers/go/redpanda/api/dataplane/v1alpha2"
+	"connectrpc.com/connect"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/adminapi"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/config"
 	"github.com/redpanda-data/redpanda/src/go/rpk/pkg/out"
@@ -30,14 +32,29 @@ func newUpdateCommand(fs afero.Fs, p *config.Params) *cobra.Command {
 			f := p.Formatter
 			p, err := p.LoadVirtualProfile(fs)
 			out.MaybeDie(err, "rpk unable to load config: %v", err)
-			config.CheckExitNotServerlessAdmin(p)
-
-			cl, err := adminapi.NewClient(cmd.Context(), fs, p)
-			out.MaybeDie(err, "unable to initialize admin client: %v", err)
-
 			user := args[0]
-			err = cl.UpdateUser(cmd.Context(), user, newPass, strings.ToUpper(mechanism))
-			out.MaybeDie(err, "unable to update the client credentials for user %q: %v", user, err)
+			if p.FromCloud {
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
+
+				req := connect.NewRequest(
+					&dataplanev1alpha2.UpdateUserRequest{
+						User: &dataplanev1alpha2.UpdateUserRequest_User{
+							Name:      user,
+							Password:  newPass,
+							Mechanism: stringToDataplaneMechanism(mechanism),
+						},
+					},
+				)
+				_, err = cl.User.UpdateUser(cmd.Context(), req)
+				out.MaybeDie(err, "unable to update the client credentials for user %q: %v", user, err)
+			} else {
+				cl, err := adminapi.NewClient(cmd.Context(), fs, p)
+				out.MaybeDie(err, "unable to initialize admin client: %v", err)
+
+				err = cl.UpdateUser(cmd.Context(), user, newPass, strings.ToUpper(mechanism))
+				out.MaybeDie(err, "unable to update the client credentials for user %q: %v", user, err)
+			}
 			if isText, _, s, err := f.Format(credentials{user, "", mechanism}); !isText {
 				out.MaybeDie(err, "unable to print credentials in the required format %q: %v", f.Kind, err)
 				out.Exit(s)

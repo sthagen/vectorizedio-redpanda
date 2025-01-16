@@ -46,8 +46,8 @@ Cancel a mount/unmount operation
 			out.MaybeDie(err, "invalid migration ID: %v", err)
 
 			if p.FromCloud {
-				cl, err := createDataplaneClient(p)
-				out.MaybeDieErr(err)
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
 
 				req := connect.NewRequest(
 					&dataplanev1alpha2.UpdateMountTaskRequest{

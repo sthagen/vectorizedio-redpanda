@@ -41,8 +41,8 @@ List all mountable topics:
 
 			var mountableTopics []rpadmin.MountableTopic
 			if p.FromCloud {
-				cl, err := createDataplaneClient(p)
-				out.MaybeDieErr(err)
+				cl, err := p.DataplaneClient()
+				out.MaybeDie(err, "unable to initialize cloud client: %v", err)
 
 				resp, err := cl.CloudStorage.ListMountableTopics(cmd.Context(), connect.NewRequest(&dataplanev1alpha2.ListMountableTopicsRequest{}))
 				out.MaybeDie(err, "unable to list mountable topics: %v", err)
