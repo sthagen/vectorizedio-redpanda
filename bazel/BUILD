@@ -11,3 +11,10 @@ config_setting(
         ":has_sanitizers": "true",
     },
 )
+
+config_setting(
+    name = "optimized_build",
+    values = {
+        "compilation_mode": "opt",
+    },
+)
