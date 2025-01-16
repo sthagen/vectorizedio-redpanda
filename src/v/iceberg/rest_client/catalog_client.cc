@@ -252,7 +252,7 @@ ss::future<expected<std::monostate>> catalog_client::drop_table(
     http::rest_client::rest_entity::optional_query_params params;
     if (purge_requested.has_value()) {
         params.emplace();
-        params.value()["purgeRequested"] = purge_requested ? "true" : "false";
+        params.value()["purgeRequested"] = *purge_requested ? "true" : "false";
     }
 
     auto http_request = table(root_path(), ns)
