@@ -152,14 +152,11 @@ replicate_batcher::do_cache_with_backpressure(
     }
 
     size_t record_count = 0;
-    chunked_vector<model::record_batch> data;
-    data.reserve(batches.size());
     for (auto& b : batches) {
         record_count += b.record_count();
-        data.push_back(std::move(b));
     }
     auto i = ss::make_lw_shared<item>(
-      record_count, std::move(data), std::move(u), expected_term, opts);
+      record_count, std::move(batches), std::move(u), expected_term, opts);
 
     _item_cache.emplace_back(i);
     co_return i;

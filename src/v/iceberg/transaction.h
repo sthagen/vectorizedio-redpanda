@@ -40,6 +40,11 @@ public:
       chunked_vector<data_file>,
       chunked_vector<std::pair<ss::sstring, ss::sstring>> snapshot_props = {});
 
+    // Removes expired snapshots from the table, computing expiration based on
+    // the given timestamp. Note, this does not perform IO to delete any
+    // now-orphaned metadata or data.
+    ss::future<txn_outcome> remove_expired_snapshots(model::timestamp now);
+
     std::optional<action::errc> error() const { return error_; }
 
     // NOTE: it is up to the caller to ensure the transaction has not hit any

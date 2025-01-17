@@ -9,6 +9,7 @@
 #include "iceberg/transaction.h"
 
 #include "iceberg/merge_append_action.h"
+#include "iceberg/remove_snapshots_action.h"
 #include "iceberg/schema.h"
 #include "iceberg/table_requirement.h"
 #include "iceberg/table_update_applier.h"
@@ -73,6 +74,12 @@ ss::future<transaction::txn_outcome> transaction::merge_append(
   chunked_vector<std::pair<ss::sstring, ss::sstring>> snapshot_props) {
     auto a = std::make_unique<merge_append_action>(
       io, table_, std::move(files), std::move(snapshot_props));
+    co_return co_await apply(std::move(a));
+}
+
+ss::future<transaction::txn_outcome>
+transaction::remove_expired_snapshots(model::timestamp now) {
+    auto a = std::make_unique<remove_snapshots_action>(table_, now);
     co_return co_await apply(std::move(a));
 }
 

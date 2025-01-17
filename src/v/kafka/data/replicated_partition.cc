@@ -360,9 +360,7 @@ raft::replicate_stages replicated_partition::replicate(
             make_error_code(kafka::error_code::invalid_topic_exception))};
     }
     auto res = _partition->replicate_in_stages(
-      batch_id,
-      chunked_vector<model::record_batch>::single(std::move(batch)),
-      opts);
+      batch_id, std::move(batch), opts);
 
     raft::replicate_stages out(raft::errc::success);
     out.request_enqueued = std::move(res.request_enqueued);

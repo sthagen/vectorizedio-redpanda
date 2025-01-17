@@ -51,6 +51,7 @@ v_cc_library(
     partition_key.cc
     partition_key_type.cc
     partition_json.cc
+    remove_snapshots_action.cc
     rest_catalog.cc
     schema.cc
     schema_avro.cc

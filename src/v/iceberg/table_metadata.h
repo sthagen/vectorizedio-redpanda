@@ -96,6 +96,19 @@ struct table_metadata {
         return it != schemas.end() ? &*it : nullptr;
     }
 
+    // TODO: consider making this a lazy data member if it gets used by many
+    // callers for the same metadata.
+    chunked_hash_map<snapshot_id, snapshot> get_snapshots_by_id() const {
+        chunked_hash_map<snapshot_id, snapshot> snaps_by_id;
+        if (!snapshots.has_value()) {
+            return snaps_by_id;
+        }
+        for (const auto& s : *snapshots) {
+            snaps_by_id.emplace(s.id, s);
+        }
+        return snaps_by_id;
+    }
+
     friend bool operator==(const table_metadata&, const table_metadata&)
       = default;
 };

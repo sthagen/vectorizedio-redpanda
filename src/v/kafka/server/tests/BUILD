@@ -1,4 +1,4 @@
-load("//bazel:test.bzl", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_bench", "redpanda_cc_btest", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_test_cc_library(
     name = "config_response_utils_test_help",
@@ -747,5 +747,98 @@ redpanda_cc_gtest(
         "@fmt",
         "@seastar",
         "@seastar//:testing",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "kafka_fetch_rpbench",
+    timeout = "moderate",
+    srcs = [
+        "fetch_bench.cc",
+    ],
+    cpu = 2,
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    tags = ["exclusive"],
+    target_compatible_with = select({
+        "//bazel:optimized_build": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":kafka_test_utils",
+        "//src/v/base",
+        "//src/v/cluster",
+        "//src/v/kafka/server",
+        "//src/v/model",
+        "//src/v/redpanda/tests:fixture",
+        "//src/v/test_utils:fixture",
+        "//src/v/test_utils:scoped_config",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "kafka_fetch_plan_rpbench",
+    srcs = [
+        "fetch_plan_bench.cc",
+    ],
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    tags = ["exclusive"],
+    deps = [
+        "//src/v/base",
+        "//src/v/kafka/client",
+        "//src/v/kafka/protocol",
+        "//src/v/kafka/protocol:fetch",
+        "//src/v/kafka/protocol/schemata:fetch_request",
+        "//src/v/kafka/server",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture",
+        "@boost//:test",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "kafka_produce_partition_rpbench",
+    srcs = [
+        "produce_partition_bench.cc",
+    ],
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    tags = ["exclusive"],
+    deps = [
+        "//src/v/container:fragmented_vector",
+        "//src/v/kafka/protocol/schemata:produce_request",
+        "//src/v/kafka/server",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:benchmark",
+    ],
+)
+
+redpanda_cc_bench(
+    name = "quota_manager_rpbench",
+    srcs = [
+        "quota_manager_bench.cc",
+    ],
+    cpu = 2,
+    duration = 1,
+    memory = "4GiB",
+    runs = 1,
+    deps = [
+        "//src/v/cluster",
+        "//src/v/config",
+        "//src/v/kafka/server",
+        "@fmt",
+        "@seastar",
+        "@seastar//:benchmark",
     ],
 )

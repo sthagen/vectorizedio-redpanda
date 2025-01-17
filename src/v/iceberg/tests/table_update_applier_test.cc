@@ -291,3 +291,55 @@ TEST_F(UpdateApplyingVisitorTest, TestSetSnapshotReference) {
     outcome = table_update::apply(make_update("noneya", 12345), table);
     ASSERT_EQ(outcome, table_update::outcome::unexpected_state);
 }
+
+TEST_F(UpdateApplyingVisitorTest, TestRemoveSnapshotReference) {
+    const auto make_update =
+      [&](std::string_view ref_name) -> table_update::update {
+        return table_update::remove_snapshot_ref{
+          .ref_name = ss::sstring(ref_name)};
+    };
+    auto table = create_table();
+    table.refs.emplace();
+    for (int64_t i = 0; i < 100; ++i) {
+        auto ref_name = fmt::format("ref-{}", i);
+        table.refs->emplace(
+          ref_name,
+          snapshot_reference{
+            .snapshot_id = snapshot_id{i},
+            .type = snapshot_ref_type::branch,
+          });
+    }
+    table.current_snapshot_id = snapshot_id{99};
+
+    // Simple removal.
+    auto outcome = table_update::apply(make_update("ref-0"), table);
+    ASSERT_EQ(outcome, table_update::outcome::success);
+    ASSERT_EQ(99, table.refs->size());
+
+    // Removing non-existent references should no-op.
+    outcome = table_update::apply(make_update("missing-ref"), table);
+    ASSERT_EQ(outcome, table_update::outcome::success);
+    ASSERT_EQ(99, table.refs->size());
+    ASSERT_EQ(table.current_snapshot_id.value()(), 99);
+
+    // Removing 'main', even if it doesn't exist, will reset the current
+    // snapshot id.
+    outcome = table_update::apply(make_update("main"), table);
+    ASSERT_EQ(outcome, table_update::outcome::success);
+    ASSERT_EQ(99, table.refs->size());
+    ASSERT_FALSE(table.current_snapshot_id.has_value());
+
+    // Removing 'main' whe it does exist will also reset the current snapshot.
+    table.current_snapshot_id = snapshot_id{99};
+    table.refs->emplace(
+      "main",
+      snapshot_reference{
+        .snapshot_id = snapshot_id{99},
+        .type = snapshot_ref_type::branch,
+      });
+    ASSERT_EQ(100, table.refs->size());
+    outcome = table_update::apply(make_update("main"), table);
+    ASSERT_EQ(outcome, table_update::outcome::success);
+    ASSERT_EQ(99, table.refs->size());
+    ASSERT_FALSE(table.current_snapshot_id.has_value());
+}

@@ -130,6 +130,13 @@ filesystem_catalog::drop_table(const table_identifier& table_id, bool) {
 ss::future<checked<std::nullopt_t, catalog::errc>>
 filesystem_catalog::commit_txn(
   const table_identifier& table_ident, transaction txn) {
+    if (txn.updates().updates.empty()) {
+        vlog(
+          log.debug,
+          "Transaction has no updates to table {}, returning early",
+          table_ident.table);
+        co_return std::nullopt;
+    }
     auto current_tmeta = co_await read_table_meta(table_ident);
     if (current_tmeta.has_error()) {
         co_return current_tmeta.error();
