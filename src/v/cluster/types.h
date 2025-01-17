@@ -482,7 +482,7 @@ struct partition_assignment
       = default;
 };
 
-enum incremental_update_operation : int8_t { none, set, remove };
+enum class incremental_update_operation : int8_t { none, set, remove };
 
 inline std::string_view
 incremental_update_operation_as_string(incremental_update_operation op) {
@@ -496,6 +496,11 @@ incremental_update_operation_as_string(incremental_update_operation op) {
     default:
         vassert(false, "Unknown operation type passed: {}", int8_t(op));
     }
+}
+
+inline std::ostream&
+operator<<(std::ostream& os, const incremental_update_operation& op) {
+    return os << incremental_update_operation_as_string(op);
 }
 
 template<typename T>
