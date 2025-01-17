@@ -24,6 +24,7 @@ namespace serde {
 template<typename T>
 requires(serde_is_enum_v<std::decay_t<T>>)
 void tag_invoke(tag_t<write_tag>, iobuf& out, T t) {
+    static_assert(std::is_scoped_enum_v<std::decay_t<T>>);
     using Type = std::decay_t<T>;
     const auto val = static_cast<std::underlying_type_t<Type>>(t);
     if (unlikely(!std::in_range<serde_enum_serialized_t>(val))) {
@@ -41,6 +42,7 @@ template<typename T>
 requires serde_is_enum_v<std::decay_t<T>>
 void tag_invoke(
   tag_t<read_tag>, iobuf_parser& in, T& t, const std::size_t bytes_left_limit) {
+    static_assert(std::is_scoped_enum_v<std::decay_t<T>>);
     using Type = std::decay_t<T>;
 
     const auto val = read_nested<serde_enum_serialized_t>(in, bytes_left_limit);

@@ -16,13 +16,8 @@ namespace serde {
 using serde_enum_serialized_t = int32_t;
 
 template<typename T>
-inline constexpr bool serde_is_enum_v =
-#if defined(__cpp_lib_is_scoped_enum) && __cpp_lib_is_scoped_enum >= 202011L
-  std::is_scoped_enum_v<T>
-  && sizeof(std::decay_t<T>) <= sizeof(serde_enum_serialized_t);
-#else
-  std::is_enum_v<T>
-  && sizeof(std::decay_t<T>) <= sizeof(serde_enum_serialized_t);
-#endif
+inline constexpr bool serde_is_enum_v = std::is_enum_v<T>
+                                        && sizeof(std::decay_t<T>)
+                                             <= sizeof(serde_enum_serialized_t);
 
 } // namespace serde
