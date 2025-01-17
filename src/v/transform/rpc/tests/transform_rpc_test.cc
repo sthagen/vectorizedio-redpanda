@@ -174,13 +174,13 @@ public:
         // tests.
         const auto& prop_update = update.properties.batch_max_bytes;
         switch (prop_update.op) {
-        case cluster::none:
+        case cluster::incremental_update_operation::none:
             return;
-        case cluster::set:
+        case cluster::incremental_update_operation::set:
             config.properties.batch_max_bytes
               = update.properties.batch_max_bytes.value;
             break;
-        case cluster::remove:
+        case cluster::incremental_update_operation::remove:
             config.properties.batch_max_bytes.reset();
             break;
         }
