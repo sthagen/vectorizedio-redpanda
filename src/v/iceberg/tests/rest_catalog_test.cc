@@ -460,6 +460,26 @@ TEST_F(RestCatalogTest, CommitTxnHappyPath) {
     ASSERT_FALSE(result.has_error());
 }
 
+TEST_F(RestCatalogTest, CommitEmptyTransaction) {
+    // No expectations to fail if the client is used at all.
+    auto client = make_catalog_client({[](client_mock&) {}});
+
+    iceberg::rest_catalog catalog(
+      std::move(client), config::mock_binding<std::chrono::milliseconds>(10s));
+    auto table_md = create_empty_table_metadata(bucket_name);
+
+    iceberg::transaction txn(std::move(table_md));
+    auto result = catalog
+                    .commit_txn(
+                      iceberg::table_identifier{
+                        .ns = {"foo", "bar", "baz"}, .table = "panda_table"},
+                      std::move(txn))
+                    .get();
+
+    // The client shouldn't be used at all.
+    ASSERT_FALSE(result.has_error());
+}
+
 ss::future<http::downloaded_response> handle_load_table_check_concurrency(
   boost::beast::http::request_header<>&& r,
   std::optional<iobuf>,

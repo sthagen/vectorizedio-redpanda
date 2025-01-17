@@ -125,6 +125,20 @@ struct update_applying_visitor {
         // TODO: once we add support for statistics, need to remove them too.
         return outcome::success;
     }
+    outcome operator()(const remove_snapshot_ref& update) {
+        if (update.ref_name == "main") {
+            meta.current_snapshot_id.reset();
+            // Intentional fallthrough to remove from the refs container.
+        }
+        if (!meta.refs.has_value() || meta.refs->empty()) {
+            return outcome::success;
+        }
+        auto ref_it = meta.refs->find(update.ref_name);
+        if (ref_it != meta.refs->end()) {
+            meta.refs->erase(ref_it);
+        }
+        return outcome::success;
+    }
     outcome operator()(const set_snapshot_ref& update) {
         auto sid = update.ref.snapshot_id;
         if (!meta.snapshots.has_value()) {

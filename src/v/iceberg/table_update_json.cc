@@ -49,6 +49,11 @@ struct table_update_json_serializing_visitor {
         }
         w.EndArray();
     }
+    void operator()(const iceberg::table_update::remove_snapshot_ref& update) {
+        serialize_action("remove-snapshot-ref");
+        w.Key("ref-name");
+        w.String(update.ref_name);
+    }
     void operator()(const iceberg::table_update::set_snapshot_ref& update) {
         serialize_action("set-snapshot-ref");
         w.Key("ref-name");
