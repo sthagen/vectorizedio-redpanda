@@ -25,9 +25,11 @@ class ScaleParameters:
                  replication_factor,
                  mib_per_partition,
                  topic_partitions_per_shard,
-                 tiered_storage_enabled=False):
+                 tiered_storage_enabled=False,
+                 partition_memory_reserve_percentage=10):
         self.redpanda = redpanda
         self.tiered_storage_enabled = tiered_storage_enabled
+        self.partition_memory_reserve_percentage = partition_memory_reserve_percentage
 
         node_count = len(self.redpanda.nodes)
 
@@ -171,8 +173,9 @@ class ScaleParameters:
         # Not all internal partitions have rf=replication_factor so this
         # over-allocates but making it more accurate would be complicated.
         per_node_slack = internal_partition_slack * replication_factor / node_count
-        partition_mem_total_per_node = mib_per_partition * (
-            partition_replicas_per_node + per_node_slack)
+        memory_setting = mib_per_partition * (
+            partition_replicas_per_node +
+            per_node_slack) / (self.partition_memory_reserve_percentage / 100.)
 
         resource_settings_args = {}
         if not self.redpanda.dedicated_nodes:
@@ -180,14 +183,13 @@ class ScaleParameters:
             # real testing, so disable fsync to make test run faster.
             resource_settings_args['bypass_fsync'] = True
 
-            partition_mem_total_per_node = max(partition_mem_total_per_node,
-                                               500)
+            memory_setting = max(memory_setting, 500)
         else:
             # On dedicated nodes we will use an explicit reactor stall threshold
             # as a success condition.
             resource_settings_args['reactor_stall_threshold'] = 100
 
-        resource_settings_args['memory_mb'] = int(partition_mem_total_per_node)
+        resource_settings_args['memory_mb'] = int(memory_setting)
 
         self.redpanda.set_resource_settings(
             ResourceSettings(**resource_settings_args))
@@ -198,7 +200,7 @@ class ScaleParameters:
 
         # Should not happen on the expected EC2 instance types where
         # the cores-RAM ratio is sufficient to meet our shards-per-core
-        if effective_node_memory < partition_mem_total_per_node:
+        if effective_node_memory < memory_setting:
             raise RuntimeError(
                 f"Node memory is too small ({node_memory}MB - {reserved_memory}MB)"
             )
