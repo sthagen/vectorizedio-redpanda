@@ -79,6 +79,17 @@ rp_test(
 )
 
 rp_test(
+  UNIT_TEST
+  GTEST
+  BINARY_NAME iceberg_values_json
+  SOURCES
+    values_json_test.cc
+  LIBRARIES
+    v::gtest_main
+    v::iceberg_test_utils
+)
+
+rp_test(
   BENCHMARK_TEST
   BINARY_NAME iceberg_uri
   SOURCES uri_bench.cc
