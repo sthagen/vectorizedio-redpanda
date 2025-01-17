@@ -11,6 +11,11 @@
             "output_type": "ensure_table_exists_reply"
         },
         {
+            "name": "ensure_dlq_table_exists",
+            "input_type": "ensure_dlq_table_exists_request",
+            "output_type": "ensure_dlq_table_exists_reply"
+        },
+        {
             "name": "add_translated_data_files",
             "input_type": "add_translated_data_files_request",
             "output_type": "add_translated_data_files_reply"

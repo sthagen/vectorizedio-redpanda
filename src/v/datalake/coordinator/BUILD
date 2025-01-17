@@ -167,6 +167,7 @@ redpanda_cc_library(
         ":state_update",
         "//src/v/base",
         "//src/v/container:fragmented_vector",
+        "//src/v/iceberg:table_identifier",
         "@seastar",
     ],
 )
@@ -200,6 +201,7 @@ redpanda_cc_library(
         "//src/v/container:fragmented_vector",
         "//src/v/iceberg:catalog",
         "//src/v/iceberg:manifest_io",
+        "//src/v/iceberg:table_identifier",
         "@seastar",
     ],
 )

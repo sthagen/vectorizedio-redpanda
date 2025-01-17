@@ -90,6 +90,50 @@ struct ensure_table_exists_request
     }
 };
 
+struct ensure_dlq_table_exists_reply
+  : serde::envelope<
+      ensure_dlq_table_exists_reply,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+
+    ensure_dlq_table_exists_reply() = default;
+    explicit ensure_dlq_table_exists_reply(errc err)
+      : errc(err) {}
+
+    friend std::ostream&
+    operator<<(std::ostream&, const ensure_dlq_table_exists_reply&);
+
+    errc errc;
+
+    auto serde_fields() { return std::tie(errc); }
+};
+
+struct ensure_dlq_table_exists_request
+  : serde::envelope<
+      ensure_dlq_table_exists_request,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    using rpc_adl_exempt = std::true_type;
+    using resp_t = ensure_dlq_table_exists_reply;
+
+    ensure_dlq_table_exists_request() = default;
+    ensure_dlq_table_exists_request(
+      model::topic topic, model::revision_id topic_revision)
+      : topic(std::move(topic))
+      , topic_revision(topic_revision) {}
+
+    model::topic topic;
+    model::revision_id topic_revision;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const ensure_dlq_table_exists_request&);
+
+    const model::topic& get_topic() const { return topic; }
+
+    auto serde_fields() { return std::tie(topic, topic_revision); }
+};
+
 struct add_translated_data_files_reply
   : serde::envelope<
       add_translated_data_files_reply,

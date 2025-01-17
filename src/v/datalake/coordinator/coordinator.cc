@@ -27,6 +27,7 @@
 #include <seastar/util/defer.hh>
 
 #include <exception>
+#include <optional>
 
 namespace datalake::coordinator {
 
@@ -266,6 +267,9 @@ coordinator::sync_ensure_table_exists(
           check_res.error());
         co_return errc::revision_mismatch;
     }
+
+    // Will skip the STM update if the topic is already live.
+    // But will still ensure the DLQ table schema.
     if (check_res.value()) {
         // update is non-trivial
         storage::record_batch_builder builder(
@@ -297,6 +301,79 @@ coordinator::sync_ensure_table_exists(
     auto record_type = default_translator{}.build_type(std::move(val_type));
     auto ensure_res = co_await schema_mgr_.ensure_table_schema(
       table_id, record_type.type, hour_partition_spec());
+    if (ensure_res.has_error()) {
+        switch (ensure_res.error()) {
+        case schema_manager::errc::not_supported:
+            co_return errc::incompatible_schema;
+        case schema_manager::errc::failed:
+            co_return errc::failed;
+        case schema_manager::errc::shutting_down:
+            co_return errc::shutting_down;
+        }
+    }
+
+    co_return std::nullopt;
+}
+
+ss::future<checked<std::nullopt_t, coordinator::errc>>
+coordinator::sync_ensure_dlq_table_exists(
+  model::topic topic, model::revision_id topic_revision) {
+    auto gate = maybe_gate();
+    if (gate.has_error()) {
+        co_return gate.error();
+    }
+
+    vlog(
+      datalake_log.debug,
+      "Sync ensure dlq table exists requested, topic: {} rev: {}",
+      topic,
+      topic_revision);
+
+    auto sync_res = co_await stm_->sync(10s);
+    if (sync_res.has_error()) {
+        co_return convert_stm_errc(sync_res.error());
+    }
+
+    // TODO: add mutex to protect against the thundering herd problem
+
+    topic_lifecycle_update update{
+      .topic = topic,
+      .revision = topic_revision,
+      .new_state = topic_state::lifecycle_state_t::live,
+    };
+    auto check_res = update.can_apply(stm_->state());
+    if (check_res.has_error()) {
+        vlog(
+          datalake_log.debug,
+          "Rejecting ensure_dlq_table_exist for {} rev {}: {}",
+          topic,
+          topic_revision,
+          check_res.error());
+        co_return errc::revision_mismatch;
+    }
+
+    // Will skip the STM update if the topic is already live.
+    // But will still ensure the DLQ table schema.
+    if (check_res.value()) {
+        // update is non-trivial
+        storage::record_batch_builder builder(
+          model::record_batch_type::datalake_coordinator, model::offset{0});
+        builder.add_raw_kv(
+          serde::to_iobuf(topic_lifecycle_update::key),
+          serde::to_iobuf(std::move(update)));
+        auto repl_res = co_await stm_->replicate_and_wait(
+          sync_res.value(), std::move(builder).build(), as_);
+        if (repl_res.has_error()) {
+            co_return convert_stm_errc(repl_res.error());
+        }
+    }
+
+    // TODO: verify stm state after replication
+
+    auto dlq_table_id = table_id_provider::dlq_table_id(topic);
+    auto record_type = key_value_translator{}.build_type(std::nullopt);
+    auto ensure_res = co_await schema_mgr_.ensure_table_schema(
+      dlq_table_id, record_type.type, hour_partition_spec());
     if (ensure_res.has_error()) {
         switch (ensure_res.error()) {
         case schema_manager::errc::not_supported:
@@ -525,17 +602,41 @@ coordinator::update_lifecycle_state(
         if (tombstone_it != topic_table_.get_iceberg_tombstones().end()) {
             auto tombstone_rev = tombstone_it->second.last_deleted_revision;
             if (tombstone_rev >= topic.revision) {
-                auto drop_res = co_await file_committer_.drop_table(t);
-                if (drop_res.has_error()) {
-                    switch (drop_res.error()) {
-                    case file_committer::errc::shutting_down:
-                        co_return errc::shutting_down;
-                    case file_committer::errc::failed:
-                        vlog(
-                          datalake_log.warn,
-                          "failed to drop table for topic {}",
-                          t);
-                        co_return ss::stop_iteration::yes;
+                // Drop the main table if it exists.
+                {
+                    auto table_id = table_id_provider::table_id(t);
+                    auto drop_res = co_await file_committer_.drop_table(
+                      table_id);
+                    if (drop_res.has_error()) {
+                        switch (drop_res.error()) {
+                        case file_committer::errc::shutting_down:
+                            co_return errc::shutting_down;
+                        case file_committer::errc::failed:
+                            vlog(
+                              datalake_log.warn,
+                              "failed to drop table for topic {}",
+                              t);
+                            co_return ss::stop_iteration::yes;
+                        }
+                    }
+                }
+
+                // Drop the DLQ table if it exists.
+                {
+                    auto dlq_table_id = table_id_provider::dlq_table_id(t);
+                    auto drop_res = co_await file_committer_.drop_table(
+                      dlq_table_id);
+                    if (drop_res.has_error()) {
+                        switch (drop_res.error()) {
+                        case file_committer::errc::shutting_down:
+                            co_return errc::shutting_down;
+                        case file_committer::errc::failed:
+                            vlog(
+                              datalake_log.warn,
+                              "failed to drop dlq table for topic {}",
+                              t);
+                            co_return ss::stop_iteration::yes;
+                        }
                     }
                 }
             }

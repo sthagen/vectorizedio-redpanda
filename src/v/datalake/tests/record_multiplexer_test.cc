@@ -12,6 +12,7 @@
 #include "datalake/record_schema_resolver.h"
 #include "datalake/record_translator.h"
 #include "datalake/table_definition.h"
+#include "datalake/table_id_provider.h"
 #include "datalake/tests/catalog_and_registry_fixture.h"
 #include "datalake/tests/record_generator.h"
 #include "datalake/tests/test_data_writer.h"
@@ -175,6 +176,18 @@ public:
         return std::move(*it);
     }
 
+    void assert_dlq_table(const model::topic& t, bool exists) {
+        auto dlq_table_id = datalake::table_id_provider::dlq_table_id(t);
+        auto load_res = catalog.load_table(dlq_table_id).get();
+        if (exists) {
+            EXPECT_FALSE(load_res.has_error())
+              << "Expected DLQ table to exit but got an error: "
+              << load_res.error();
+        } else {
+            EXPECT_TRUE(load_res.has_error());
+        }
+    }
+
     catalog_schema_manager schema_mgr;
     record_schema_resolver type_resolver;
     direct_table_creator t_creator;
@@ -208,6 +221,8 @@ TEST_P(RecordMultiplexerParamTest, TestNoSchema) {
       },
       true);
     ASSERT_FALSE(res.has_value());
+
+    assert_dlq_table(ntp.tp.topic, true);
 }
 
 TEST_P(RecordMultiplexerParamTest, TestSimpleAvroRecords) {
@@ -236,6 +251,9 @@ TEST_P(RecordMultiplexerParamTest, TestSimpleAvroRecords) {
     // 4 default columns + RootRecord + mylong
     auto schema = get_current_schema();
     EXPECT_EQ(schema->highest_field_id(), 10);
+
+    // No DLQ table when all records are valid.
+    assert_dlq_table(ntp.tp.topic, false);
 }
 
 TEST_P(RecordMultiplexerParamTest, TestAvroRecordsMultipleSchemas) {
@@ -349,6 +367,8 @@ TEST_F(RecordMultiplexerTest, TestMissingSchema) {
       },
       true);
     ASSERT_FALSE(res.has_value());
+
+    assert_dlq_table(ntp.tp.topic, true);
 }
 
 TEST_F(RecordMultiplexerTest, TestBadData) {
@@ -370,6 +390,8 @@ TEST_F(RecordMultiplexerTest, TestBadData) {
       },
       true);
     ASSERT_FALSE(res.has_value());
+
+    assert_dlq_table(ntp.tp.topic, true);
 }
 
 TEST_F(RecordMultiplexerTest, TestBadSchemaChange) {
