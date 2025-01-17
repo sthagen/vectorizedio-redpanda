@@ -165,13 +165,13 @@ static partition_produce_stages partition_append(
   model::partition_id id,
   ss::lw_shared_ptr<replicated_partition> partition,
   model::batch_identity bid,
-  model::record_batch batch,
+  std::unique_ptr<model::record_batch> batch,
   int16_t acks,
   int32_t num_records,
   int64_t num_bytes,
   std::chrono::milliseconds timeout_ms) {
     auto stages = partition->replicate(
-      bid, std::move(batch), acks_to_replicate_options(acks, timeout_ms));
+      bid, std::move(*batch), acks_to_replicate_options(acks, timeout_ms));
     return partition_produce_stages{
       .dispatched = std::move(stages.request_enqueued),
       .produced = stages.replicate_finished.then_wrapped(
@@ -316,7 +316,8 @@ static partition_produce_stages produce_topic_partition(
     }
 
     // steal the batch from the adapter
-    auto batch = std::move(part.records->adapter.batch.value());
+    auto batch = std::make_unique<model::record_batch>(
+      std::move(part.records->adapter.batch.value()));
 
     auto topic_cfg = octx.rctx.metadata_cache().get_topic_cfg(
       model::topic_namespace_view(model::kafka_namespace, topic.name));
@@ -335,15 +336,15 @@ static partition_produce_stages produce_topic_partition(
     // validate the batch timestamps by checking skew against broker time
     if (
       auto new_timestamp = validate_batch_timestamps(
-        ntp, batch.header(), timestamp_type, octx.rctx.server_probe())) {
-        batch.set_max_timestamp(
+        ntp, batch->header(), timestamp_type, octx.rctx.server_probe())) {
+        batch->set_max_timestamp(
           model::timestamp_type::append_time, new_timestamp.value());
     }
 
-    const auto& hdr = batch.header();
+    const auto& hdr = batch->header();
     auto bid = model::batch_identity::from(hdr);
-    auto batch_size = batch.size_bytes();
-    auto num_records = batch.record_count();
+    auto batch_size = batch->size_bytes();
+    auto num_records = batch->record_count();
     auto validator
       = pandaproxy::schema_registry::maybe_make_schema_id_validator(
         octx.rctx.schema_registry(), topic.name, topic_cfg->properties);
@@ -401,31 +402,30 @@ static partition_produce_stages produce_topic_partition(
                 }
 
                 auto probe = std::addressof(partition->probe());
-                return pandaproxy::schema_registry::maybe_validate_schema_id(
-                         std::move(validator), std::move(batch), probe)
-                  .then([ntp{std::move(ntp)},
-                         partition{std::move(partition)},
-                         dispatch = std::move(dispatch),
-                         bid,
-                         acks,
-                         source_shard,
-                         num_records,
-                         batch_size,
-                         timeout](result<model::record_batch, kafka::error_code>
-                                    batch) mutable {
-                      if (batch.has_error()) {
+                auto f = pandaproxy::schema_registry::maybe_validate_schema_id(
+                  std::move(validator), *batch, probe);
+
+                return std::move(f).then(
+                  [ntp{std::move(ntp)},
+                   partition{std::move(partition)},
+                   dispatch = std::move(dispatch),
+                   bid,
+                   acks,
+                   source_shard,
+                   num_records,
+                   batch_size,
+                   timeout,
+                   batch = std::move(batch)](kafka::error_code err) mutable {
+                      if (err != kafka::error_code::none) {
                           return finalize_request_with_error_code(
-                            batch.error(),
-                            std::move(dispatch),
-                            ntp,
-                            source_shard);
+                            err, std::move(dispatch), ntp, source_shard);
                       }
                       auto stages = partition_append(
                         ntp.tp.partition,
                         ss::make_lw_shared<replicated_partition>(
                           std::move(partition)),
                         bid,
-                        std::move(batch).value(),
+                        std::move(batch),
                         acks,
                         num_records,
                         batch_size,

@@ -847,10 +847,26 @@ replicate_stages consensus::replicate_in_stages(
 }
 
 replicate_stages consensus::replicate_in_stages(
+  model::record_batch batch, replicate_options opts) {
+    return do_replicate(
+      {}, chunked_vector<model::record_batch>::single(std::move(batch)), opts);
+}
+
+replicate_stages consensus::replicate_in_stages(
   model::term_id expected_term,
   chunked_vector<model::record_batch> batches,
   replicate_options opts) {
     return do_replicate(expected_term, std::move(batches), opts);
+}
+
+replicate_stages consensus::replicate_in_stages(
+  model::term_id expected_term,
+  model::record_batch batch,
+  replicate_options opts) {
+    return do_replicate(
+      expected_term,
+      chunked_vector<model::record_batch>::single(std::move(batch)),
+      opts);
 }
 
 replicate_stages

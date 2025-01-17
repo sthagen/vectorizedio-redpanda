@@ -42,7 +42,7 @@ struct batches_with_identity {
     chunked_vector<model::record_batch> batches;
 };
 
-static batches_with_identity make_rreader(
+static batches_with_identity make_batches(
   model::producer_identity pid,
   int first_seq,
   int count,
@@ -94,6 +94,21 @@ void check_snapshot_sizes(cluster::rm_stm& stm, raft::consensus* c) {
     BOOST_REQUIRE_EQUAL(stm.get_local_snapshot_size(), snapshots_size);
 }
 
+ss::future<result<cluster::kafka_result>>
+replicate_all(cluster::rm_stm& stm, batches_with_identity batches) {
+    result<cluster::kafka_result> result(cluster::kafka_result{});
+    for (auto& batch : batches.batches) {
+        result = co_await stm.replicate(
+          batches.id,
+          std::move(batch),
+          raft::replicate_options(raft::consistency_level::quorum_ack));
+        if (result.has_error()) {
+            co_return result;
+        }
+    }
+    co_return result;
+}
+
 // tests:
 //   - a simple tx execution succeeds
 //   - last_stable_offset doesn't advance past an ongoing transaction
@@ -111,14 +126,9 @@ FIXTURE_TEST(test_tx_happy_tx, rm_stm_test_fixture) {
     auto max_offset = model::offset(std::numeric_limits<int64_t>::max());
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
+
     RPTEST_REQUIRE_EVENTUALLY(
       1s, [&] { return stm.highest_producer_id() == pid1.get_id(); });
     BOOST_REQUIRE((bool)offset_r);
@@ -141,13 +151,9 @@ FIXTURE_TEST(test_tx_happy_tx, rm_stm_test_fixture) {
     BOOST_REQUIRE((bool)term_op);
     BOOST_REQUIRE_EQUAL(stm.highest_producer_id(), pid2.get_id());
 
-    rreader = make_rreader(pid2, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid2, 0, 5, true);
+
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE((bool)offset_r);
     auto tx_offset = offset_r.value().last_offset();
     tests::cooperative_spin_wait_with_timeout(10s, [&stm, first_offset]() {
@@ -188,14 +194,8 @@ FIXTURE_TEST(test_tx_aborted_tx_1, rm_stm_test_fixture) {
     auto max_offset = model::offset(std::numeric_limits<int64_t>::max());
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
     RPTEST_REQUIRE_EVENTUALLY(
       1s, [&] { return stm.highest_producer_id() == pid1.get_id(); });
     BOOST_REQUIRE((bool)offset_r);
@@ -218,13 +218,8 @@ FIXTURE_TEST(test_tx_aborted_tx_1, rm_stm_test_fixture) {
     BOOST_REQUIRE((bool)term_op);
     BOOST_REQUIRE_EQUAL(stm.highest_producer_id(), pid2.get_id());
 
-    rreader = make_rreader(pid2, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid2, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE((bool)offset_r);
     auto tx_offset = offset_r.value().last_offset();
     tests::cooperative_spin_wait_with_timeout(10s, [&stm, first_offset]() {
@@ -275,14 +270,8 @@ FIXTURE_TEST(test_tx_aborted_tx_2, rm_stm_test_fixture) {
     auto max_offset = model::offset(std::numeric_limits<int64_t>::max());
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
     RPTEST_REQUIRE_EVENTUALLY(
       1s, [&] { return stm.highest_producer_id() == pid1.get_id(); });
     BOOST_REQUIRE((bool)offset_r);
@@ -305,13 +294,8 @@ FIXTURE_TEST(test_tx_aborted_tx_2, rm_stm_test_fixture) {
     BOOST_REQUIRE_EQUAL(stm.highest_producer_id(), pid2.get_id());
     BOOST_REQUIRE((bool)term_op);
 
-    rreader = make_rreader(pid2, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid2, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE_EQUAL(stm.highest_producer_id(), pid2.get_id());
     BOOST_REQUIRE((bool)offset_r);
     auto tx_offset = offset_r.value().last_offset();
@@ -357,26 +341,15 @@ FIXTURE_TEST(test_tx_unknown_produce, rm_stm_test_fixture) {
     wait_for_meta_initialized();
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
     RPTEST_REQUIRE_EVENTUALLY(
       1s, [&] { return stm.highest_producer_id() == pid1.get_id(); });
     BOOST_REQUIRE((bool)offset_r);
 
     auto pid2 = model::producer_identity{2, 0};
-    rreader = make_rreader(pid2, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid2, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE(offset_r == invalid_producer_epoch);
     RPTEST_REQUIRE_EVENTUALLY(
       1s, [&] { return stm.highest_producer_id() == pid1.get_id(); });
@@ -442,14 +415,8 @@ FIXTURE_TEST(test_tx_begin_fences_produce, rm_stm_test_fixture) {
     wait_for_meta_initialized();
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE((bool)offset_r);
 
     auto pid20 = model::producer_identity{2, 0};
@@ -474,13 +441,8 @@ FIXTURE_TEST(test_tx_begin_fences_produce, rm_stm_test_fixture) {
                 .get();
     BOOST_REQUIRE((bool)term_op);
 
-    rreader = make_rreader(pid20, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid20, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE(!(bool)offset_r);
 
     check_snapshot_sizes(stm, _raft.get());
@@ -500,14 +462,8 @@ FIXTURE_TEST(test_tx_post_aborted_produce, rm_stm_test_fixture) {
     wait_for_meta_initialized();
 
     auto pid1 = model::producer_identity{1, 0};
-    auto rreader = make_rreader(pid1, 0, 5, false);
-    auto offset_r = stm
-                      .replicate(
-                        rreader.id,
-                        std::move(rreader.batches),
-                        raft::replicate_options(
-                          raft::consistency_level::quorum_ack))
-                      .get();
+    auto rreader = make_batches(pid1, 0, 5, false);
+    auto offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE((bool)offset_r);
 
     auto pid20 = model::producer_identity{2, 0};
@@ -521,25 +477,15 @@ FIXTURE_TEST(test_tx_post_aborted_produce, rm_stm_test_fixture) {
                      .get();
     BOOST_REQUIRE((bool)term_op);
 
-    rreader = make_rreader(pid20, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid20, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE((bool)offset_r);
 
     auto op = stm.abort_tx(pid20, tx_seq, 2'000ms).get();
     BOOST_REQUIRE_EQUAL(op, cluster::tx::errc::none);
 
-    rreader = make_rreader(pid20, 0, 5, true);
-    offset_r = stm
-                 .replicate(
-                   rreader.id,
-                   std::move(rreader.batches),
-                   raft::replicate_options(raft::consistency_level::quorum_ack))
-                 .get();
+    rreader = make_batches(pid20, 0, 5, true);
+    offset_r = replicate_all(stm, std::move(rreader)).get();
     BOOST_REQUIRE(offset_r == invalid_producer_epoch);
 
     check_snapshot_sizes(stm, _raft.get());
@@ -567,8 +513,6 @@ FIXTURE_TEST(test_aborted_transactions, rm_stm_test_fixture) {
     const auto tx_seq = model::tx_seq(0);
     const auto timeout = std::chrono::milliseconds(
       std::numeric_limits<int32_t>::max());
-    const auto opts = raft::replicate_options(
-      raft::consistency_level::quorum_ack);
     size_t segment_count = 1;
 
     auto& segments = disk_log->segments();
@@ -603,9 +547,9 @@ FIXTURE_TEST(test_aborted_transactions, rm_stm_test_fixture) {
         auto pid = model::producer_identity{pid_counter++, 0};
         BOOST_REQUIRE(
           stm.begin_tx(pid, tx_seq, timeout, model::partition_id(0)).get());
-        auto rreader = make_rreader(pid, 0, 5, true);
-        BOOST_REQUIRE(
-          stm.replicate(rreader.id, std::move(rreader.batches), opts).get());
+
+        auto result = replicate_all(stm, make_batches(pid, 0, 5, true)).get();
+        BOOST_REQUIRE(result.has_value());
         return pid;
     };
 
@@ -615,9 +559,8 @@ FIXTURE_TEST(test_aborted_transactions, rm_stm_test_fixture) {
     };
 
     auto abort_tx = [&](auto pid) {
-        auto rreader = make_rreader(pid, 5, 5, true);
-        BOOST_REQUIRE(
-          stm.replicate(rreader.id, std::move(rreader.batches), opts).get());
+        auto result = replicate_all(stm, make_batches(pid, 5, 5, true)).get();
+        BOOST_REQUIRE(result.has_value());
         BOOST_REQUIRE_EQUAL(
           stm.abort_tx(pid, tx_seq, timeout).get(), cluster::tx::errc::none);
     };
@@ -718,10 +661,11 @@ FIXTURE_TEST(test_aborted_transactions, rm_stm_test_fixture) {
         auto pid = start_tx();
         roll_log();
         // replicate some non transactional data batches.
-        auto rreader = make_rreader(
-          model::producer_identity{-1, -1}, 0, 5, false);
-        BOOST_REQUIRE(
-          stm.replicate(rreader.id, std::move(rreader.batches), opts).get());
+        auto result
+          = replicate_all(
+              stm, make_batches(model::producer_identity{-1, -1}, 0, 5, false))
+              .get();
+        BOOST_REQUIRE(result.has_value());
 
         // roll and abort.
         roll_log();
