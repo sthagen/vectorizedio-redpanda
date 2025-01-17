@@ -313,6 +313,7 @@ class PartitionReassignmentsTest(RedpandaTest):
         return kafka_tools.reassign_partitions(
             reassignments=reassignments, operation="cancel").splitlines()
 
+    @ignore  # https://redpandadata.atlassian.net/browse/CORE-8735
     @cluster(num_nodes=6)
     def test_reassignments_kafka_cli(self):
         initial_assignments, all_node_idx, producers = self.initial_setup_steps(
