@@ -62,6 +62,9 @@ public:
       model::revision_id topic_revision,
       record_schema_components);
 
+    ss::future<checked<std::nullopt_t, errc>> sync_ensure_dlq_table_exists(
+      model::topic topic, model::revision_id topic_revision);
+
     ss::future<checked<std::nullopt_t, errc>> sync_add_files(
       model::topic_partition tp,
       model::revision_id topic_revision,

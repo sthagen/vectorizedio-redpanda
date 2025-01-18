@@ -160,6 +160,12 @@ class DatalakeServices():
         return (namespace, ) in namespaces and (
             namespace, table) in client.list_tables(namespace)
 
+    def num_tables(self, namespace="redpanda", client=None):
+        if client is None:
+            client = self.catalog_client()
+
+        return len(client.list_tables(namespace))
+
     def wait_for_iceberg_table(self, namespace, table, timeout, backoff_sec):
         client = self.catalog_client()
 

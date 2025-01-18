@@ -14,6 +14,8 @@
 #include "datalake/table_definition.h"
 #include "datalake/table_id_provider.h"
 
+#include <optional>
+
 namespace datalake {
 
 direct_table_creator::direct_table_creator(
@@ -39,6 +41,28 @@ direct_table_creator::ensure_table(
     }
 
     auto record_type = default_translator{}.build_type(std::move(val_type));
+    auto ensure_res = co_await schema_mgr_.ensure_table_schema(
+      table_id, record_type.type, hour_partition_spec());
+    if (ensure_res.has_error()) {
+        switch (ensure_res.error()) {
+        case schema_manager::errc::not_supported:
+            co_return errc::incompatible_schema;
+        case schema_manager::errc::failed:
+            co_return errc::failed;
+        case schema_manager::errc::shutting_down:
+            co_return errc::shutting_down;
+        }
+    }
+
+    co_return std::nullopt;
+}
+
+ss::future<checked<std::nullopt_t, table_creator::errc>>
+direct_table_creator::ensure_dlq_table(
+  const model::topic& topic, model::revision_id) const {
+    auto table_id = table_id_provider::dlq_table_id(topic);
+
+    auto record_type = key_value_translator{}.build_type(std::nullopt);
     auto ensure_res = co_await schema_mgr_.ensure_table_schema(
       table_id, record_type.type, hour_partition_spec());
     if (ensure_res.has_error()) {

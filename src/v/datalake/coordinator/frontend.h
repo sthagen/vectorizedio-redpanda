@@ -51,6 +51,9 @@ public:
     ss::future<ensure_table_exists_reply> ensure_table_exists(
       ensure_table_exists_request, local_only = local_only::no);
 
+    ss::future<ensure_dlq_table_exists_reply> ensure_dlq_table_exists(
+      ensure_dlq_table_exists_request, local_only = local_only::no);
+
     ss::future<add_translated_data_files_reply> add_translated_data_files(
       add_translated_data_files_request, local_only = local_only::no);
 
@@ -92,6 +95,11 @@ private:
 
     ss::future<ensure_table_exists_reply> ensure_table_exists_locally(
       ensure_table_exists_request,
+      const model::ntp& coordinator_partition,
+      ss::shard_id);
+
+    ss::future<ensure_dlq_table_exists_reply> ensure_dlq_table_exists_locally(
+      ensure_dlq_table_exists_request,
       const model::ntp& coordinator_partition,
       ss::shard_id);
 

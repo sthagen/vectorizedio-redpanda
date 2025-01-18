@@ -48,7 +48,7 @@ public:
       model::topic, const topics_state&) const final;
 
     ss::future<checked<std::nullopt_t, errc>>
-    drop_table(const model::topic&) const final;
+    drop_table(const iceberg::table_identifier&) const final;
 
 private:
     ss::future<checked<iceberg::table_metadata, errc>>

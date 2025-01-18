@@ -25,6 +25,9 @@ public:
       model::revision_id topic_revision,
       record_schema_components) const final;
 
+    ss::future<checked<std::nullopt_t, errc>> ensure_dlq_table(
+      const model::topic&, model::revision_id topic_revision) const final;
+
 private:
     type_resolver& type_resolver_;
     schema_manager& schema_mgr_;

@@ -20,6 +20,7 @@
 #include "iceberg/manifest_entry.h"
 #include "iceberg/manifest_io.h"
 #include "iceberg/partition_key.h"
+#include "iceberg/table_identifier.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/transaction.h"
 #include "iceberg/values.h"
@@ -332,8 +333,8 @@ iceberg_file_committer::commit_topic_files_to_catalog(
 }
 
 ss::future<checked<std::nullopt_t, file_committer::errc>>
-iceberg_file_committer::drop_table(const model::topic& topic) const {
-    auto table_id = table_id_provider::table_id(topic);
+iceberg_file_committer::drop_table(
+  const iceberg::table_identifier& table_id) const {
     auto drop_res = co_await catalog_.drop_table(table_id, true);
     if (
       drop_res.has_error()

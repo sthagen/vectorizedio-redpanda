@@ -78,7 +78,7 @@ ss::futurize_t<FuncRet> retry_with_backoff(
 }
 
 // Creates or alters the table by delegating to the coordinator.
-class coordinator_table_creator : public table_creator {
+class coordinator_table_creator final : public table_creator {
 public:
     explicit coordinator_table_creator(coordinator::frontend& fe)
       : coordinator_fe_(fe) {}
@@ -92,6 +92,24 @@ public:
             topic,
             topic_revision,
             comps,
+          });
+        switch (ensure_res.errc) {
+        case coordinator::errc::ok:
+            co_return std::nullopt;
+        case coordinator::errc::incompatible_schema:
+            co_return errc::incompatible_schema;
+        default:
+            co_return errc::failed;
+        }
+    }
+
+    ss::future<checked<std::nullopt_t, errc>> ensure_dlq_table(
+      const model::topic& topic,
+      const model::revision_id topic_revision) const final {
+        auto ensure_res = co_await coordinator_fe_.ensure_dlq_table_exists(
+          coordinator::ensure_dlq_table_exists_request{
+            topic,
+            topic_revision,
           });
         switch (ensure_res.errc) {
         case coordinator::errc::ok:

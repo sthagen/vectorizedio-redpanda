@@ -14,6 +14,7 @@ redpanda_test_cc_library(
         "//src/v/datalake/coordinator:file_committer",
         "//src/v/datalake/coordinator:state",
         "//src/v/datalake/coordinator:translated_offset_range",
+        "//src/v/iceberg:table_identifier",
         "//src/v/model",
         "@googletest//:gtest",
     ],

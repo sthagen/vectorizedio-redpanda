@@ -76,6 +76,25 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "values_json_test",
+    timeout = "short",
+    srcs = [
+        "values_json_test.cc",
+    ],
+    deps = [
+        ":test_schemas",
+        "//src/v/bytes:random",
+        "//src/v/iceberg:json_writer",
+        "//src/v/iceberg:values",
+        "//src/v/iceberg:values_json",
+        "//src/v/json",
+        "//src/v/test_utils:gtest",
+        "@abseil-cpp//absl/numeric:int128",
+        "@googletest//:gtest",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "filesystem_catalog_test",
     timeout = "short",
     srcs = [
